@@ -1,0 +1,24 @@
+{
+	"name": "paperhanger-agent-host",
+	"version": "0.1.0",
+	"private": true,
+	"description": "Flue agent host (Node sidecar) for paperhanger's fix agent. See docs/architecture.md \"Flue agent host (Node sidecar)\" and docs/research/flue.md in the parent repo.",
+	"type": "module",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"scripts": {
+		"build": "flue build --target node",
+		"dev": "flue dev --target node",
+		"start": "node dist/server.mjs",
+		"smoke": "node scripts/smoke.mjs"
+	},
+	"dependencies": {
+		"@flue/runtime": "1.0.0-beta.9",
+		"hono": "^4.12.30",
+		"valibot": "^1.4.2"
+	},
+	"devDependencies": {
+		"@flue/cli": "1.0.0-beta.9"
+	}
+}

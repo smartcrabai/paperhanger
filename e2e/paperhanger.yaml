@@ -1,0 +1,80 @@
+# E2E compose configuration (docs/spec.md section 3.10). Mounted into the
+# `paperhanger` service at /app/paperhanger.yaml by compose.yml.
+#
+# This config deliberately exercises the NO-LLM path: `repos.mappings` is
+# empty and org search is disabled, so the repo resolver always returns
+# `null` for any alert, and every incident lands on `report_only` without
+# ever invoking the fix agent (see src/core/pipeline.ts). That makes the
+# stack usable for the smoke test (scripts/e2e-smoke.sh) and as a manual
+# playground without needing real GitHub App credentials or an Anthropic API
+# key. See README.md "Running the compose E2E" for how to opt into a real
+# fix-run instead.
+
+server:
+  port: 8080
+  # Fixed test-only token (not `${ENV_VAR}`-expanded like the other secrets
+  # here, since compose.yml doesn't pass a PAPERHANGER_API_TOKEN env var
+  # through to the container -- and this is a throwaway e2e fixture, not a
+  # real credential). scripts/e2e-smoke.sh sends this same value as an
+  # Authorization: Bearer header when polling GET /incidents. See README.md's
+  # config reference for why this is secure-by-default-unset in production.
+  apiToken: e2e-incidents-api-token
+
+storage:
+  driver: sqlite
+  path: /data/paperhanger.db
+
+sources:
+  grafana:
+    secret: ${GRAFANA_WEBHOOK_SECRET}
+  generic:
+    secret: ${GENERIC_WEBHOOK_SECRET}
+
+# Points at the `greptimedb` compose service. Telemetry collection runs for
+# real against it (an empty result set, since nothing seeds data into it in
+# the default stack) -- it just never ends up mattering for the outcome,
+# since repo resolution fails before the collected context would otherwise
+# be handed to the fix agent.
+telemetry:
+  source: greptimedb
+  url: http://greptimedb:4000
+  database: public
+
+collect:
+  windowBeforeMinutes: 30
+  windowAfterMinutes: 5
+
+# No attribute keys, no mappings, org search disabled: the resolver always
+# returns null, so every incident falls back to report_only (spec section
+# 3.5). This is what makes the default stack safe to run with placeholder
+# GitHub/Anthropic credentials.
+repos:
+  attributeKeys: []
+  mappings: []
+  orgSearch:
+    enabled: false
+
+agent:
+  model: anthropic/claude-sonnet-4-6
+  concurrency: 2
+  timeoutMinutes: 30
+  cooldownHours: 24
+  draftPr: false
+  forbiddenPaths:
+    - ".github/workflows/**"
+  maxDiffLines: 500
+  maxFixAttempts: 3
+  hostPort: 8700
+
+# Never actually exercised in the default (no-repo-match) path, but the
+# schema requires non-empty values. Set real ones via .env to try a genuine
+# fix-run (see README.md).
+github:
+  appId: ${GITHUB_APP_ID}
+  privateKey: ${GITHUB_APP_PRIVATE_KEY}
+
+# Generic webhook notifier pointing at the `webhook-sink` service, so the
+# notify path is observable end-to-end without a real Slack/Discord webhook.
+notifiers:
+  - type: webhook
+    url: http://webhook-sink:8080

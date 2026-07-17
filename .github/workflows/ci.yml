@@ -1,0 +1,48 @@
+name: PR Auto-merge
+
+on:
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        shell: bash
+        run: bun install
+
+      - name: Run tests
+        shell: bash
+        run: bun test
+
+      - name: Check format
+        shell: bash
+        run: bun run fmt
+
+      - name: Run lint
+        shell: bash
+        run: bun run lint
+
+
+  automerge:
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event.pull_request.user.login == 'renovate[bot]'
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: automerge
+        uses: pascalgn/automerge-action@v0.16.4
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MERGE_LABELS: "automerge"

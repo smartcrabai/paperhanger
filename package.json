@@ -1,0 +1,38 @@
+{
+	"name": "paperhanger",
+	"module": "src/index.ts",
+	"type": "module",
+	"scripts": {
+		"start": "bun run src/index.ts",
+		"dev": "bun --hot src/index.ts",
+		"test": "bun test src agent-host/src",
+		"test:integration": "bun test tests/integration",
+		"typecheck": "tsgo --noEmit -p tsconfig.json",
+		"fmt": "biome format .",
+		"fmt:fix": "biome format --write .",
+		"lint": "oxlint .",
+		"lint:fix": "oxlint --fix ."
+	},
+	"devDependencies": {
+		"@biomejs/biome": "2.5.4",
+		"@opentelemetry/api": "^1.9.1",
+		"@opentelemetry/api-logs": "^0.220.0",
+		"@opentelemetry/context-async-hooks": "^2.9.0",
+		"@opentelemetry/exporter-logs-otlp-proto": "^0.220.0",
+		"@opentelemetry/exporter-trace-otlp-proto": "^0.220.0",
+		"@opentelemetry/resources": "^2.9.0",
+		"@opentelemetry/sdk-logs": "^0.220.0",
+		"@opentelemetry/sdk-trace-base": "^2.9.0",
+		"@types/bun": "latest",
+		"oxlint": "1.74.0",
+		"testcontainers": "^12.0.4"
+	},
+	"peerDependencies": {
+		"typescript": "^5.0.0 || ^6.0.0 || ^7.0.0"
+	},
+	"dependencies": {
+		"@flue/sdk": "1.0.0-beta.9",
+		"@typescript/native-preview": "^7.0.0-dev.20260707.2",
+		"zod": "^4.4.3"
+	}
+}

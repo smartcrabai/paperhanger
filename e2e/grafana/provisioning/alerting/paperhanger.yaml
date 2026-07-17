@@ -1,0 +1,35 @@
+# Webhook contact point + notification policy routing every Grafana alert to
+# paperhanger's grafana webhook endpoint (docs/spec.md section 3.8, 3.10).
+#
+# The token in the URL below must match the `GRAFANA_WEBHOOK_SECRET` compose
+# default in compose.yml (see e2e/paperhanger.yaml's `sources.grafana.secret`).
+# Grafana provisioning files are not themselves `${ENV_VAR}`-expanded, so this
+# is a plain literal rather than a variable reference; if you override
+# GRAFANA_WEBHOOK_SECRET via .env, update this file to match too.
+#
+# NOTE (see README.md "Running the compose E2E"): this makes Grafana's own
+# alert-rule -> firing -> webhook path a real, working manual playground, but
+# `scripts/e2e-smoke.sh` drives the webhook directly with curl instead of
+# waiting on a real Grafana alert rule to fire, since that path's timing
+# depends on Grafana's own evaluation interval and is too slow/flaky for a
+# fast, deterministic smoke test.
+apiVersion: 1
+
+contactPoints:
+  - orgId: 1
+    name: paperhanger-webhook
+    receivers:
+      - uid: paperhanger-webhook-receiver
+        type: webhook
+        settings:
+          url: http://paperhanger:8080/webhooks/grafana?token=e2e-grafana-secret
+          httpMethod: POST
+        disableResolveMessage: false
+
+policies:
+  - orgId: 1
+    receiver: paperhanger-webhook
+    group_by: ["grafana_folder", "alertname"]
+    group_wait: 10s
+    group_interval: 1m
+    repeat_interval: 4h

@@ -1,0 +1,15 @@
+# Prometheus-type datasource pointing at GreptimeDB's Prometheus-compatible
+# HTTP API (docs/research/greptimedb.md section 7 / spec.md section 3.10).
+# GreptimeDB standalone ships with authentication disabled by default, so no
+# basicAuth/secureJsonData is needed for this local playground.
+apiVersion: 1
+
+datasources:
+  - name: GreptimeDB
+    type: prometheus
+    access: proxy
+    url: http://greptimedb:4000/v1/prometheus
+    isDefault: true
+    jsonData:
+      httpMethod: GET
+      timeInterval: 15s

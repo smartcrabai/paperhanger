@@ -1,0 +1,26 @@
+{
+	"hooks": {
+		"PostToolUse": [
+			{
+				"hooks": [
+					{
+						"command": "bun run fmt:fix && bun run lint:fix",
+						"type": "command"
+					}
+				],
+				"matcher": "Write|Edit|MultiEdit"
+			}
+		],
+		"SessionStart": [
+			{
+				"hooks": [
+					{
+						"command": "\"$CLAUDE_PROJECT_DIR\"/scripts/remote_session_start.sh",
+						"type": "command"
+					}
+				],
+				"matcher": "startup"
+			}
+		]
+	}
+}

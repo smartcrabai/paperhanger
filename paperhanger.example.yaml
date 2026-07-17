@@ -1,0 +1,91 @@
+# Example paperhanger configuration.
+#
+# Copy this file to paperhanger.yaml (or point PAPERHANGER_CONFIG at a copy)
+# and fill in the environment variables it references. Secrets are never
+# written inline here -- only as ${ENV_VAR} references, expanded at load
+# time. See docs/spec.md section 3.9 for the canonical schema.
+
+server:
+  port: 8080
+  # Required to read GET /incidents and GET /incidents/:id (Authorization:
+  # Bearer <token> or X-Api-Token: <token>). Secure by default: leaving this
+  # unset makes both endpoints refuse every request with 401, since incident
+  # records can carry sensitive diagnosis/failureReason text.
+  apiToken: ${PAPERHANGER_API_TOKEN}
+
+# Storage driver. Use "sqlite" for single-instance deployments (mount /data
+# as a volume), or "postgres" for replicated deployments (M6).
+storage:
+  driver: sqlite
+  path: /data/paperhanger.db
+# storage:
+#   driver: postgres
+#   url: ${DATABASE_URL}
+
+# One entry per webhook source. The map key is the {source} path segment in
+# POST /webhooks/{source}, and must match an implemented SourceAdapter name
+# (e.g. "grafana", "generic"; "alertmanager" arrives in M6).
+sources:
+  grafana:
+    secret: ${GRAFANA_WEBHOOK_SECRET}
+  generic:
+    secret: ${GENERIC_WEBHOOK_SECRET}
+
+# Discriminated union on `source` (like `storage`/`notifiers` above); "greptimedb"
+# is the only backend today. Omit the whole `telemetry` section to run without
+# one (see the config reference below).
+telemetry:
+  source: greptimedb
+  url: ${GREPTIMEDB_URL}
+  database: public
+  auth: ${GREPTIMEDB_AUTH}
+  # Optional overrides, only needed if your deployment renamed the
+  # OTLP-ingested tables or wants a non-default per-request HTTP timeout:
+  # logsTable: opentelemetry_logs
+  # tracesTable: opentelemetry_traces
+  # timeoutMs: 30000
+
+# Telemetry collection window, relative to the alert's startsAt time.
+collect:
+  windowBeforeMinutes: 30
+  windowAfterMinutes: 5
+
+# Repository resolution: attribute lookup -> mapping table -> org search.
+repos:
+  attributeKeys:
+    - service.repository
+    - repository
+  mappings:
+    - match: { service: my-api }
+      repo: my-org/my-api
+  orgSearch:
+    enabled: true
+    org: my-org
+
+agent:
+  model: anthropic/claude-sonnet-4-6
+  concurrency: 2
+  timeoutMinutes: 30
+  cooldownHours: 24
+  draftPr: false
+  forbiddenPaths:
+    - ".github/workflows/**"
+  # Guardrail: reject a fix whose diff (additions + deletions) exceeds this.
+  maxDiffLines: 500
+  # Guardrail: max fix attempts (initial + test-failure retries) per incident
+  # before the agent-host workflow gives up.
+  maxFixAttempts: 3
+  # Port the spawned agent-host (Flue) sidecar listens on. Ignored when
+  # hostUrl is set below.
+  hostPort: 8700
+  # Set to point at an externally deployed agent-host instead of spawning a
+  # local child process (see src/agent/sidecar.ts and agent-host/README.md).
+  # hostUrl: http://agent-host:8700
+
+github:
+  appId: ${GITHUB_APP_ID}
+  privateKey: ${GITHUB_APP_PRIVATE_KEY}
+
+notifiers:
+  - type: slack
+    webhookUrl: ${SLACK_WEBHOOK_URL}
