@@ -122,8 +122,10 @@ received → collecting → resolving_repo → diagnosing → fixing
 
 Every transition is persisted through `IncidentStore` *before* the next
 stage starts (see `src/core/pipeline.ts`), so a restart can always show
-where an incident stopped, even mid-run. In-flight incidents are not
-automatically resumed after a restart -- see "Current limitations" below.
+where an incident stopped, even mid-run. Every non-terminal incident is
+automatically re-queued and reprocessed on the next startup, before the
+server accepts webhooks (`IncidentManager.recoverOpenIncidents`) -- see
+"Current limitations" below for what that recovery does not do.
 
 ## Quickstart
 
@@ -186,7 +188,16 @@ Either way, once it's up:
 ```bash
 curl http://localhost:8080/healthz   # liveness
 curl http://localhost:8080/readyz    # DB connectivity
-curl http://localhost:8080/incidents # recent incidents, newest first
+```
+
+`GET /incidents` and `GET /incidents/:id` refuse every request with 401
+unless `server.apiToken` is set in `paperhanger.yaml` (see the
+[config reference](#config-reference) below) -- there is no unauthenticated
+fallback:
+
+```bash
+curl -H "Authorization: Bearer $PAPERHANGER_API_TOKEN" \
+  http://localhost:8080/incidents    # recent incidents, newest first
 ```
 
 ## Config reference
@@ -197,6 +208,7 @@ Every key from `paperhanger.example.yaml`, with its default when omitted
 | Key | Default | Notes |
 |---|---|---|
 | `server.port` | `8080` | |
+| `server.apiToken` | *(unset)* | Bearer token required by `GET /incidents` and `GET /incidents/:id` (`Authorization: Bearer <token>` or `X-Api-Token: <token>`). Secure by default: unset means those two endpoints refuse every request with 401 -- there is no unauthenticated fallback. `/healthz` and `/readyz` are never gated |
 | `storage.driver` | *(required)* | `sqlite` or `postgres` |
 | `storage.path` | *(required if `sqlite`)* | SQLite file path; mount `/data` as a volume |
 | `storage.url` | *(required if `postgres`)* | `Bun.sql` connection string |
@@ -294,7 +306,7 @@ GitHub App installation (`GITHUB_APP_ID` / `GITHUB_APP_PRIVATE_KEY`), a
 ## Development
 
 ```bash
-bun run test              # unit tests: src/**/*.test.ts, no Docker required
+bun run test              # unit tests: src/**/*.test.ts + agent-host/src/**/*.test.ts, no Docker required
 bun run test:integration   # tests/integration/**: testcontainers-backed (GreptimeDB, PostgreSQL) -- requires Docker
 bun run typecheck
 bun run lint
@@ -392,8 +404,12 @@ The agent-host (`agent-host/`) is a separate Node-only package with its own
 - **No auto-merge, ever, by design** (non-goal, spec section 1): every fix
   lands as a normal pull request for human review. paperhanger does not
   merge, deploy, or perform any infrastructure mitigation.
-- **In-flight incidents are not resumed after a restart**: the state
-  machine is crash-*observable* (every transition is persisted before the
-  next stage runs), not crash-*recoverable* -- an incident interrupted
-  mid-pipeline stays at whatever status it last reached until a human or a
-  fresh alert with the same fingerprint acts on it.
+- **Restart recovery re-runs the whole pipeline, not just the interrupted
+  stage**: on startup, every non-terminal incident is automatically
+  re-queued (`IncidentManager.recoverOpenIncidents`), but the pipeline
+  always restarts from the top (`diagnosis_started` -> `collecting` ->
+  `resolving_repo` -> agent run) rather than resuming from the stage it was
+  interrupted at -- so a crash during, say, `fixing` re-runs telemetry
+  collection and repo resolution too. A duplicate `diagnosis_started`
+  notification for an incident that was already mid-flight before the
+  crash is an accepted trade-off.

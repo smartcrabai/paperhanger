@@ -106,10 +106,10 @@ interface TelemetrySource {
 
 - GreptimeDB 実装: HTTP SQL API(logs/traces)+ PromQL 互換 API(metrics)
 - **収集戦略**(自動収集フェーズ):
-  1. アラートのラベルから `service.name` 等を特定し、時間窓内のエラーログを取得
-  2. エラーログに紐づく `trace_id` から代表トレースを取得
-  3. アラート対象メトリクスの前後推移を取得
-  4. スタックトレース・例外メッセージを抽出
+  1. アラートのラベルから `service.name` 等を特定し、時間窓内のエラーログを取得(特定できない場合は時間窓のみで件数を絞って取得)
+  2. エラーログに紐づく `trace_id` から代表トレースを取得。加えてサービスの代表的なスパンもサンプリング取得
+  3. **メトリクスはアラートの `annotations` に `promql` または `metric` キーがある場合のみ取得**。無ければ取得自体を行わず、その旨を notes に記録するのみ
+  4. 収集結果がトークン予算を超える場合、優先度の低いものから順に削減(メトリクス→トレース→非例外ログ→例外/スタックトレースを含むログ)。スタックトレース・例外メッセージらしさの判定は独立した抽出ステップではなく、この削減時の優先度判定にのみ使う
 - 収集結果はトークン予算内に収まるようサンプリング・要約して `IncidentContext` に整形
 - さらに **Flue の Tool としても公開**し、エージェントが診断中に追加クエリを発行できるようにする(将来: Loki/Tempo/Prometheus 実装を追加)
 
@@ -211,7 +211,7 @@ notifiers:
 ### 3.10 運用
 
 - 配布: 単一コンテナイメージ(既存 Dockerfile を拡張)。SQLite 利用時は `/data` を volume に
-- エンドポイント: `/healthz`(liveness)、`/readyz`(DB 接続確認)、`GET /incidents` / `GET /incidents/:id`(状態確認用。`server.apiToken` による Bearer/X-Api-Token 認証必須、未設定時は 401)
+- エンドポイント: `/healthz`(liveness)、`/readyz`(DB 接続確認)、`GET /incidents` / `GET /incidents/:id`(状態確認用。`server.apiToken` による Bearer/X-Api-Token 認証必須、未設定時は 401)。`GET /incidents` は `?limit=` クエリパラメータで件数を指定可能(デフォルト 100、上限 500)
 - ログ: 構造化 JSON。`observability` 設定時はアクティブな span の `traceId`/`spanId` をログ行に付与し相関可能にする
 - トレース: `observability` 設定時、paperhanger 自身のスパンを OTLP/HTTP でエクスポート(`@opentelemetry/sdk-trace-base` + `exporter-trace-otlp-proto`。§3.9 参照)。OTel **ログ** export(paperhanger 自身のログの OTLP 送信)は引き続き将来対応
 - ローカル開発: `compose.yml` で paperhanger + GreptimeDB + Grafana を起動し E2E 検証できるようにする

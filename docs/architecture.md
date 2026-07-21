@@ -46,12 +46,12 @@ src/
     adapters/
       types.ts             # SourceAdapter interface
       grafana.ts           # Grafana Alerting webhook payloads
-      alertmanager.ts      # Prometheus Alertmanager webhook payloads (M6)
+      alertmanager.ts      # Prometheus Alertmanager webhook payloads
       generic.ts           # Pass-through internal format
   storage/
     types.ts               # IncidentStore interface
     sqlite.ts              # bun:sqlite implementation
-    postgres.ts            # Bun.sql implementation (M6)
+    postgres.ts            # Bun.sql implementation
   telemetry/
     types.ts               # TelemetrySource, LogRecord, TraceRecord, MetricSeries
     greptimedb.ts          # HTTP SQL + PromQL-compatible API client
@@ -60,6 +60,8 @@ src/
     resolver.ts            # attribute → mapping → org-search resolution chain
     github.ts              # GitHub App auth (JWT → installation token), PR client
   agent/
+    contract.ts            # Zod mirror of the fix-incident workflow's input/output contract (agent-host/src/contract.ts is canonical)
+    forbidden-paths.ts     # Guardrail: matches a changed file against agent.forbiddenPaths glob patterns
     runner.ts              # Drives the agent host via @flue/sdk; guardrails, outcome classification
     sidecar.ts             # Spawns/supervises the Node agent-host child process (optional external URL)
   notify/
@@ -72,9 +74,14 @@ src/
     tracing.ts             # OTel tracer provider setup (traces-only self-instrumentation)
 agent-host/                # Flue app (Node.js sidecar) — separate package.json
   src/
-    fix-agent.ts           # defineAgent: diagnose → fix → test → push branch
-    tools.ts               # defineTool: telemetry follow-up queries, repo/PR helpers
-    workflow.ts            # defineWorkflow: bounded fix pipeline with outcome contract
+    app.ts                 # Custom Hono entrypoint: mounts Flue's routes + a /healthz route
+    contract.ts            # Valibot schemas for the fix-incident workflow's input/output (canonical; mirrored by src/agent/contract.ts)
+    fix-agent.ts           # defineAgent: model/instructions/sandbox/tools, bound to the fix-incident workflow
+    tools.ts               # defineTool: query_telemetry follow-up queries
+    telemetry-client.ts    # Minimal GreptimeDB HTTP client used by query_telemetry
+    lib/                   # fix-attempt-policy, output-sanitizer, redaction, sql-guard, tamper-check, test-detection
+    workflows/
+      fix-incident.ts      # defineWorkflow: clone → diagnose → fix → test → push branch (PR creation happens back in the parent Bun process)
 tests/
   integration/             # testcontainers-based suites
 docs/
@@ -100,8 +107,12 @@ Findings from `docs/research/flue.md` (verified against `@flue/*` `1.0.0-beta.9`
   (e.g. a separate K8s sidecar/deployment), in which case nothing is spawned.
 - Sandbox mode: `local()` inside the agent-host container (container boundary is the
   isolation). Remote providers (Daytona/E2B) can be added later via config.
-- PR creation is NOT Flue's job (`@flue/github` only verifies inbound webhooks); the agent
-  host calls back into our own GitHub client (M3) or shells out to git + GitHub REST.
+- PR creation is NOT Flue's job (`@flue/github` only verifies inbound webhooks). The agent
+  host (`agent-host/src/workflows/fix-incident.ts`) only shells out to git to clone, commit,
+  and push a branch; it never calls the GitHub REST API. The parent Bun process's
+  `src/agent/runner.ts` (`finalizeFixed`) re-verifies the pushed diff against the guardrails
+  via GitHub's compare API and then creates the PR itself through `GitHubAppClient`
+  (`src/repo/github.ts`).
 - Flue is pre-1.0 beta: pin exact versions and expect schema resets on upgrades. The agent
   host's durable-execution store uses the driver-agnostic `@flue/postgres` adapter so it
   can share paperhanger's PostgreSQL when configured, falling back to its default local

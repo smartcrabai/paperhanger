@@ -235,14 +235,24 @@ bundled `guide/sandboxes` doc), per-command env sanitization is not just
   the underlying `child_process.spawn()` call receives exactly this resolved
   env object, never a `{ ...process.env, ...overrides }` merge.
 - `src/fix-agent.ts` calls `local({ env: { GIT_TERMINAL_PROMPT: "0" } })` —
-  the only var explicitly added on top of the allowlist. `ANTHROPIC_API_KEY`,
-  `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `PAPERHANGER_TELEMETRY` (which may
-  carry a telemetry backend auth value), and `GITHUB_APP_PRIVATE_KEY` (this
-  process's own provider/telemetry credentials, per "Model" and
-  `src/tools.ts` above) are therefore **never** exposed to any model-facing
-  shell, by construction — not because of any code added here, but because
-  `local()` requires them to be explicitly opted in via `env`, and nothing in
-  this app does that.
+  the only var explicitly added on top of the allowlist. Every provider API
+  key env var the sidecar forwards to this process (`PROVIDER_API_KEY_ENV_VARS`
+  in the parent repo's `src/agent/sidecar.ts` — `AI_GATEWAY_API_KEY`,
+  `ANTHROPIC_API_KEY`, `ANTHROPIC_OAUTH_TOKEN`, `CEREBRAS_API_KEY`,
+  `DEEPSEEK_API_KEY`, `FIREWORKS_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`,
+  `HF_TOKEN`, `KIMI_API_KEY`, `MINIMAX_API_KEY`, `MISTRAL_API_KEY`,
+  `MOONSHOT_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`,
+  `TOGETHER_API_KEY`, `XAI_API_KEY`, `ZAI_API_KEY`), plus
+  `PAPERHANGER_TELEMETRY` (which may carry a telemetry backend auth value),
+  are therefore **never** exposed to any model-facing shell, by construction
+  — not because of any code added here, but because `local()` requires them
+  to be explicitly opted in via `env`, and nothing in this app does that.
+  `GITHUB_APP_PRIVATE_KEY` is a different case, not an example of the same
+  allowlist protection: the sidecar's `buildSpawnEnv` never forwards it to
+  this process at all (it's in neither `PASSTHROUGH_ENV_VARS` nor
+  `PROVIDER_API_KEY_ENV_VARS`), so it's absent from this process's
+  environment entirely, not merely kept off model-facing shells by the
+  allowlist.
 - Per-call `ShellOptions.env` (available to both `harness.shell()` and
   `session.shell()`) layers further on top of that same base for one
   command, which is what this workflow's own out-of-band git commands use
@@ -301,9 +311,14 @@ the same `1.0.0-beta.9` as the other `@flue/*` packages here.
 
 `FLUE_MODEL` env var (default `anthropic/claude-sonnet-4-6`, matching
 `docs/spec.md` section 3.6), set by the parent repo's sidecar from
-`config.agent.model`. Provider credentials (`ANTHROPIC_API_KEY`,
-`OPENAI_API_KEY`, `OPENROUTER_API_KEY`) are passed through from the sidecar's
-own process environment.
+`config.agent.model`. Provider credentials for every supported model prefix
+(`anthropic/`, `openai/`, `openrouter/`, `google/`, `deepseek/`, `xai/`,
+`groq/`, `mistral/`, `zai/`, `minimax/`, `fireworks/`, `together/`,
+`cerebras/`, `huggingface/`, `kimi-coding/`, `moonshotai/`,
+`vercel-ai-gateway/`) are passed through from the sidecar's own process
+environment — see `PROVIDER_API_KEY_ENV_VARS` in the parent repo's
+`src/agent/sidecar.ts` (or the root README's "Provider API keys" row) for the
+full env-var-to-prefix mapping.
 
 ## Building and running
 

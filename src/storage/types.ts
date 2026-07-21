@@ -1,6 +1,7 @@
 /**
- * Storage abstraction. Two implementations are planned: `sqlite.ts` (this
- * milestone) and `postgres.ts` (M6). See docs/spec.md section 3.3.
+ * Storage abstraction. Two implementations are provided: `sqlite.ts`
+ * (single-instance deployments) and `postgres.ts` (replicated deployments).
+ * See docs/spec.md section 3.3.
  */
 
 import type {
