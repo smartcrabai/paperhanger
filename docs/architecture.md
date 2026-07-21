@@ -21,7 +21,11 @@ the module layout and coding rules that all contributions must follow.
   reflect failures in incident state.
 - **Dependency injection**: components receive their dependencies (interfaces) via
   constructor/factory parameters. No module-level singletons; `src/index.ts` is the only
-  composition root.
+  composition root. The one accepted exception is OTel's global context manager
+  (`src/observability/tracing.ts`): context propagation across `await` boundaries has no
+  non-global mechanism in `@opentelemetry/api`, so `createTracing()` registers it once via
+  `context.setGlobalContextManager(...)` instead of threading it through constructors; every
+  `Tracer` itself still reaches components only as an injected optional dependency.
 - **Config**: validated at startup; the process exits non-zero with a readable error on
   invalid config. Secrets only via `${ENV_VAR}` expansion, never inline.
 
@@ -65,6 +69,7 @@ src/
     webhook.ts             # Generic JSON POST
   observability/
     logger.ts              # Structured JSON line logger
+    tracing.ts             # OTel tracer provider setup (traces-only self-instrumentation)
 agent-host/                # Flue app (Node.js sidecar) — separate package.json
   src/
     fix-agent.ts           # defineAgent: diagnose → fix → test → push branch

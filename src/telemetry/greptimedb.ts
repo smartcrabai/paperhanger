@@ -8,6 +8,8 @@
  * integration-test suite seeds data separately via the official OTel SDKs).
  */
 
+import type { Attributes, Span, Tracer } from "@opentelemetry/api";
+import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
 import type { Logger } from "../observability/logger";
 import {
 	type LogRecord,
@@ -18,6 +20,15 @@ import {
 	type TelemetrySource,
 	type TraceRecord,
 } from "./types";
+
+/**
+ * Tracer component name, matching the `logger.child({ component: ... })`
+ * convention used at this client's composition-root call site (see
+ * `src/index.ts`). Used as the fallback tracer name when no `Tracer` is
+ * injected (disabled tracing -> `trace.getTracer()` returns a no-op tracer
+ * backed by no global provider).
+ */
+const TRACER_NAME = "telemetry-greptimedb";
 
 export const DEFAULT_LOGS_TABLE = "opentelemetry_logs";
 export const DEFAULT_TRACES_TABLE = "opentelemetry_traces";
@@ -94,30 +105,38 @@ export class GreptimeDbError extends Error {
 	}
 }
 
+// NOTE ON ERROR MESSAGES: none of these validators embed the raw offending
+// value. Trace IDs and attribute keys here are upstream-tainted (extracted
+// from stored log rows / alert labels), and these Errors can end up recorded
+// verbatim onto an exported span (see `withQuerySpan`'s catch branch for
+// non-`GreptimeDbError` exceptions). Describing the problem with only a
+// length or a fixed reason keeps the thrown Error type unchanged while
+// avoiding an exfiltration path for the raw value via span export.
+
 function validateIdentifier(name: string): string {
 	if (!IDENTIFIER_PATTERN.test(name)) {
-		throw new Error(`Invalid SQL identifier: ${JSON.stringify(name)}`);
+		throw new Error(`Invalid SQL identifier (length=${name.length})`);
 	}
 	return name;
 }
 
 function validateAttributeKey(key: string): string {
 	if (!ATTRIBUTE_KEY_PATTERN.test(key)) {
-		throw new Error(`Invalid attribute/label key: ${JSON.stringify(key)}`);
+		throw new Error(`Invalid attribute/label key (length=${key.length})`);
 	}
 	return key;
 }
 
 function validateTraceId(id: string): string {
 	if (!TRACE_ID_PATTERN.test(id)) {
-		throw new Error(`Invalid trace id: ${JSON.stringify(id)}`);
+		throw new Error(`Invalid trace id (length=${id.length})`);
 	}
 	return id;
 }
 
 function validateLimit(limit: number): number {
 	if (!Number.isInteger(limit) || limit <= 0) {
-		throw new Error(`Invalid limit: ${limit}`);
+		throw new Error("Invalid limit: must be a positive integer");
 	}
 	return limit;
 }
@@ -358,11 +377,13 @@ export class GreptimeDbSource implements TelemetrySource {
 	private readonly fetchImpl: typeof fetch;
 	private readonly logger: Logger;
 	private readonly timeoutMs: number;
+	private readonly tracer: Tracer;
 
 	constructor(
 		config: GreptimeDbSourceConfig,
 		logger: Logger,
 		fetchImpl: typeof fetch = globalThis.fetch,
+		tracer?: Tracer,
 	) {
 		this.url = config.url.replace(/\/+$/, "");
 		this.database = config.database;
@@ -374,6 +395,73 @@ export class GreptimeDbSource implements TelemetrySource {
 		this.fetchImpl = fetchImpl;
 		this.logger = logger;
 		this.timeoutMs = config.timeoutMs ?? DEFAULT_GREPTIMEDB_TIMEOUT_MS;
+		// Falls back to a global no-op tracer (no global provider registered)
+		// when tracing is disabled, keeping every existing call site working.
+		this.tracer = tracer ?? trace.getTracer(TRACER_NAME);
+	}
+
+	/**
+	 * Wraps a public query method's body in a CLIENT span (see docs/design's
+	 * OTel span taxonomy for this client): starts the span with the common
+	 * `db.system.name`/`paperhanger.query.kind` attributes plus any
+	 * method-specific ones, makes it the active span for the duration of
+	 * `fn` (so logger calls made inside `fn`, e.g. the no-PromQL
+	 * `logger.warn` in `queryMetrics`, correlate to this span), and on
+	 * failure sets an ERROR status before rethrowing unchanged. `span.end()`
+	 * always runs.
+	 *
+	 * REDACTION: `GreptimeDbError.message` echoes GreptimeDB's raw response
+	 * body, which can contain the original SQL/PromQL text (upstream
+	 * controlled) -- never pass it to `recordException` or into the span
+	 * status message. Instead set a redacted status message carrying only
+	 * the numeric error code, plus `paperhanger.greptimedb.error_code` and
+	 * (when present) `http.response.status_code`. Non-`GreptimeDbError`
+	 * exceptions originate locally (e.g. a validation `Error` thrown by this
+	 * file) and are recorded as-is via `recordException`.
+	 */
+	private async withQuerySpan<T>(
+		spanName: string,
+		kind: "logs" | "traces" | "metrics",
+		attributes: Attributes,
+		fn: (span: Span) => Promise<T>,
+	): Promise<T> {
+		const span = this.tracer.startSpan(spanName, {
+			kind: SpanKind.CLIENT,
+			attributes: {
+				"db.system.name": "greptimedb",
+				"paperhanger.query.kind": kind,
+				...attributes,
+			},
+		});
+		try {
+			// Activate the span so anything awaited inside `fn` (including
+			// logger calls, e.g. the no-PromQL logger.warn in queryMetrics)
+			// correlates to this CLIENT span rather than to whatever context
+			// (if any) happened to be active when withQuerySpan was called.
+			return await context.with(trace.setSpan(context.active(), span), () =>
+				fn(span),
+			);
+		} catch (err) {
+			if (err instanceof GreptimeDbError) {
+				if (err.httpStatus > 0) {
+					span.setAttribute("http.response.status_code", err.httpStatus);
+				}
+				span.setAttribute("paperhanger.greptimedb.error_code", err.code);
+				span.setStatus({
+					code: SpanStatusCode.ERROR,
+					message: `GreptimeDB query failed (code=${err.code})`,
+				});
+			} else {
+				span.recordException(err as Error);
+				span.setStatus({
+					code: SpanStatusCode.ERROR,
+					message: err instanceof Error ? err.message : String(err),
+				});
+			}
+			throw err;
+		} finally {
+			span.end();
+		}
 	}
 
 	/**
@@ -411,127 +499,155 @@ export class GreptimeDbSource implements TelemetrySource {
 	}
 
 	async queryLogs(query: TelemetryQuery): Promise<LogRecord[]> {
-		const conditions: string[] = [
-			`timestamp >= ${sqlLiteral(isoToSqlTimestamp(query.timeRange.from))}`,
-			`timestamp <= ${sqlLiteral(isoToSqlTimestamp(query.timeRange.to))}`,
-		];
+		return this.withQuerySpan(
+			"greptimedb.query_logs",
+			"logs",
+			{ "db.collection.name": this.logsTable },
+			async () => {
+				const conditions: string[] = [
+					`timestamp >= ${sqlLiteral(isoToSqlTimestamp(query.timeRange.from))}`,
+					`timestamp <= ${sqlLiteral(isoToSqlTimestamp(query.timeRange.to))}`,
+				];
 
-		for (const [key, value] of Object.entries(query.labels)) {
-			if ((SERVICE_LABEL_ALIASES as readonly string[]).includes(key)) {
-				conditions.push(
-					`json_get_string(resource_attributes, ${sqlLiteral(jsonPathFor(SERVICE_ATTRIBUTE_JSON_KEY))}) = ${sqlLiteral(value)}`,
-				);
-				continue;
-			}
-			if (key === "severity") {
-				if (value.toLowerCase() === "error") {
-					conditions.push(`severity_number >= ${ERROR_SEVERITY_NUMBER}`);
-				} else {
-					conditions.push(`severity_text = ${sqlLiteral(value)}`);
+				for (const [key, value] of Object.entries(query.labels)) {
+					if ((SERVICE_LABEL_ALIASES as readonly string[]).includes(key)) {
+						conditions.push(
+							`json_get_string(resource_attributes, ${sqlLiteral(jsonPathFor(SERVICE_ATTRIBUTE_JSON_KEY))}) = ${sqlLiteral(value)}`,
+						);
+						continue;
+					}
+					if (key === "severity") {
+						if (value.toLowerCase() === "error") {
+							conditions.push(`severity_number >= ${ERROR_SEVERITY_NUMBER}`);
+						} else {
+							conditions.push(`severity_text = ${sqlLiteral(value)}`);
+						}
+						continue;
+					}
+					const attributeKey = validateAttributeKey(key);
+					conditions.push(
+						`json_get_string(resource_attributes, ${sqlLiteral(jsonPathFor(attributeKey))}) = ${sqlLiteral(value)}`,
+					);
 				}
-				continue;
-			}
-			const attributeKey = validateAttributeKey(key);
-			conditions.push(
-				`json_get_string(resource_attributes, ${sqlLiteral(jsonPathFor(attributeKey))}) = ${sqlLiteral(value)}`,
-			);
-		}
 
-		const limit = validateLimit(query.limit ?? DEFAULT_LOG_LIMIT);
-		const sql = `SELECT ${LOG_COLUMNS.join(", ")} FROM ${this.logsTable} WHERE ${conditions.join(" AND ")} ORDER BY timestamp DESC LIMIT ${limit}`;
-		const rows = await this.runSql(sql);
-		return rows.map(rowToLogRecord);
+				const limit = validateLimit(query.limit ?? DEFAULT_LOG_LIMIT);
+				const sql = `SELECT ${LOG_COLUMNS.join(", ")} FROM ${this.logsTable} WHERE ${conditions.join(" AND ")} ORDER BY timestamp DESC LIMIT ${limit}`;
+				const rows = await this.runSql(sql);
+				return rows.map(rowToLogRecord);
+			},
+		);
 	}
 
 	async queryTraces(query: TelemetryQuery): Promise<TraceRecord[]> {
-		const limit = validateLimit(query.limit ?? DEFAULT_TRACE_LIMIT);
-		const columns = TRACE_COLUMNS.join(", ");
+		const strategy = query.labels.trace_id ? "trace_ids" : "representative";
+		return this.withQuerySpan(
+			"greptimedb.query_traces",
+			"traces",
+			{
+				"db.collection.name": this.tracesTable,
+				"paperhanger.query.strategy": strategy,
+			},
+			async () => {
+				const limit = validateLimit(query.limit ?? DEFAULT_TRACE_LIMIT);
+				const columns = TRACE_COLUMNS.join(", ");
 
-		const traceIdsRaw = query.labels.trace_id;
-		if (traceIdsRaw) {
-			const traceIds = traceIdsRaw
-				.split(",")
-				.map((id) => id.trim())
-				.filter((id) => id.length > 0)
-				.map(validateTraceId);
-			if (traceIds.length === 0) {
-				return [];
-			}
-			const idList = traceIds.map(sqlLiteral).join(", ");
-			const sql = `SELECT ${columns} FROM ${this.tracesTable} WHERE trace_id IN (${idList}) ORDER BY timestamp ASC LIMIT ${limit}`;
-			const rows = await this.runSql(sql);
-			return rows.map(rowToTraceRecord);
-		}
+				const traceIdsRaw = query.labels.trace_id;
+				if (traceIdsRaw) {
+					const traceIds = traceIdsRaw
+						.split(",")
+						.map((id) => id.trim())
+						.filter((id) => id.length > 0)
+						.map(validateTraceId);
+					if (traceIds.length === 0) {
+						return [];
+					}
+					const idList = traceIds.map(sqlLiteral).join(", ");
+					const sql = `SELECT ${columns} FROM ${this.tracesTable} WHERE trace_id IN (${idList}) ORDER BY timestamp ASC LIMIT ${limit}`;
+					const rows = await this.runSql(sql);
+					return rows.map(rowToTraceRecord);
+				}
 
-		// "Representative spans for a service/window": error spans first,
-		// then slowest, matching docs/research/greptimedb.md section 5(c).
-		const conditions: string[] = [
-			`timestamp >= ${sqlLiteral(isoToSqlTimestamp(query.timeRange.from))}`,
-			`timestamp <= ${sqlLiteral(isoToSqlTimestamp(query.timeRange.to))}`,
-		];
-		const serviceValue = resolveServiceLabel(query.labels);
-		if (serviceValue) {
-			conditions.push(`service_name = ${sqlLiteral(serviceValue)}`);
-		}
-		conditions.push(
-			`(span_status_code = 'STATUS_CODE_ERROR' OR duration_nano > ${SLOW_SPAN_THRESHOLD_NANO})`,
+				// "Representative spans for a service/window": error spans first,
+				// then slowest, matching docs/research/greptimedb.md section 5(c).
+				const conditions: string[] = [
+					`timestamp >= ${sqlLiteral(isoToSqlTimestamp(query.timeRange.from))}`,
+					`timestamp <= ${sqlLiteral(isoToSqlTimestamp(query.timeRange.to))}`,
+				];
+				const serviceValue = resolveServiceLabel(query.labels);
+				if (serviceValue) {
+					conditions.push(`service_name = ${sqlLiteral(serviceValue)}`);
+				}
+				conditions.push(
+					`(span_status_code = 'STATUS_CODE_ERROR' OR duration_nano > ${SLOW_SPAN_THRESHOLD_NANO})`,
+				);
+				const orderBy =
+					"CASE WHEN span_status_code = 'STATUS_CODE_ERROR' THEN 0 ELSE 1 END, duration_nano DESC";
+
+				const sql = `SELECT ${columns} FROM ${this.tracesTable} WHERE ${conditions.join(" AND ")} ORDER BY ${orderBy} LIMIT ${limit}`;
+				const rows = await this.runSql(sql);
+				return rows.map(rowToTraceRecord);
+			},
 		);
-		const orderBy =
-			"CASE WHEN span_status_code = 'STATUS_CODE_ERROR' THEN 0 ELSE 1 END, duration_nano DESC";
-
-		const sql = `SELECT ${columns} FROM ${this.tracesTable} WHERE ${conditions.join(" AND ")} ORDER BY ${orderBy} LIMIT ${limit}`;
-		const rows = await this.runSql(sql);
-		return rows.map(rowToTraceRecord);
 	}
 
 	async queryMetrics(
 		query: TelemetryQuery & { promql?: string },
 	): Promise<MetricSeries[]> {
-		if (!query.promql) {
-			this.logger.warn(
-				"queryMetrics called without a PromQL expression; returning no series",
-			);
-			return [];
-		}
+		return this.withQuerySpan(
+			"greptimedb.query_metrics",
+			"metrics",
+			{},
+			async (span) => {
+				if (!query.promql) {
+					span.setAttribute("paperhanger.query.skipped", true);
+					this.logger.warn(
+						"queryMetrics called without a PromQL expression; returning no series",
+					);
+					return [];
+				}
 
-		const fromSec = Math.floor(new Date(query.timeRange.from).getTime() / 1000);
-		const toSec = Math.floor(new Date(query.timeRange.to).getTime() / 1000);
-		if (!Number.isFinite(fromSec) || !Number.isFinite(toSec)) {
-			throw new Error(
-				`Invalid time range for metrics query: ${query.timeRange.from} .. ${query.timeRange.to}`,
-			);
-		}
+				const fromSec = Math.floor(
+					new Date(query.timeRange.from).getTime() / 1000,
+				);
+				const toSec = Math.floor(new Date(query.timeRange.to).getTime() / 1000);
+				if (!Number.isFinite(fromSec) || !Number.isFinite(toSec)) {
+					throw new Error(
+						`Invalid time range for metrics query: ${query.timeRange.from} .. ${query.timeRange.to}`,
+					);
+				}
 
-		const step = computeStepSeconds(fromSec, toSec);
-		const params = new URLSearchParams({
-			query: query.promql,
-			start: String(fromSec),
-			end: String(toSec),
-			step: `${step}s`,
-			db: this.database,
-		});
+				const step = computeStepSeconds(fromSec, toSec);
+				const params = new URLSearchParams({
+					query: query.promql,
+					start: String(fromSec),
+					end: String(toSec),
+					step: `${step}s`,
+					db: this.database,
+				});
 
-		const headers: Record<string, string> = {};
-		if (this.authHeader) {
-			headers.Authorization = this.authHeader;
-		}
+				const headers: Record<string, string> = {};
+				if (this.authHeader) {
+					headers.Authorization = this.authHeader;
+				}
 
-		const response = await this.fetchWithTimeout(
-			`${this.url}/v1/prometheus/api/v1/query_range?${params.toString()}`,
-			{ method: "GET", headers },
+				const response = await this.fetchWithTimeout(
+					`${this.url}/v1/prometheus/api/v1/query_range?${params.toString()}`,
+					{ method: "GET", headers },
+				);
+				const text = await response.text();
+				const json = parseJsonResponseBody(text, response.status);
+				const parsed = json as PromQueryRangeResponse;
+				if (!response.ok || parsed.status !== "success") {
+					throw new GreptimeDbError(
+						parsed.error ??
+							`PromQL range query failed with HTTP status ${response.status}`,
+						-1,
+						response.status,
+					);
+				}
+				return parsePrometheusResponse(parsed);
+			},
 		);
-		const text = await response.text();
-		const json = parseJsonResponseBody(text, response.status);
-		const parsed = json as PromQueryRangeResponse;
-		if (!response.ok || parsed.status !== "success") {
-			throw new GreptimeDbError(
-				parsed.error ??
-					`PromQL range query failed with HTTP status ${response.status}`,
-				-1,
-				response.status,
-			);
-		}
-		return parsePrometheusResponse(parsed);
 	}
 
 	private async runSql(sql: string): Promise<Record<string, unknown>[]> {

@@ -1,5 +1,12 @@
-import type { createFlueClient } from "@flue/sdk";
 import { describe, expect, test } from "bun:test";
+import type { createFlueClient } from "@flue/sdk";
+import { context, SpanKind, SpanStatusCode } from "@opentelemetry/api";
+import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
+import {
+	BasicTracerProvider,
+	InMemorySpanExporter,
+	SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
 import type { Incident, IncidentEvent } from "../core/types";
 import { createLogger } from "../observability/logger";
 import type {
@@ -13,12 +20,27 @@ import type { IncidentContext } from "../telemetry/types";
 import {
 	type FixAgentFlueClient,
 	type FixAgentGitHubClient,
-	type FixAgentRunnerConfig,
 	FixAgentRunner,
+	type FixAgentRunnerConfig,
 } from "./runner";
+
+// Registered once at module scope so the span activated by `context.with(...)`
+// inside `invokeWorkflow` stays active across `await`s (design doc section
+// 10) -- needed for the log/trace correlation test below. A second
+// registration in the same bun process would return `false` and keep this
+// one -- harmless, since it's the same manager class; no other file in
+// `bun test src/agent` registers a context manager.
+context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
 
 function silentLogger() {
 	return createLogger({ sink: () => {} });
+}
+
+/** A logger whose sink captures each emitted JSON line for correlation assertions. */
+function capturingLogger() {
+	const lines: string[] = [];
+	const logger = createLogger({ sink: (line) => lines.push(line) });
+	return { logger, lines };
 }
 
 async function createStoreWithIncident(): Promise<{
@@ -768,6 +790,186 @@ describe("FixAgentRunner - flue client provider", () => {
 			{ baseUrl: "http://agent-host.internal:9000" },
 		]);
 		expect(flue.invokeCalls.length).toBe(1);
+
+		await store.close();
+	});
+});
+
+describe("FixAgentRunner - agent.invoke_workflow span", () => {
+	function testTracerProvider() {
+		const exporter = new InMemorySpanExporter();
+		const provider = new BasicTracerProvider({
+			spanProcessors: [new SimpleSpanProcessor(exporter)],
+		});
+		return { tracer: provider.getTracer("test"), exporter };
+	}
+
+	test("records a CLIENT span with incident/timeout attributes and no ERROR status on a successful invocation", async () => {
+		const { store, incident } = await createStoreWithIncident();
+		const context = makeContext(incident, makeAlert());
+		const github = createFakeGithub();
+		const flue = createFakeFlue({
+			outcome: "report_only",
+			diagnosis: "d",
+			report: "r",
+		});
+		const { tracer, exporter } = testTracerProvider();
+		const runner = new FixAgentRunner({
+			flue: flue.client,
+			github: github.client,
+			store,
+			config: makeConfig({ timeoutMinutes: 30 }),
+			logger: silentLogger(),
+			tracer,
+		});
+
+		const result = await runner.run(incident, context, testRepo);
+		expect(result.status).toBe("report_only");
+
+		const spans = exporter
+			.getFinishedSpans()
+			.filter((s) => s.name === "agent.invoke_workflow");
+		expect(spans.length).toBe(1);
+		const span = spans[0];
+		expect(span?.kind).toBe(SpanKind.CLIENT);
+		expect(span?.attributes["paperhanger.incident.id"]).toBe(incident.id);
+		expect(span?.attributes["paperhanger.agent.timeout_minutes"]).toBe(30);
+		expect(span?.status.code).not.toBe(SpanStatusCode.ERROR);
+		expect(span?.attributes["paperhanger.agent.ok"]).toBeUndefined();
+
+		await store.close();
+	});
+
+	test("sets ERROR status from the RESOLVED value (not a thrown exception) with failureReason as the message when the workflow wait times out", async () => {
+		const { store, incident } = await createStoreWithIncident();
+		const context = makeContext(incident, makeAlert());
+		const github = createFakeGithub();
+		const flue = createHangingFlue();
+		const { tracer, exporter } = testTracerProvider();
+		const runner = new FixAgentRunner({
+			flue,
+			github: github.client,
+			store,
+			// 0.0005 minutes = 30ms; keeps the test fast.
+			config: makeConfig({ timeoutMinutes: 0.0005 }),
+			logger: silentLogger(),
+			tracer,
+		});
+
+		const result = await runner.run(incident, context, testRepo);
+		expect(result.status).toBe("failed");
+
+		const spans = exporter
+			.getFinishedSpans()
+			.filter((s) => s.name === "agent.invoke_workflow");
+		expect(spans.length).toBe(1);
+		const span = spans[0];
+		expect(span?.status.code).toBe(SpanStatusCode.ERROR);
+		expect(span?.attributes["paperhanger.agent.ok"]).toBe(false);
+		if (result.status !== "failed") {
+			throw new Error("expected failed");
+		}
+		expect(span?.status.message).toBe(result.failureReason);
+		// invokeWorkflow never throws: no exception event should be recorded,
+		// only a status set from the resolved { ok: false } value.
+		expect(span?.events.some((e) => e.name === "exception")).toBe(false);
+
+		await store.close();
+	});
+
+	test("the fix_agent.workflow_wait_timed_out warn log correlates (traceId/spanId) with the finished agent.invoke_workflow span", async () => {
+		const { store, incident } = await createStoreWithIncident();
+		const incidentContext = makeContext(incident, makeAlert());
+		const github = createFakeGithub();
+		const flue = createHangingFlue();
+		const { tracer, exporter } = testTracerProvider();
+		const { logger, lines } = capturingLogger();
+		const runner = new FixAgentRunner({
+			flue,
+			github: github.client,
+			store,
+			// 0.0005 minutes = 30ms; keeps the test fast.
+			config: makeConfig({ timeoutMinutes: 0.0005 }),
+			logger,
+			tracer,
+		});
+
+		const result = await runner.run(incident, incidentContext, testRepo);
+		expect(result.status).toBe("failed");
+
+		const spans = exporter
+			.getFinishedSpans()
+			.filter((s) => s.name === "agent.invoke_workflow");
+		expect(spans.length).toBe(1);
+		const span = spans[0];
+		const spanContext = span?.spanContext();
+
+		const entries = lines.map(
+			(line) => JSON.parse(line) as Record<string, unknown>,
+		);
+		const warnEntry = entries.find(
+			(entry) => entry.msg === "fix_agent.workflow_wait_timed_out",
+		);
+		expect(warnEntry).toBeDefined();
+		expect(warnEntry?.traceId).toBe(spanContext?.traceId);
+		expect(warnEntry?.spanId).toBe(spanContext?.spanId);
+
+		await store.close();
+	});
+
+	test("a throwing client factory resolves { ok: false, failureReason } (never-throw contract) and the span gets ERROR status instead of ending UNSET", async () => {
+		const { store, incident } = await createStoreWithIncident();
+		const context = makeContext(incident, makeAlert());
+		const github = createFakeGithub();
+		const { tracer, exporter } = testTracerProvider();
+		const throwingCreateFlueClient: typeof createFlueClient = (() => {
+			throw new Error("Invalid URL: 127.0.0.1:8700");
+		}) as typeof createFlueClient;
+		const runner = new FixAgentRunner({
+			flue: { baseUrl: "127.0.0.1:8700" },
+			github: github.client,
+			store,
+			config: makeConfig(),
+			logger: silentLogger(),
+			tracer,
+			createFlueClient: throwingCreateFlueClient,
+		});
+
+		const result = await runner.run(incident, context, testRepo);
+
+		expect(result.status).toBe("failed");
+		if (result.status !== "failed") {
+			throw new Error("expected failed");
+		}
+		expect(result.failureReason).toContain("Invalid URL: 127.0.0.1:8700");
+
+		const spans = exporter
+			.getFinishedSpans()
+			.filter((s) => s.name === "agent.invoke_workflow");
+		expect(spans.length).toBe(1);
+		const span = spans[0];
+		expect(span?.status.code).toBe(SpanStatusCode.ERROR);
+		expect(span?.status.message).toBe(result.failureReason);
+		expect(span?.attributes["paperhanger.agent.ok"]).toBe(false);
+
+		await store.close();
+	});
+
+	test("falls back to a working no-op tracer when none is injected", async () => {
+		const { store, incident } = await createStoreWithIncident();
+		const context = makeContext(incident, makeAlert());
+		const github = createFakeGithub();
+		const flue = createFakeFlue(FIXED_OUTPUT_BASE);
+		const runner = new FixAgentRunner({
+			flue: flue.client,
+			github: github.client,
+			store,
+			config: makeConfig(),
+			logger: silentLogger(),
+		});
+
+		const result = await runner.run(incident, context, testRepo);
+		expect(result.status).toBe("pr_created");
 
 		await store.close();
 	});

@@ -1,10 +1,26 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import type { Tracer } from "@opentelemetry/api";
+import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
+import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
+import {
+	BasicTracerProvider,
+	InMemorySpanExporter,
+	SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
 import type { IncidentManager } from "../core/incident-manager";
 import type { Incident, IncidentEvent } from "../core/types";
 import { createLogger } from "../observability/logger";
+import type { Logger } from "../observability/logger";
 import type { IncidentStore } from "../storage/types";
 import type { SourceAdapter } from "./adapters/types";
 import { createServer, parseListLimit } from "./server";
+
+// Registered once at module scope so context propagates across `await`s for
+// every test in this file (design doc section 10). A second registration in
+// the same bun process would return `false` and keep this one -- harmless,
+// since it's the same manager class; no other file in `bun test src/ingest`
+// registers a context manager.
+context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
 
 const SECRET = "s3cr3t";
 const API_TOKEN = "incidents-api-token";
@@ -103,6 +119,9 @@ describe("ingest server", () => {
 		/** Omit `server.apiToken` entirely, to exercise the secure-by-default 401. */
 		noApiToken?: boolean;
 		store?: IncidentsStoreSlice;
+		tracer?: Tracer;
+		manager?: IncidentManager;
+		logger?: Logger;
 	}) {
 		receivedEvents = [];
 		server = createServer({
@@ -113,12 +132,15 @@ describe("ingest server", () => {
 				},
 				sources: { "test-source": { secret: SECRET } },
 			},
-			logger: createLogger({ sink: () => {} }),
-			manager: fakeManager(options?.onEvent ?? ((e) => receivedEvents.push(e))),
+			logger: options?.logger ?? createLogger({ sink: () => {} }),
+			manager:
+				options?.manager ??
+				fakeManager(options?.onEvent ?? ((e) => receivedEvents.push(e))),
 			adapters: { "test-source": testAdapter },
 			store:
 				options?.store ??
 				fakeStore(options?.ready ?? true, options?.incidents ?? []),
+			tracer: options?.tracer,
 		});
 		baseUrl = `http://localhost:${server.port}`;
 	}
@@ -413,6 +435,345 @@ describe("ingest server", () => {
 				expect(res.status).toBe(200);
 			}
 			expect(receivedLimits).toEqual([100, 100, 100]);
+		});
+	});
+
+	describe("tracing (design doc section 5/6, hermetic pattern from section 10)", () => {
+		let exporter: InMemorySpanExporter;
+		let provider: BasicTracerProvider;
+
+		beforeEach(() => {
+			exporter = new InMemorySpanExporter();
+			provider = new BasicTracerProvider({
+				spanProcessors: [new SimpleSpanProcessor(exporter)],
+			});
+		});
+
+		afterEach(async () => {
+			await provider.shutdown();
+		});
+
+		test("creates a SERVER span named '{METHOD} {route template}' with core HTTP attributes", async () => {
+			server.stop(true);
+			startServer({ tracer: provider.getTracer("test") });
+
+			const res = await fetch(`${baseUrl}/healthz`);
+			expect(res.status).toBe(200);
+
+			const spans = exporter.getFinishedSpans();
+			expect(spans.length).toBe(1);
+			const span = spans[0];
+			expect(span?.name).toBe("GET /healthz");
+			expect(span?.kind).toBe(SpanKind.SERVER);
+			expect(span?.attributes["http.request.method"]).toBe("GET");
+			expect(span?.attributes["url.path"]).toBe("/healthz");
+			expect(span?.attributes["http.route"]).toBe("/healthz");
+			expect(span?.attributes["http.response.status_code"]).toBe(200);
+		});
+
+		test("derives 'unmatched' as the route template for unknown paths", async () => {
+			server.stop(true);
+			startServer({ tracer: provider.getTracer("test") });
+
+			const res = await fetch(`${baseUrl}/nope`);
+			expect(res.status).toBe(404);
+
+			const spans = exporter.getFinishedSpans();
+			expect(spans[0]?.name).toBe("GET unmatched");
+			expect(spans[0]?.attributes["http.route"]).toBe("unmatched");
+		});
+
+		test("derives the '/webhooks/:source' route template and enriches the span with ingest attributes", async () => {
+			server.stop(true);
+			startServer({ tracer: provider.getTracer("test") });
+
+			const event: IncidentEvent = {
+				fingerprint: "fp-1",
+				source: "test-source",
+				status: "firing",
+				severity: "critical",
+				title: "Test event",
+				labels: {},
+				annotations: {},
+				startsAt: new Date().toISOString(),
+				raw: {},
+			};
+
+			const res = await fetch(`${baseUrl}/webhooks/test-source`, {
+				method: "POST",
+				headers: { "x-webhook-token": SECRET },
+				body: JSON.stringify([event]),
+			});
+			expect(res.status).toBe(202);
+
+			const spans = exporter.getFinishedSpans();
+			expect(spans.length).toBe(1);
+			const span = spans[0];
+			expect(span?.name).toBe("POST /webhooks/:source");
+			expect(span?.attributes["http.route"]).toBe("/webhooks/:source");
+			expect(span?.attributes["http.response.status_code"]).toBe(202);
+			expect(span?.attributes["paperhanger.ingest.source"]).toBe("test-source");
+			expect(span?.attributes["paperhanger.ingest.action"]).toBe("created");
+			expect(span?.attributes["paperhanger.ingest.event_count"]).toBe(1);
+		});
+
+		test("an empty batch ([]) sets event_count to 0 and adds no per-event span events or scalar ingest attributes", async () => {
+			server.stop(true);
+			startServer({ tracer: provider.getTracer("test") });
+
+			const res = await fetch(`${baseUrl}/webhooks/test-source`, {
+				method: "POST",
+				headers: { "x-webhook-token": SECRET },
+				body: "[]",
+			});
+			expect(res.status).toBe(202);
+			expect(await res.json()).toEqual({ accepted: 0 });
+
+			const spans = exporter.getFinishedSpans();
+			expect(spans.length).toBe(1);
+			const span = spans[0];
+			expect(span?.attributes["paperhanger.ingest.event_count"]).toBe(0);
+			expect(span?.events.filter((e) => e.name === "ingest.event").length).toBe(
+				0,
+			);
+			expect(span?.attributes["paperhanger.ingest.action"]).toBeUndefined();
+			expect(span?.attributes["paperhanger.incident.id"]).toBeUndefined();
+		});
+
+		test("records one ingest.event span event per event in a multi-event batch (finding: scalar attrs were overwritten each iteration)", async () => {
+			server.stop(true);
+			const incidentsByFingerprint: Record<string, Incident> = {
+				"fp-1": makeIncident({ id: "incident-1", fingerprint: "fp-1" }),
+				"fp-3": makeIncident({ id: "incident-3", fingerprint: "fp-3" }),
+			};
+			const manager: IncidentManager = {
+				handleEvent: async (event: IncidentEvent) => {
+					const incident = incidentsByFingerprint[event.fingerprint];
+					return incident
+						? { action: "created" as const, incident }
+						: { action: "deduplicated" as const };
+				},
+			} as unknown as IncidentManager;
+			startServer({ tracer: provider.getTracer("test"), manager });
+
+			function makeEvent(fingerprint: string): IncidentEvent {
+				return {
+					fingerprint,
+					source: "test-source",
+					status: "firing",
+					severity: "critical",
+					title: "Test event",
+					labels: {},
+					annotations: {},
+					startsAt: new Date().toISOString(),
+					raw: {},
+				};
+			}
+			const events = [makeEvent("fp-1"), makeEvent("fp-2"), makeEvent("fp-3")];
+
+			const res = await fetch(`${baseUrl}/webhooks/test-source`, {
+				method: "POST",
+				headers: { "x-webhook-token": SECRET },
+				body: JSON.stringify(events),
+			});
+			expect(res.status).toBe(202);
+			expect(await res.json()).toEqual({ accepted: 3 });
+
+			const spans = exporter.getFinishedSpans();
+			expect(spans.length).toBe(1);
+			const span = spans[0];
+
+			// The full per-event record lives in span events, one per ingest
+			// event -- a batch must not lose the outcome of every event but
+			// the last.
+			const ingestEvents = span?.events.filter(
+				(e) => e.name === "ingest.event",
+			);
+			expect(ingestEvents?.length).toBe(3);
+			expect(ingestEvents?.[0]?.attributes?.["paperhanger.ingest.action"]).toBe(
+				"created",
+			);
+			expect(ingestEvents?.[0]?.attributes?.["paperhanger.incident.id"]).toBe(
+				"incident-1",
+			);
+			expect(ingestEvents?.[1]?.attributes?.["paperhanger.ingest.action"]).toBe(
+				"deduplicated",
+			);
+			expect(
+				ingestEvents?.[1]?.attributes?.["paperhanger.incident.id"],
+			).toBeUndefined();
+			expect(ingestEvents?.[2]?.attributes?.["paperhanger.ingest.action"]).toBe(
+				"created",
+			);
+			expect(ingestEvents?.[2]?.attributes?.["paperhanger.incident.id"]).toBe(
+				"incident-3",
+			);
+
+			// The scalar attributes stay ergonomic for the common single-event
+			// case by reflecting the LAST event, and the count covers the batch.
+			expect(span?.attributes["paperhanger.ingest.action"]).toBe("created");
+			expect(span?.attributes["paperhanger.incident.id"]).toBe("incident-3");
+			expect(span?.attributes["paperhanger.ingest.event_count"]).toBe(3);
+		});
+
+		test("enriches the span with paperhanger.incident.id when the manager's result carries an incident", async () => {
+			server.stop(true);
+			const manager: IncidentManager = {
+				handleEvent: async () => ({
+					action: "created",
+					incident: makeIncident({ id: "incident-99" }),
+				}),
+			} as unknown as IncidentManager;
+			startServer({ tracer: provider.getTracer("test"), manager });
+
+			const event: IncidentEvent = {
+				fingerprint: "fp-1",
+				source: "test-source",
+				status: "firing",
+				severity: "critical",
+				title: "Test event",
+				labels: {},
+				annotations: {},
+				startsAt: new Date().toISOString(),
+				raw: {},
+			};
+
+			const res = await fetch(`${baseUrl}/webhooks/test-source`, {
+				method: "POST",
+				headers: { "x-webhook-token": SECRET },
+				body: JSON.stringify([event]),
+			});
+			expect(res.status).toBe(202);
+
+			const span = exporter.getFinishedSpans()[0];
+			expect(span?.attributes["paperhanger.incident.id"]).toBe("incident-99");
+		});
+
+		test("logs http.request with traceId/spanId matching the exported SERVER span (finding: the summary log was emitted after the span's active scope had already closed)", async () => {
+			server.stop(true);
+			const logLines: string[] = [];
+			startServer({
+				tracer: provider.getTracer("test"),
+				logger: createLogger({ sink: (line) => logLines.push(line) }),
+			});
+
+			const res = await fetch(`${baseUrl}/healthz`);
+			expect(res.status).toBe(200);
+
+			const spans = exporter.getFinishedSpans();
+			expect(spans.length).toBe(1);
+			const span = spans[0];
+
+			const entries = logLines.map((line) => JSON.parse(line));
+			const httpRequestEntry = entries.find(
+				(entry) => entry.msg === "http.request",
+			);
+			expect(httpRequestEntry).toBeDefined();
+			expect(httpRequestEntry.traceId).toBe(span?.spanContext().traceId);
+			expect(httpRequestEntry.spanId).toBe(span?.spanContext().spanId);
+		});
+
+		test("does not log http.request when route() throws (preserved behavior)", async () => {
+			server.stop(true);
+			const logLines: string[] = [];
+			const throwingStore: IncidentsStoreSlice = {
+				ping: async () => true,
+				getIncident: async () => undefined,
+				listIncidents: async () => {
+					throw new Error("store exploded");
+				},
+			};
+			startServer({
+				tracer: provider.getTracer("test"),
+				store: throwingStore,
+				logger: createLogger({ sink: (line) => logLines.push(line) }),
+			});
+
+			const req = new Request(`${baseUrl}/incidents`, {
+				headers: bearerHeaders(API_TOKEN),
+			});
+			await expect(server.fetch(req)).rejects.toThrow("store exploded");
+
+			const entries = logLines.map((line) => JSON.parse(line));
+			expect(
+				entries.find((entry) => entry.msg === "http.request"),
+			).toBeUndefined();
+		});
+
+		test("propagates the active server span across an await boundary inside route() (context.with + AsyncLocalStorageContextManager)", async () => {
+			server.stop(true);
+			let observedSpanId: string | undefined;
+			let observedTraceId: string | undefined;
+			const propagationStore: IncidentsStoreSlice = {
+				ping: async () => true,
+				getIncident: async (_id: string) => {
+					// Force a macrotask boundary before reading the active span --
+					// the exact scenario where a context manager that doesn't
+					// propagate across `await` (e.g. the deprecated
+					// AsyncHooksContextManager on Bun) would silently lose it.
+					await Bun.sleep(1);
+					const active = trace.getSpan(context.active());
+					observedSpanId = active?.spanContext().spanId;
+					observedTraceId = active?.spanContext().traceId;
+					return undefined;
+				},
+				listIncidents: async () => [],
+			};
+			startServer({
+				tracer: provider.getTracer("test"),
+				store: propagationStore,
+			});
+
+			const res = await fetch(`${baseUrl}/incidents/incident-1`, {
+				headers: bearerHeaders(API_TOKEN),
+			});
+			expect(res.status).toBe(404);
+
+			const spans = exporter.getFinishedSpans();
+			expect(spans.length).toBe(1);
+			const serverSpan = spans[0];
+			expect(observedSpanId).toBe(serverSpan?.spanContext().spanId);
+			expect(observedTraceId).toBe(serverSpan?.spanContext().traceId);
+		});
+
+		test("records an exception + ERROR status on the SERVER span and rethrows when route() throws (finding: untested recordException/rethrow path)", async () => {
+			server.stop(true);
+			const throwingStore: IncidentsStoreSlice = {
+				ping: async () => true,
+				getIncident: async () => undefined,
+				listIncidents: async () => {
+					throw new Error("store exploded");
+				},
+			};
+			startServer({
+				tracer: provider.getTracer("test"),
+				store: throwingStore,
+			});
+
+			// `server.fetch()` invokes the `fetch` handler directly (unlike a
+			// real network `fetch()`, it does not go through Bun's own
+			// catch-and-500 behavior around an uncaught handler exception), so
+			// this is the way to observe the handler's promise actually
+			// rejecting -- the behavior this fix must NOT change. In
+			// production Bun still serves the request; only the internal
+			// promise shape differs.
+			const req = new Request(`${baseUrl}/incidents`, {
+				headers: bearerHeaders(API_TOKEN),
+			});
+			await expect(server.fetch(req)).rejects.toThrow("store exploded");
+
+			const spans = exporter.getFinishedSpans();
+			expect(spans.length).toBe(1);
+			const span = spans[0];
+			expect(span?.status.code).toBe(SpanStatusCode.ERROR);
+			expect(span?.status.message).toBe("store exploded");
+			const exceptionEvents = span?.events.filter(
+				(e) => e.name === "exception",
+			);
+			expect(exceptionEvents?.length).toBe(1);
+			expect(exceptionEvents?.[0]?.attributes?.["exception.message"]).toBe(
+				"store exploded",
+			);
 		});
 	});
 });

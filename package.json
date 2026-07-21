@@ -15,14 +15,9 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.4",
-		"@opentelemetry/api": "^1.9.1",
 		"@opentelemetry/api-logs": "^0.220.0",
-		"@opentelemetry/context-async-hooks": "^2.9.0",
 		"@opentelemetry/exporter-logs-otlp-proto": "^0.220.0",
-		"@opentelemetry/exporter-trace-otlp-proto": "^0.220.0",
-		"@opentelemetry/resources": "^2.9.0",
 		"@opentelemetry/sdk-logs": "^0.220.0",
-		"@opentelemetry/sdk-trace-base": "^2.9.0",
 		"@types/bun": "latest",
 		"oxlint": "1.74.0",
 		"testcontainers": "^12.0.4"
@@ -32,6 +27,11 @@
 	},
 	"dependencies": {
 		"@flue/sdk": "1.0.0-beta.9",
+		"@opentelemetry/api": "^1.9.1",
+		"@opentelemetry/context-async-hooks": "^2.9.0",
+		"@opentelemetry/exporter-trace-otlp-proto": "^0.220.0",
+		"@opentelemetry/resources": "^2.9.0",
+		"@opentelemetry/sdk-trace-base": "^2.9.0",
 		"@typescript/native-preview": "^7.0.0-dev.20260707.2",
 		"zod": "^4.4.3"
 	}

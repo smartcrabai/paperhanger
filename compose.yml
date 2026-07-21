@@ -23,6 +23,10 @@ services:
     build: .
     ports:
       - "8080:8080"
+    # Shutdown can take ~15s+ (drain + tracing bounds, plus sidecar stop
+    # time) -- see README.md "Operational notes" -- so the default 10s
+    # grace period isn't enough.
+    stop_grace_period: 30s
     environment:
       GRAFANA_WEBHOOK_SECRET: ${GRAFANA_WEBHOOK_SECRET:-e2e-grafana-secret}
       GENERIC_WEBHOOK_SECRET: ${GENERIC_WEBHOOK_SECRET:-e2e-generic-secret}

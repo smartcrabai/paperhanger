@@ -1,3 +1,10 @@
+import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
+import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
+import {
+	BasicTracerProvider,
+	InMemorySpanExporter,
+	SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
 import { describe, expect, test } from "bun:test";
 import { createLogger } from "../observability/logger";
 import {
@@ -7,8 +14,31 @@ import {
 	GreptimeDbSource,
 } from "./greptimedb";
 
+// Registered once at module scope so context propagates across `await`s for
+// every test in this file (design doc section 10). A second registration in
+// the same bun process would return `false` and keep this one -- harmless,
+// since it's the same manager class; no other file in `bun test src/telemetry`
+// registers a context manager.
+context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
+
+/** Hermetic span-recording tracer for assertions (see design doc section 10). */
+function setupTracing() {
+	const exporter = new InMemorySpanExporter();
+	const provider = new BasicTracerProvider({
+		spanProcessors: [new SimpleSpanProcessor(exporter)],
+	});
+	return { tracer: provider.getTracer("test"), exporter };
+}
+
 function silentLogger() {
 	return createLogger({ sink: () => {} });
+}
+
+/** A logger whose sink captures each emitted JSON line for correlation assertions. */
+function capturingLogger() {
+	const lines: string[] = [];
+	const logger = createLogger({ sink: (line) => lines.push(line) });
+	return { logger, lines };
 }
 
 interface RecordedRequest {
@@ -888,6 +918,325 @@ describe("GreptimeDbSource - request timeout", () => {
 					[{ name: "timestamp", data_type: "TimestampNanosecond" }],
 					[],
 				)) as typeof fetch,
+		);
+
+		await expect(
+			source.queryLogs({
+				timeRange: {
+					from: "2026-01-01T00:00:00.000Z",
+					to: "2026-01-01T01:00:00.000Z",
+				},
+				labels: {},
+			}),
+		).resolves.toEqual([]);
+	});
+});
+
+describe("GreptimeDbSource - OpenTelemetry span instrumentation", () => {
+	test("queryLogs creates a CLIENT span with db.system.name/db.collection.name and OK status on success", async () => {
+		const { fetchImpl } = stubFetch(() =>
+			sqlSuccessResponse(
+				[{ name: "timestamp", data_type: "TimestampNanosecond" }],
+				[],
+			),
+		);
+		const { tracer, exporter } = setupTracing();
+		const source = new GreptimeDbSource(
+			{ url: "http://greptime.test", database: "public" },
+			silentLogger(),
+			fetchImpl,
+			tracer,
+		);
+
+		await source.queryLogs({
+			timeRange: {
+				from: "2026-01-01T00:00:00.000Z",
+				to: "2026-01-01T01:00:00.000Z",
+			},
+			labels: {},
+		});
+
+		const spans = exporter.getFinishedSpans();
+		expect(spans.length).toBe(1);
+		const span = spans[0];
+		expect(span?.name).toBe("greptimedb.query_logs");
+		expect(span?.kind).toBe(SpanKind.CLIENT);
+		expect(span?.attributes["db.system.name"]).toBe("greptimedb");
+		expect(span?.attributes["paperhanger.query.kind"]).toBe("logs");
+		expect(span?.attributes["db.collection.name"]).toBe(DEFAULT_LOGS_TABLE);
+		expect(span?.status.code).toBe(SpanStatusCode.UNSET);
+	});
+
+	test("queryTraces sets paperhanger.query.strategy = 'trace_ids' when a trace_id filter is given", async () => {
+		const { fetchImpl } = stubFetch(() =>
+			sqlSuccessResponse(
+				[{ name: "timestamp", data_type: "TimestampNanosecond" }],
+				[],
+			),
+		);
+		const { tracer, exporter } = setupTracing();
+		const source = new GreptimeDbSource(
+			{ url: "http://greptime.test", database: "public" },
+			silentLogger(),
+			fetchImpl,
+			tracer,
+		);
+
+		await source.queryTraces({
+			timeRange: {
+				from: "2026-01-01T00:00:00.000Z",
+				to: "2026-01-01T01:00:00.000Z",
+			},
+			labels: { trace_id: "abc123" },
+		});
+
+		const span = exporter.getFinishedSpans()[0];
+		expect(span?.name).toBe("greptimedb.query_traces");
+		expect(span?.kind).toBe(SpanKind.CLIENT);
+		expect(span?.attributes["paperhanger.query.strategy"]).toBe("trace_ids");
+		expect(span?.attributes["db.collection.name"]).toBe(DEFAULT_TRACES_TABLE);
+	});
+
+	test("queryTraces sets paperhanger.query.strategy = 'representative' without a trace_id filter", async () => {
+		const { fetchImpl } = stubFetch(() =>
+			sqlSuccessResponse(
+				[{ name: "timestamp", data_type: "TimestampNanosecond" }],
+				[],
+			),
+		);
+		const { tracer, exporter } = setupTracing();
+		const source = new GreptimeDbSource(
+			{ url: "http://greptime.test", database: "public" },
+			silentLogger(),
+			fetchImpl,
+			tracer,
+		);
+
+		await source.queryTraces({
+			timeRange: {
+				from: "2026-01-01T00:00:00.000Z",
+				to: "2026-01-01T01:00:00.000Z",
+			},
+			labels: { service: "checkout" },
+		});
+
+		const span = exporter.getFinishedSpans()[0];
+		expect(span?.attributes["paperhanger.query.strategy"]).toBe(
+			"representative",
+		);
+	});
+
+	test("queryMetrics sets paperhanger.query.skipped = true and records no HTTP attributes on the no-promql early return", async () => {
+		const { fetchImpl, calls } = stubFetch(
+			() => new Response("{}", { status: 200 }),
+		);
+		const { tracer, exporter } = setupTracing();
+		const source = new GreptimeDbSource(
+			{ url: "http://greptime.test", database: "public" },
+			silentLogger(),
+			fetchImpl,
+			tracer,
+		);
+
+		await source.queryMetrics({
+			timeRange: {
+				from: "2026-01-01T00:00:00.000Z",
+				to: "2026-01-01T00:05:00.000Z",
+			},
+			labels: {},
+		});
+
+		expect(calls.length).toBe(0);
+		const span = exporter.getFinishedSpans()[0];
+		expect(span?.name).toBe("greptimedb.query_metrics");
+		expect(span?.attributes["paperhanger.query.kind"]).toBe("metrics");
+		expect(span?.attributes["paperhanger.query.skipped"]).toBe(true);
+		expect(span?.attributes["http.response.status_code"]).toBeUndefined();
+		expect(span?.status.code).toBe(SpanStatusCode.UNSET);
+	});
+
+	test("queryMetrics's no-promql warn log correlates (traceId/spanId) with the finished CLIENT span", async () => {
+		const { fetchImpl, calls } = stubFetch(
+			() => new Response("{}", { status: 200 }),
+		);
+		const { tracer, exporter } = setupTracing();
+		const { logger, lines } = capturingLogger();
+		const source = new GreptimeDbSource(
+			{ url: "http://greptime.test", database: "public" },
+			logger,
+			fetchImpl,
+			tracer,
+		);
+
+		await source.queryMetrics({
+			timeRange: {
+				from: "2026-01-01T00:00:00.000Z",
+				to: "2026-01-01T00:05:00.000Z",
+			},
+			labels: {},
+		});
+
+		// The early-return branch makes no fetch call at all, so this warn's
+		// correlation can't be observed via a stub-fetch-based active-span
+		// check (unlike the "makes the query span active..." test below) --
+		// only the logger's own captured output can confirm it ran inside the
+		// span's active context.
+		expect(calls.length).toBe(0);
+		const span = exporter.getFinishedSpans()[0];
+		expect(span?.name).toBe("greptimedb.query_metrics");
+		expect(span?.attributes["paperhanger.query.skipped"]).toBe(true);
+
+		const entries = lines.map(
+			(line) => JSON.parse(line) as Record<string, unknown>,
+		);
+		const warnEntry = entries.find((entry) => entry.level === "warn");
+		expect(warnEntry?.msg).toBe(
+			"queryMetrics called without a PromQL expression; returning no series",
+		);
+		const spanContext = span?.spanContext();
+		expect(warnEntry?.traceId).toBe(spanContext?.traceId);
+		expect(warnEntry?.spanId).toBe(spanContext?.spanId);
+	});
+
+	test("a failing GreptimeDB query sets ERROR status with a redacted message and never leaks the raw SQL/error text into the span", async () => {
+		// A recognizable marker standing in for GreptimeDB echoing the
+		// offending SQL/PromQL text back in its error response body -- this
+		// must never reach any span field (attributes, status message, or
+		// exception events).
+		const secretSqlMarker = "SECRET_SQL_TOKEN__evil_label_value";
+		const { fetchImpl } = stubFetch(
+			() =>
+				new Response(
+					JSON.stringify({
+						code: 4001,
+						error: `Failed to plan SQL: syntax error near '${secretSqlMarker}'`,
+					}),
+					{ status: 400 },
+				),
+		);
+		const { tracer, exporter } = setupTracing();
+		const source = new GreptimeDbSource(
+			{ url: "http://greptime.test", database: "public" },
+			silentLogger(),
+			fetchImpl,
+			tracer,
+		);
+
+		let caught: unknown;
+		try {
+			await source.queryLogs({
+				timeRange: {
+					from: "2026-01-01T00:00:00.000Z",
+					to: "2026-01-01T01:00:00.000Z",
+				},
+				labels: { service: secretSqlMarker },
+			});
+		} catch (err) {
+			caught = err;
+		}
+
+		// Rethrown unchanged: the raw (unredacted) message is still available
+		// to the caller via the thrown error -- redaction applies only to the
+		// exported span, not to error semantics.
+		expect(caught).toBeInstanceOf(GreptimeDbError);
+		expect((caught as Error).message).toContain(secretSqlMarker);
+
+		const span = exporter.getFinishedSpans()[0];
+		expect(span?.name).toBe("greptimedb.query_logs");
+		expect(span?.status.code).toBe(SpanStatusCode.ERROR);
+		expect(span?.status.message).toBe("GreptimeDB query failed (code=4001)");
+		expect(span?.status.message).not.toContain(secretSqlMarker);
+		expect(span?.attributes["paperhanger.greptimedb.error_code"]).toBe(4001);
+		expect(span?.attributes["http.response.status_code"]).toBe(400);
+		// recordException is never called for GreptimeDbError, so no
+		// exception event (which would carry the raw message) is recorded.
+		expect(span?.events.length).toBe(0);
+		// Belt-and-suspenders: the marker must not appear anywhere in the
+		// exported span at all (attributes, status, or events).
+		const serializedSpan = JSON.stringify({
+			attributes: span?.attributes,
+			status: span?.status,
+			events: span?.events,
+		});
+		expect(serializedSpan).not.toContain(secretSqlMarker);
+	});
+
+	test("non-GreptimeDbError exceptions (locally thrown) are still recorded via recordException", async () => {
+		const { fetchImpl } = stubFetch(() =>
+			sqlSuccessResponse(
+				[{ name: "timestamp", data_type: "TimestampNanosecond" }],
+				[],
+			),
+		);
+		const { tracer, exporter } = setupTracing();
+		const source = new GreptimeDbSource(
+			{ url: "http://greptime.test", database: "public" },
+			silentLogger(),
+			fetchImpl,
+			tracer,
+		);
+
+		await expect(
+			source.queryLogs({
+				timeRange: {
+					from: "2026-01-01T00:00:00.000Z",
+					to: "2026-01-01T01:00:00.000Z",
+				},
+				labels: { 'bad"key`; --': "x" },
+			}),
+		).rejects.toThrow(/Invalid attribute\/label key/);
+
+		const span = exporter.getFinishedSpans()[0];
+		expect(span?.status.code).toBe(SpanStatusCode.ERROR);
+		expect(span?.status.message).toMatch(/Invalid attribute\/label key/);
+		expect(span?.events.length).toBe(1);
+		expect(span?.events[0]?.name).toBe("exception");
+	});
+
+	test("makes the query span active for the duration of the query, so code inside (e.g. the underlying fetch) observes it via getActiveSpan", async () => {
+		let observedSpanId: string | undefined;
+		let observedTraceId: string | undefined;
+		const { fetchImpl } = stubFetch((_req) => {
+			const active = trace.getActiveSpan();
+			observedSpanId = active?.spanContext().spanId;
+			observedTraceId = active?.spanContext().traceId;
+			return sqlSuccessResponse(
+				[{ name: "timestamp", data_type: "TimestampNanosecond" }],
+				[],
+			);
+		});
+		const { tracer, exporter } = setupTracing();
+		const source = new GreptimeDbSource(
+			{ url: "http://greptime.test", database: "public" },
+			silentLogger(),
+			fetchImpl,
+			tracer,
+		);
+
+		await source.queryLogs({
+			timeRange: {
+				from: "2026-01-01T00:00:00.000Z",
+				to: "2026-01-01T01:00:00.000Z",
+			},
+			labels: {},
+		});
+
+		const span = exporter.getFinishedSpans()[0];
+		expect(observedSpanId).toBe(span?.spanContext().spanId);
+		expect(observedTraceId).toBe(span?.spanContext().traceId);
+	});
+
+	test("falls back to a no-op tracer when none is injected, keeping existing call sites working", async () => {
+		const { fetchImpl } = stubFetch(() =>
+			sqlSuccessResponse(
+				[{ name: "timestamp", data_type: "TimestampNanosecond" }],
+				[],
+			),
+		);
+		const source = new GreptimeDbSource(
+			{ url: "http://greptime.test", database: "public" },
+			silentLogger(),
+			fetchImpl,
 		);
 
 		await expect(

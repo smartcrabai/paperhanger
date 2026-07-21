@@ -7,6 +7,7 @@
  * fields for severity/source/fingerprint plus any kind-specific extras.
  */
 
+import type { Tracer } from "@opentelemetry/api";
 import type { NotifierConfig } from "../config/schema";
 import type { Logger } from "../observability/logger";
 import {
@@ -19,7 +20,7 @@ import {
 	truncate,
 } from "./format";
 import { DEFAULT_NOTIFY_TIMEOUT_MS, postJson } from "./http";
-import type { Notifier, NotificationEvent } from "./types";
+import type { NotificationEvent, Notifier } from "./types";
 
 export type DiscordNotifierConfig = Extract<
 	NotifierConfig,
@@ -69,15 +70,27 @@ function buildPayload(event: NotificationEvent): DiscordPayload {
 	};
 }
 
+export interface DiscordNotifierOptions {
+	fetchImpl?: typeof fetch;
+	timeoutMs?: number;
+	tracer?: Tracer;
+}
+
 export class DiscordNotifier implements Notifier {
 	readonly name = "discord";
+	private readonly fetchImpl: typeof fetch;
+	private readonly timeoutMs: number;
+	private readonly tracer?: Tracer;
 
 	constructor(
 		private readonly config: DiscordNotifierConfig,
 		private readonly logger: Logger,
-		private readonly fetchImpl: typeof fetch = fetch,
-		private readonly timeoutMs: number = DEFAULT_NOTIFY_TIMEOUT_MS,
-	) {}
+		options: DiscordNotifierOptions = {},
+	) {
+		this.fetchImpl = options.fetchImpl ?? fetch;
+		this.timeoutMs = options.timeoutMs ?? DEFAULT_NOTIFY_TIMEOUT_MS;
+		this.tracer = options.tracer;
+	}
 
 	async notify(event: NotificationEvent): Promise<void> {
 		await postJson({
@@ -87,6 +100,8 @@ export class DiscordNotifier implements Notifier {
 			notifierName: this.name,
 			logger: this.logger,
 			timeoutMs: this.timeoutMs,
+			tracer: this.tracer,
+			component: "discord",
 		});
 	}
 }

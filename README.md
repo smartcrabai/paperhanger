@@ -208,6 +208,9 @@ Every key from `paperhanger.example.yaml`, with its default when omitted
 | `telemetry.logsTable` | `opentelemetry_logs` | Override if your deployment renamed the OTLP-ingested logs table |
 | `telemetry.tracesTable` | `opentelemetry_traces` | Override if your deployment renamed the OTLP-ingested traces table |
 | `telemetry.timeoutMs` | `30000` | Per-request HTTP timeout for all GreptimeDB calls |
+| `observability.endpoint` | *(the whole `observability` section is optional)* | OTLP/HTTP traces endpoint paperhanger exports ITS OWN spans to, e.g. `http://localhost:4318/v1/traces`. Distinct from `telemetry` above, which is where paperhanger *reads* other services' telemetry from. Omit `observability` entirely to run with tracing disabled (no-op tracers, no context manager registered) |
+| `observability.serviceName` | `paperhanger` | `service.name` resource attribute on exported spans |
+| `observability.headers` | `{}` | Extra headers sent with every OTLP export request (values may use `${ENV_VAR}`) |
 | `collect.windowBeforeMinutes` | `30` | Telemetry window before the alert's `startsAt` |
 | `collect.windowAfterMinutes` | `5` | Telemetry window after `startsAt` (capped at "now") |
 | `repos.attributeKeys` | `[]` | Annotation/label/resource-attribute keys checked (in order) for an `owner/repo` value |
@@ -310,13 +313,27 @@ The agent-host (`agent-host/`) is a separate Node-only package with its own
 - `GET /healthz` -- liveness. `GET /readyz` -- checks the store connection.
   `GET /incidents` / `GET /incidents/:id` -- read-only incident inspection.
 - Logs are structured JSON lines (one object per line: `level`, `ts`, `msg`,
-  plus contextual fields); no OTel export of paperhanger's own logs yet
-  (spec section 3.10 notes this as future work).
+  plus contextual fields). When `observability` is configured, log lines
+  written while a span is active also carry `traceId`/`spanId` for
+  correlation with the exported trace. OTel export of paperhanger's own
+  *traces* happens when `observability` is configured (see the config
+  reference above); OTel export of paperhanger's own *logs* is still future
+  work (spec section 3.10).
 - Shutdown order on `SIGINT`/`SIGTERM`: stop accepting new HTTP requests,
   wait (bounded, default 10s) for in-flight incidents to drain, stop the
-  agent-host sidecar, close the store. An incident still mid-flight past the
-  drain timeout is abandoned at its last persisted status rather than force-
-  completed -- see "Current limitations".
+  agent-host sidecar, flush and shut down tracing (bounded, 5s), close the
+  store. An incident still mid-flight past the drain timeout is abandoned at
+  its last persisted status rather than force-completed -- see "Current
+  limitations".
+- Shutdown time budget: the drain and tracing-shutdown phases are bounded
+  (10s + 5s), but the sidecar stop in between is not, so worst case is
+  ~15s plus however long the agent-host sidecar takes to exit (only when
+  `observability` is configured -- otherwise the 5s tracing bound doesn't
+  apply). This exceeds Docker's default 10s stop grace period, so a slow
+  shutdown can be SIGKILLed before `store.close()` runs, severing the
+  storage handle uncleanly. Set the container termination grace period to
+  at least ~30s in production (Compose's `stop_grace_period`, Kubernetes'
+  `terminationGracePeriodSeconds`).
 
 ## Security notes
 

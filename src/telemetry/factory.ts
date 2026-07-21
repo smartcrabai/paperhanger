@@ -10,6 +10,7 @@
  * comment on `createTelemetryTools()` in `agent-host/src/tools.ts`.
  */
 
+import type { Tracer } from "@opentelemetry/api";
 import type { TelemetryConfig } from "../config/schema";
 import { GreptimeDbSource } from "./greptimedb";
 import type { Logger } from "../observability/logger";
@@ -18,9 +19,10 @@ import type { TelemetrySource } from "./types";
 export function createTelemetrySource(
 	config: TelemetryConfig,
 	logger: Logger,
+	tracer?: Tracer,
 ): TelemetrySource {
 	switch (config.source) {
 		case "greptimedb":
-			return new GreptimeDbSource(config, logger);
+			return new GreptimeDbSource(config, logger, undefined, tracer);
 	}
 }

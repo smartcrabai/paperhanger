@@ -1,4 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { SpanKind } from "@opentelemetry/api";
+import {
+	BasicTracerProvider,
+	InMemorySpanExporter,
+	SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
 import { createLogger } from "../observability/logger";
 import { DiscordNotifier } from "./discord";
 import type { IncidentSnapshot, NotificationEvent } from "./types";
@@ -55,7 +61,7 @@ describe("DiscordNotifier", () => {
 		const notifier = new DiscordNotifier(
 			{ type: "discord", webhookUrl: WEBHOOK_URL },
 			silentLogger(),
-			fetchImpl,
+			{ fetchImpl },
 		);
 		const event: NotificationEvent = { kind: "diagnosis_started", incident };
 
@@ -97,7 +103,7 @@ describe("DiscordNotifier", () => {
 			const notifier = new DiscordNotifier(
 				{ type: "discord", webhookUrl: WEBHOOK_URL },
 				silentLogger(),
-				fetchImpl,
+				{ fetchImpl },
 			);
 			const event = {
 				kind,
@@ -122,7 +128,7 @@ describe("DiscordNotifier", () => {
 		const notifier = new DiscordNotifier(
 			{ type: "discord", webhookUrl: WEBHOOK_URL },
 			silentLogger(),
-			fetchImpl,
+			{ fetchImpl },
 		);
 
 		await notifier.notify({
@@ -152,7 +158,7 @@ describe("DiscordNotifier", () => {
 		const notifier = new DiscordNotifier(
 			{ type: "discord", webhookUrl: WEBHOOK_URL },
 			silentLogger(),
-			fetchImpl,
+			{ fetchImpl },
 		);
 		const longReport = "y".repeat(5000);
 
@@ -174,7 +180,7 @@ describe("DiscordNotifier", () => {
 		const notifier = new DiscordNotifier(
 			{ type: "discord", webhookUrl: WEBHOOK_URL },
 			silentLogger(),
-			fetchImpl,
+			{ fetchImpl },
 		);
 		const exactReport = "z".repeat(4096);
 
@@ -196,7 +202,7 @@ describe("DiscordNotifier", () => {
 		const notifier = new DiscordNotifier(
 			{ type: "discord", webhookUrl: WEBHOOK_URL },
 			silentLogger(),
-			fetchImpl,
+			{ fetchImpl },
 		);
 
 		await notifier.notify({
@@ -221,7 +227,7 @@ describe("DiscordNotifier", () => {
 		const notifier = new DiscordNotifier(
 			{ type: "discord", webhookUrl: WEBHOOK_URL },
 			logger,
-			fetchImpl,
+			{ fetchImpl },
 		);
 
 		await expect(
@@ -232,5 +238,28 @@ describe("DiscordNotifier", () => {
 		const entry = JSON.parse(lines[0] as string);
 		expect(entry.status).toBe(429);
 		expect(entry.bodyExcerpt).toBe("rate limited");
+	});
+
+	test("threads the injected tracer into postJson, producing a notify.post span with component 'discord'", async () => {
+		const { fetchImpl } = mockFetch(new Response("ok", { status: 200 }));
+		const exporter = new InMemorySpanExporter();
+		const provider = new BasicTracerProvider({
+			spanProcessors: [new SimpleSpanProcessor(exporter)],
+		});
+		const notifier = new DiscordNotifier(
+			{ type: "discord", webhookUrl: WEBHOOK_URL },
+			silentLogger(),
+			{ fetchImpl, tracer: provider.getTracer("test") },
+		);
+
+		await notifier.notify({ kind: "diagnosis_started", incident });
+
+		const spans = exporter.getFinishedSpans();
+		expect(spans.length).toBe(1);
+		expect(spans[0]?.name).toBe("notify.post");
+		expect(spans[0]?.kind).toBe(SpanKind.CLIENT);
+		expect(spans[0]?.attributes["paperhanger.notify.component"]).toBe(
+			"discord",
+		);
 	});
 });

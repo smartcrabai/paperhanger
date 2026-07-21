@@ -30,8 +30,26 @@
  * `IncidentManager` itself (a queued-but-not-yet-started incident whose alert
  * resolved) -- this pipeline never produces a `skipped` outcome. Dedup/
  * cooldown events are log-only and never notified (see incident-manager.ts).
+ *
+ * Tracing: `process()` is a detached queue job, not part of any inbound
+ * request, so it starts a FORCED ROOT span (`incident.process`,
+ * `{ root: true }`) rather than inheriting whatever context happens to be
+ * active, and wraps its entire body in `context.with(...)` so every stage's
+ * child span (and any CLIENT spans further downstream in
+ * telemetry/github/agent/notify clients) nests beneath it. `deps.tracer` is
+ * optional and falls back to a no-op tracer (`trace.getTracer(...)`, no
+ * global provider registered) so every existing call site keeps working
+ * unchanged when tracing is disabled.
  */
 
+import {
+	context,
+	type Span,
+	SpanKind,
+	SpanStatusCode,
+	trace,
+	type Tracer,
+} from "@opentelemetry/api";
 import {
 	buildIncidentContext as defaultBuildIncidentContext,
 	computeWindow,
@@ -40,7 +58,7 @@ import {
 } from "../telemetry/context-builder";
 import type { IncidentContext, TelemetrySource } from "../telemetry/types";
 import { incidentSnapshot } from "../notify/types";
-import type { Notifier } from "../notify/types";
+import type { NotificationEvent, Notifier } from "../notify/types";
 import type { Logger } from "../observability/logger";
 import type { ResolvedRepo, ResolveRepoInput } from "../repo/resolver";
 import type { IncidentStore } from "../storage/types";
@@ -86,6 +104,13 @@ export interface IncidentPipelineDeps {
 	buildIncidentContext?: typeof defaultBuildIncidentContext;
 	/** Injectable for tests; defaults to the real implementation in `telemetry/context-builder.ts`. */
 	renderContextMarkdown?: typeof defaultRenderContextMarkdown;
+	/**
+	 * OTel tracer for the `incident.*` span tree. Defaults to a no-op tracer
+	 * (`trace.getTracer("incident-pipeline")`, no global provider registered)
+	 * when omitted, so tracing is opt-in and every existing call site keeps
+	 * working unchanged.
+	 */
+	tracer?: Tracer;
 }
 
 function syntheticAlertFromIncident(incident: Incident): IncidentEvent {
@@ -125,10 +150,10 @@ function buildDegradedContext(
  * rather than matching against an empty object.
  */
 function deriveResourceAttributes(
-	context: IncidentContext,
+	incidentContext: IncidentContext,
 ): Record<string, string> | undefined {
 	const merged: Record<string, string> = {};
-	for (const log of context.telemetry.logs) {
+	for (const log of incidentContext.telemetry.logs) {
 		for (const [key, value] of Object.entries(log.resourceAttributes)) {
 			if (merged[key] === undefined && value !== null && value !== undefined) {
 				merged[key] = String(value);
@@ -140,55 +165,92 @@ function deriveResourceAttributes(
 
 export class IncidentPipeline implements IncidentProcessor {
 	private readonly logger: Logger;
+	private readonly tracer: Tracer;
 	private readonly buildIncidentContextFn: typeof defaultBuildIncidentContext;
 	private readonly renderContextMarkdownFn: typeof defaultRenderContextMarkdown;
 
 	constructor(private readonly deps: IncidentPipelineDeps) {
 		this.logger = deps.logger.child({ component: "incident-pipeline" });
+		this.tracer = deps.tracer ?? trace.getTracer("incident-pipeline");
 		this.buildIncidentContextFn =
 			deps.buildIncidentContext ?? defaultBuildIncidentContext;
 		this.renderContextMarkdownFn =
 			deps.renderContextMarkdown ?? defaultRenderContextMarkdown;
 	}
 
+	/**
+	 * Adds a `notify` event to the currently active span (the `incident.process`
+	 * root, since every notifier call in this pipeline happens either directly
+	 * inside `process()` or inside a `finalize*` helper called from it) rather
+	 * than creating a dedicated child span -- the notifier's own HTTP transport
+	 * (`postJson`) gets its own CLIENT span downstream.
+	 */
+	private recordNotifyEvent(kind: NotificationEvent["kind"]): void {
+		trace
+			.getActiveSpan()
+			?.addEvent("notify", { "paperhanger.notify.kind": kind });
+	}
+
 	async process(incident: Incident): Promise<void> {
-		try {
-			await this.deps.notifier.notify({
-				kind: "diagnosis_started",
-				incident: incidentSnapshot(incident),
-			});
+		const rootSpan = this.tracer.startSpan("incident.process", {
+			root: true,
+			kind: SpanKind.INTERNAL,
+			attributes: {
+				"paperhanger.incident.id": incident.id,
+				"paperhanger.incident.fingerprint": incident.fingerprint,
+				"paperhanger.incident.source": incident.source,
+				"paperhanger.incident.severity": incident.severity,
+			},
+		});
 
-			const collecting = await this.deps.store.updateIncident(incident.id, {
-				status: "collecting",
-			});
-			const alert = await this.resolveAlertEvent(collecting);
-			const context = await this.buildContext(collecting, alert);
+		await context.with(trace.setSpan(context.active(), rootSpan), async () => {
+			let outcome: "pr_created" | "report_only" | "failed" | "unresolved" =
+				"failed";
+			try {
+				this.recordNotifyEvent("diagnosis_started");
+				await this.deps.notifier.notify({
+					kind: "diagnosis_started",
+					incident: incidentSnapshot(incident),
+				});
 
-			const resolvingRepo = await this.deps.store.updateIncident(
-				collecting.id,
-				{ status: "resolving_repo" },
-			);
+				const collecting = await this.deps.store.updateIncident(incident.id, {
+					status: "collecting",
+				});
+				const alert = await this.resolveAlertEvent(collecting);
+				const incidentContext = await this.buildContext(collecting, alert);
 
-			const resolved = await this.deps.resolver.resolve({
-				labels: alert.labels,
-				annotations: alert.annotations,
-				resourceAttributes: deriveResourceAttributes(context),
-			});
+				const resolvingRepo = await this.deps.store.updateIncident(
+					collecting.id,
+					{ status: "resolving_repo" },
+				);
 
-			if (!resolved || resolved.confidence === "low") {
-				await this.finalizeUnresolved(resolvingRepo, context, resolved);
-				return;
+				const resolved = await this.resolveRepo(alert, incidentContext);
+
+				if (!resolved || resolved.confidence === "low") {
+					await this.finalizeUnresolved(
+						resolvingRepo,
+						incidentContext,
+						resolved,
+					);
+					outcome = "unresolved";
+					return;
+				}
+
+				const result = await this.runAgent(
+					resolvingRepo,
+					incidentContext,
+					resolved,
+				);
+				outcome = result.status;
+				await this.finalizeAgentResult(resolvingRepo, result);
+			} catch (err) {
+				outcome = "failed";
+				await this.finalizeUnexpectedFailure(incident, err);
+			} finally {
+				rootSpan.setAttribute("paperhanger.incident.outcome", outcome);
+				rootSpan.end();
 			}
-
-			const result = await this.deps.agentRunner.run(
-				resolvingRepo,
-				context,
-				resolved,
-			);
-			await this.finalizeAgentResult(resolvingRepo, result);
-		} catch (err) {
-			await this.finalizeUnexpectedFailure(incident, err);
-		}
+		});
 	}
 
 	/**
@@ -223,31 +285,187 @@ export class IncidentPipeline implements IncidentProcessor {
 		alert: IncidentEvent,
 	): Promise<IncidentContext> {
 		const { telemetrySource, config, logger } = this.deps;
+		const span = this.tracer.startSpan("incident.collect_telemetry", {
+			kind: SpanKind.INTERNAL,
+			attributes: {
+				"paperhanger.telemetry.configured": telemetrySource !== undefined,
+			},
+		});
 
-		if (!telemetrySource) {
-			const note =
-				"No telemetry source is configured; proceeding with an empty-telemetry context.";
-			logger.warn("pipeline.telemetry_not_configured", {
-				incidentId: incident.id,
-			});
-			return buildDegradedContext(incident, alert, config, note);
-		}
+		return await context.with(
+			trace.setSpan(context.active(), span),
+			async () => {
+				try {
+					if (!telemetrySource) {
+						const note =
+							"No telemetry source is configured; proceeding with an empty-telemetry context.";
+						logger.warn("pipeline.telemetry_not_configured", {
+							incidentId: incident.id,
+						});
+						return buildDegradedContext(incident, alert, config, note);
+					}
 
-		try {
-			return await this.buildIncidentContextFn(
-				{ source: telemetrySource, logger, config },
-				incident,
-				alert,
-			);
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			logger.error("pipeline.telemetry_collection_failed", {
-				incidentId: incident.id,
-				error: message,
-			});
-			const note = `Telemetry collection failed (${message}); proceeding with an empty-telemetry context.`;
-			return buildDegradedContext(incident, alert, config, note);
-		}
+					try {
+						return await this.buildIncidentContextFn(
+							{ source: telemetrySource, logger, config },
+							incident,
+							alert,
+						);
+					} catch (err) {
+						const message = err instanceof Error ? err.message : String(err);
+						logger.error("pipeline.telemetry_collection_failed", {
+							incidentId: incident.id,
+							error: message,
+						});
+						// Redact universally on the span: telemetrySource errors (e.g.
+						// GreptimeDbError) can echo GreptimeDB's response body, which may
+						// contain the submitted SQL/PromQL text (upstream-tainted). This
+						// pipeline must not couple to the concrete GreptimeDbError type
+						// (DI layering), so no recordException and no raw err.message ever
+						// reach the span here -- only a generic status message plus the
+						// error's constructor name. The logger.error call above still
+						// carries full details to stdout logs.
+						span.setStatus({
+							code: SpanStatusCode.ERROR,
+							message: "telemetry collection failed",
+						});
+						span.setAttribute(
+							"paperhanger.telemetry.error_name",
+							err instanceof Error ? err.name : "UnknownError",
+						);
+						const note = `Telemetry collection failed (${message}); proceeding with an empty-telemetry context.`;
+						return buildDegradedContext(incident, alert, config, note);
+					}
+				} finally {
+					span.end();
+				}
+			},
+		);
+	}
+
+	/**
+	 * Shared span-lifecycle scaffolding for `resolveRepo` and `runAgent`:
+	 * starts an INTERNAL child span, activates it via `context.with(...)` (so
+	 * any downstream CLIENT spans nest under it), and always ends the span in
+	 * a `finally`. When `fn` throws, sets a generic ERROR status plus an
+	 * `errorAttribute` (the error's constructor name only -- never the raw
+	 * message; see the redaction note on `buildContext`'s telemetry-failure
+	 * branch for why: e.g. a `GitHubApiError` from the org-search path can
+	 * embed alert-label-derived search queries or a raw upstream response
+	 * body) and rethrows unchanged, so the caller's own catch-all (ultimately
+	 * `process()`'s) still runs and still sees the original error.
+	 *
+	 * `buildContext`'s `incident.collect_telemetry` span deliberately does
+	 * NOT use this helper: on a telemetry-collection failure it must degrade
+	 * to an empty-telemetry context rather than rethrow, which doesn't fit
+	 * this helper's rethrow-on-error contract. Only its span-start /
+	 * `context.with` / `finally` shape mirrors this one -- its error handling
+	 * (redacted the same way) stays bespoke.
+	 */
+	private async withStageSpan<T>(
+		name: string,
+		errorAttribute: string,
+		errorMessage: string,
+		fn: (span: Span) => Promise<T>,
+	): Promise<T> {
+		const span = this.tracer.startSpan(name, { kind: SpanKind.INTERNAL });
+
+		return await context.with(
+			trace.setSpan(context.active(), span),
+			async () => {
+				try {
+					return await fn(span);
+				} catch (err) {
+					span.setStatus({ code: SpanStatusCode.ERROR, message: errorMessage });
+					span.setAttribute(
+						errorAttribute,
+						err instanceof Error ? err.name : "UnknownError",
+					);
+					throw err;
+				} finally {
+					span.end();
+				}
+			},
+		);
+	}
+
+	/**
+	 * Wraps `resolver.resolve()` in the `incident.resolve_repo` child span.
+	 * Attaches the resolved repo's identity once known; a `null` result (no
+	 * candidate at all) is an accepted terminal outcome, not a span error. A
+	 * thrown error (e.g. `GitHubApiError` from the org-search path) gets a
+	 * redacted ERROR status via `withStageSpan` and is rethrown unchanged so
+	 * `process()`'s outer catch-all still runs.
+	 */
+	private async resolveRepo(
+		alert: IncidentEvent,
+		incidentContext: IncidentContext,
+	): Promise<ResolvedRepo | null> {
+		return await this.withStageSpan(
+			"incident.resolve_repo",
+			"paperhanger.repo.error_name",
+			"repo resolution failed",
+			async (span) => {
+				const resolved = await this.deps.resolver.resolve({
+					labels: alert.labels,
+					annotations: alert.annotations,
+					resourceAttributes: deriveResourceAttributes(incidentContext),
+				});
+
+				if (resolved) {
+					span.setAttributes({
+						"paperhanger.repo.owner": resolved.owner,
+						"paperhanger.repo.name": resolved.repo,
+						"paperhanger.repo.method": resolved.method,
+						"paperhanger.repo.confidence": resolved.confidence,
+					});
+				} else {
+					span.setAttribute("paperhanger.repo.resolved", false);
+				}
+
+				return resolved;
+			},
+		);
+	}
+
+	/**
+	 * Wraps `agentRunner.run()` in the `incident.agent_run` child span. A
+	 * `"failed"` outcome (a normal return value, not a thrown error) sets an
+	 * ERROR status with the agent's own `failureReason` as the message --
+	 * that text is produced by our own agent runner, not an upstream
+	 * response, so it isn't subject to the redaction rule below.
+	 * `"pr_created"` / `"report_only"` are both successful spans. If
+	 * `agentRunner.run()` itself throws, `withStageSpan` gives it the same
+	 * redacted-ERROR-then-rethrow treatment as `resolveRepo`.
+	 */
+	private async runAgent(
+		incident: Incident,
+		incidentContext: IncidentContext,
+		repo: ResolvedRepo,
+	): Promise<FixAgentRunResult> {
+		return await this.withStageSpan(
+			"incident.agent_run",
+			"paperhanger.agent.error_name",
+			"agent run failed",
+			async (span) => {
+				const result = await this.deps.agentRunner.run(
+					incident,
+					incidentContext,
+					repo,
+				);
+				span.setAttribute("paperhanger.agent.outcome", result.status);
+				if (result.status === "pr_created") {
+					span.setAttribute("paperhanger.pr.url", result.prUrl);
+				}
+				if (result.status === "failed") {
+					span.setStatus({
+						code: SpanStatusCode.ERROR,
+						message: result.failureReason,
+					});
+				}
+				return result;
+			},
+		);
 	}
 
 	/**
@@ -258,7 +476,7 @@ export class IncidentPipeline implements IncidentProcessor {
 	 */
 	private async finalizeUnresolved(
 		incident: Incident,
-		context: IncidentContext,
+		incidentContext: IncidentContext,
 		resolved: ResolvedRepo | null,
 	): Promise<void> {
 		const { store, notifier, logger, github } = this.deps;
@@ -283,12 +501,13 @@ export class IncidentPipeline implements IncidentProcessor {
 			`Repository could not be confidently resolved (method: ${resolved?.method ?? "none"}, ` +
 			`confidence: ${resolved?.confidence ?? "none"}).${hint} Falling back to report_only ` +
 			"per docs/spec.md section 3.5 (repositories are never guessed at low confidence).";
-		const report = `${preamble}\n\n${this.renderContextMarkdownFn(context)}`;
+		const report = `${preamble}\n\n${this.renderContextMarkdownFn(incidentContext)}`;
 
 		const updated = await store.updateIncident(incident.id, {
 			status: "report_only",
 			diagnosis: preamble,
 		});
+		this.recordNotifyEvent("report_only");
 		await notifier.notify({
 			kind: "report_only",
 			incident: incidentSnapshot(updated),
@@ -309,6 +528,7 @@ export class IncidentPipeline implements IncidentProcessor {
 				prUrl: result.prUrl,
 				diagnosis: result.diagnosis,
 			});
+			this.recordNotifyEvent("pr_created");
 			await notifier.notify({
 				kind: "pr_created",
 				incident: incidentSnapshot(updated),
@@ -323,6 +543,7 @@ export class IncidentPipeline implements IncidentProcessor {
 				status: "report_only",
 				diagnosis: result.diagnosis,
 			});
+			this.recordNotifyEvent("report_only");
 			await notifier.notify({
 				kind: "report_only",
 				incident: incidentSnapshot(updated),
@@ -336,6 +557,7 @@ export class IncidentPipeline implements IncidentProcessor {
 			failureReason: result.failureReason,
 			diagnosis: result.diagnosis,
 		});
+		this.recordNotifyEvent("failed");
 		await notifier.notify({
 			kind: "failed",
 			incident: incidentSnapshot(updated),
@@ -347,7 +569,15 @@ export class IncidentPipeline implements IncidentProcessor {
 	 * Last-resort handler: any exception thrown anywhere above lands here so
 	 * the incident always reaches a terminal state and a notification always
 	 * fires, instead of leaving the incident stuck mid-pipeline and silently
-	 * propagating an unhandled rejection up through `IncidentManager`.
+	 * propagating an unhandled rejection up through `IncidentManager`. Also
+	 * sets a generic ERROR status + error-name attribute on the active (root
+	 * `incident.process`) span -- this is the guaranteed catch-all for the
+	 * whole pipeline, so the caught error can be anything upstream, including
+	 * a `GitHubApiError` whose message may embed alert-label-derived search
+	 * queries or a raw GitHub response body. No `recordException` and no raw
+	 * `err.message` ever reach the span here, mirroring the redaction rule in
+	 * `buildContext` and `withStageSpan`. The structured logger call below
+	 * still carries the full message to stdout logs.
 	 */
 	private async finalizeUnexpectedFailure(
 		incident: Incident,
@@ -360,11 +590,22 @@ export class IncidentPipeline implements IncidentProcessor {
 			error: message,
 		});
 
+		const activeSpan = trace.getActiveSpan();
+		activeSpan?.setStatus({
+			code: SpanStatusCode.ERROR,
+			message: "incident processing failed unexpectedly",
+		});
+		activeSpan?.setAttribute(
+			"paperhanger.incident.error_name",
+			err instanceof Error ? err.name : "UnknownError",
+		);
+
 		try {
 			const updated = await store.updateIncident(incident.id, {
 				status: "failed",
 				failureReason: message,
 			});
+			this.recordNotifyEvent("failed");
 			await notifier.notify({
 				kind: "failed",
 				incident: incidentSnapshot(updated),
