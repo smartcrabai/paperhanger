@@ -236,7 +236,7 @@ expansion in the YAML):
 | `PAPERHANGER_CONFIG` | Config file path (default `./paperhanger.yaml`) |
 | `LOG_LEVEL` | `debug` \| `info` (default) \| `warn` \| `error` |
 | `AGENT_HOST_SERVER_PATH` | Path to the built agent-host entrypoint (default `./agent-host/dist/server.mjs`; the Docker image sets this to `/app/agent-host/dist/server.mjs`) |
-| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `KIMI_API_KEY` | Forwarded to the agent-host sidecar process when set, matching `agent.model`'s provider (e.g. `kimi-coding/kimi-for-coding` uses `KIMI_API_KEY`) |
+| Provider API keys | Forwarded to the agent-host sidecar process when set; the agent uses the one matching `agent.model`'s provider prefix. Supported: `ANTHROPIC_API_KEY`/`ANTHROPIC_OAUTH_TOKEN` (`anthropic/`), `OPENAI_API_KEY` (`openai/`), `OPENROUTER_API_KEY` (`openrouter/`), `KIMI_API_KEY` (`kimi-coding/`), `MOONSHOT_API_KEY` (`moonshotai/`), `GEMINI_API_KEY` (`google/`), `DEEPSEEK_API_KEY` (`deepseek/`), `XAI_API_KEY` (`xai/`), `GROQ_API_KEY` (`groq/`), `MISTRAL_API_KEY` (`mistral/`), `ZAI_API_KEY` (`zai/`), `MINIMAX_API_KEY` (`minimax/`), `FIREWORKS_API_KEY` (`fireworks/`), `TOGETHER_API_KEY` (`together/`), `CEREBRAS_API_KEY` (`cerebras/`), `HF_TOKEN` (`huggingface/`), `AI_GATEWAY_API_KEY` (`vercel-ai-gateway/`). Providers needing cloud IAM (Bedrock, Vertex, Azure) are not forwarded — use `agent.hostUrl` with an external agent-host instead |
 
 ## Running the compose E2E
 
