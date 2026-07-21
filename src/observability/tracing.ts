@@ -111,14 +111,14 @@ export function createTracing(
 	// docs/architecture.md "Dependency injection"): context propagation across
 	// `await` boundaries has no non-global mechanism in the OTel API surface.
 	//
-	// IMPORTANT: this MUST be AsyncLocalStorageContextManager, not the
-	// AsyncHooksContextManager used by tests/integration/helpers/otlp-seed.ts.
-	// Empirically verified on this repo's Bun 1.3.14: AsyncHooksContextManager
-	// loses the active context after any `await` (raw async_hooks is not fully
-	// wired in Bun; the class is also deprecated upstream), while
+	// IMPORTANT: this MUST be AsyncLocalStorageContextManager, never the
+	// deprecated AsyncHooksContextManager. Empirically verified on Bun:
+	// AsyncHooksContextManager loses the active context after any `await`
+	// (raw async_hooks is not fully wired in Bun), while
 	// AsyncLocalStorageContextManager propagates correctly across awaited
-	// macrotasks. The seed helper never awaits inside `context.with` so it
-	// never hit this. See the MANDATORY regression test below.
+	// macrotasks. Registration is first-wins per process, so every registrant
+	// in this repo (including tests/integration/helpers/otlp-seed.ts) uses
+	// the same class. See the MANDATORY regression test below.
 	const registered = context.setGlobalContextManager(
 		new AsyncLocalStorageContextManager().enable(),
 	);

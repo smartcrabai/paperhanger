@@ -8,11 +8,14 @@
  * endpoint path / required headers exactly as
  * `tests/integration/greptimedb.test.ts` and `tests/integration/helpers/otlp-seed.ts`
  * do (both read before writing this file). Unlike the seed helper (which
- * registers the deprecated `AsyncHooksContextManager` and never awaits inside
- * `context.with`), this test drives the actual production path: `createTracing`
- * registers `AsyncLocalStorageContextManager`, and the child span here is
- * started only after an awaited real macrotask, exercising the exact
- * propagation behavior `src/observability/tracing.ts` depends on.
+ * never awaits inside `context.with`), this test drives the actual production
+ * path: `createTracing` registers `AsyncLocalStorageContextManager`, and the
+ * child span here is started only after an awaited real macrotask, exercising
+ * the exact propagation behavior `src/observability/tracing.ts` depends on.
+ * Note: context-manager registration is first-wins per process, and on Bun
+ * versions where `bun test` shares globals across files the seed helper may
+ * register first — it uses the same AsyncLocalStorageContextManager class, so
+ * propagation holds regardless of which registrant wins.
  *
  * Requires Docker. Skips gracefully (with a clear console message) when
  * Docker is not available, per docs/architecture.md's testing conventions.
