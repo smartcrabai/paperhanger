@@ -122,11 +122,34 @@ const DEFAULT_READINESS_TIMEOUT_MS = 30_000;
 const DEFAULT_RESTART_BASE_DELAY_MS = 1_000;
 const DEFAULT_RESTART_MAX_DELAY_MS = 30_000;
 
-/** Provider API key env vars passed through to the agent-host child, when set. */
+/**
+ * Provider API key env vars passed through to the agent-host child, when set.
+ *
+ * Mirrors the pi-ai built-in providers that authenticate with a single API
+ * key env var (see `@earendil-works/pi-ai` `dist/providers/*.js`). Providers
+ * that need cloud IAM or multiple env vars (Amazon Bedrock, Google Vertex,
+ * Azure OpenAI) are intentionally not covered; use `agent.hostUrl` with an
+ * externally deployed agent-host for those.
+ */
 const PROVIDER_API_KEY_ENV_VARS = [
+	"AI_GATEWAY_API_KEY",
 	"ANTHROPIC_API_KEY",
+	"ANTHROPIC_OAUTH_TOKEN",
+	"CEREBRAS_API_KEY",
+	"DEEPSEEK_API_KEY",
+	"FIREWORKS_API_KEY",
+	"GEMINI_API_KEY",
+	"GROQ_API_KEY",
+	"HF_TOKEN",
+	"KIMI_API_KEY",
+	"MINIMAX_API_KEY",
+	"MISTRAL_API_KEY",
+	"MOONSHOT_API_KEY",
 	"OPENAI_API_KEY",
 	"OPENROUTER_API_KEY",
+	"TOGETHER_API_KEY",
+	"XAI_API_KEY",
+	"ZAI_API_KEY",
 ] as const;
 
 /**
