@@ -158,6 +158,7 @@ describe("AgentHostSidecar - internal mode spawn arguments", () => {
 			serverPath: "./agent-host/dist/server.mjs",
 			env: {
 				ANTHROPIC_API_KEY: "sk-test",
+				KIMI_API_KEY: "sk-kimi-test",
 				UNRELATED_VAR: "nope",
 				PATH: "/usr/local/bin:/usr/bin",
 				HOME: "/home/paperhanger",
@@ -174,6 +175,7 @@ describe("AgentHostSidecar - internal mode spawn arguments", () => {
 			PORT: "8765",
 			FLUE_MODEL: "anthropic/claude-sonnet-4-6",
 			ANTHROPIC_API_KEY: "sk-test",
+			KIMI_API_KEY: "sk-kimi-test",
 			// `Bun.spawn`'s `env` replaces (not merges with) the child's
 			// environment, so PATH/HOME must be explicitly passed through --
 			// otherwise the child process cannot resolve `node`/`git` by name.

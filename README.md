@@ -236,7 +236,7 @@ expansion in the YAML):
 | `PAPERHANGER_CONFIG` | Config file path (default `./paperhanger.yaml`) |
 | `LOG_LEVEL` | `debug` \| `info` (default) \| `warn` \| `error` |
 | `AGENT_HOST_SERVER_PATH` | Path to the built agent-host entrypoint (default `./agent-host/dist/server.mjs`; the Docker image sets this to `/app/agent-host/dist/server.mjs`) |
-| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY` | Forwarded to the agent-host sidecar process when set, matching `agent.model`'s provider |
+| `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `KIMI_API_KEY` | Forwarded to the agent-host sidecar process when set, matching `agent.model`'s provider (e.g. `kimi-coding/kimi-for-coding` uses `KIMI_API_KEY`) |
 
 ## Running the compose E2E
 
