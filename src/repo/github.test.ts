@@ -1,7 +1,23 @@
-import { createPrivateKey, generateKeyPairSync } from "node:crypto";
 import { describe, expect, spyOn, test } from "bun:test";
+import { createPrivateKey, generateKeyPairSync } from "node:crypto";
+import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
+import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
+import {
+	BasicTracerProvider,
+	InMemorySpanExporter,
+	SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
 import { createLogger } from "../observability/logger";
 import { GitHubApiError, GitHubAppClient } from "./github";
+
+// Registered once at module scope so the `github.request` span activated
+// inside `request()` (via `context.with(...)`) stays active across the
+// `await` boundaries in `fetchJson` -- see docs design section 10. A second
+// registration in the same bun process returns `false` and keeps the first,
+// which is harmless (same manager class); `bun test src/repo` only loads
+// this one test file that touches tracing, so there is no cross-file
+// interference here.
+context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
 
 function silentLogger() {
 	return createLogger({ sink: () => {} });
@@ -949,5 +965,300 @@ describe("GitHubAppClient - cloneUrlWithToken", () => {
 		expect(client.cloneUrlWithToken("acme", "widgets", "tok")).toBe(
 			"https://x-access-token:tok@ghe.example.com/acme/widgets.git",
 		);
+	});
+});
+
+describe("GitHubAppClient - github.request span", () => {
+	function testTracerProvider() {
+		const exporter = new InMemorySpanExporter();
+		const provider = new BasicTracerProvider({
+			spanProcessors: [new SimpleSpanProcessor(exporter)],
+		});
+		return { tracer: provider.getTracer("test"), exporter };
+	}
+
+	test("records one CLIENT span per logical operation with method/path/status attributes", async () => {
+		const { pkcs8Pem } = generateTestKeyMaterial();
+		const { tracer, exporter } = testTracerProvider();
+		const { fetchImpl } = createFakeFetch((call) => {
+			const bootstrapped = installationBootstrapResponse(call.url);
+			if (bootstrapped) {
+				return bootstrapped;
+			}
+			return jsonResponse(200, {
+				name: "widgets",
+				full_name: "acme/widgets",
+				default_branch: "main",
+				private: true,
+				html_url: "https://github.com/acme/widgets",
+				owner: { login: "acme" },
+			});
+		});
+		const client = new GitHubAppClient(
+			{ appId: "1", privateKey: pkcs8Pem },
+			silentLogger(),
+			fetchImpl,
+			tracer,
+		);
+
+		await client.getRepo("acme", "widgets");
+
+		// Three logical operations, each wrapped in its own request() call, hence
+		// its own span: resolveRepoInstallationId's getRepoInstallation, the
+		// installation token exchange, and getRepo's own request.
+		const spans = exporter
+			.getFinishedSpans()
+			.filter((s) => s.name === "github.request");
+		expect(spans.length).toBe(3);
+		for (const span of spans) {
+			expect(span.kind).toBe(SpanKind.CLIENT);
+			expect(span.status.code).not.toBe(SpanStatusCode.ERROR);
+		}
+		const getRepoSpan = spans.find(
+			(s) => s.attributes["paperhanger.github.path"] === "/repos/acme/widgets",
+		);
+		expect(getRepoSpan).toBeDefined();
+		expect(getRepoSpan?.attributes["http.request.method"]).toBe("GET");
+		expect(getRepoSpan?.attributes["http.response.status_code"]).toBe(200);
+		expect(
+			getRepoSpan?.attributes["paperhanger.github.auth_retried"],
+		).toBeUndefined();
+	});
+
+	test("truncates paperhanger.github.path at '?', never recording the query string", async () => {
+		const { pkcs8Pem } = generateTestKeyMaterial();
+		const { tracer, exporter } = testTracerProvider();
+		const { fetchImpl } = createFakeFetch((call) => {
+			if (call.url.endsWith("/orgs/acme/installation")) {
+				return jsonResponse(200, { id: 99 });
+			}
+			if (call.url.endsWith("/access_tokens")) {
+				return jsonResponse(200, {
+					token: "org-token",
+					expires_at: farFutureExpiry(55),
+				});
+			}
+			if (call.url.includes("/search/repositories")) {
+				return jsonResponse(200, { total_count: 0, items: [] });
+			}
+			return jsonResponse(404, { message: "unexpected" });
+		});
+		const client = new GitHubAppClient(
+			{ appId: "1", privateKey: pkcs8Pem },
+			silentLogger(),
+			fetchImpl,
+			tracer,
+		);
+
+		// The query string is built from caller-supplied free text (e.g. alert
+		// labels via the `org:` qualifier) and must never end up on a span.
+		await client.searchRepositories("secret-project-name org:acme");
+
+		const searchSpan = exporter
+			.getFinishedSpans()
+			.find(
+				(s) =>
+					s.name === "github.request" &&
+					s.attributes["paperhanger.github.path"] === "/search/repositories",
+			);
+		expect(searchSpan).toBeDefined();
+		for (const value of Object.values(searchSpan?.attributes ?? {})) {
+			expect(String(value)).not.toContain("secret-project-name");
+			expect(String(value)).not.toContain("?");
+		}
+	});
+
+	test("sets paperhanger.github.auth_retried on the single span wrapping a 401 retry", async () => {
+		const { pkcs8Pem } = generateTestKeyMaterial();
+		const { tracer, exporter } = testTracerProvider();
+		let labelsCallCount = 0;
+		const { fetchImpl } = createFakeFetch((call) => {
+			if (call.url.endsWith("/installation")) {
+				return jsonResponse(200, { id: 42 });
+			}
+			if (call.url.endsWith("/access_tokens")) {
+				return jsonResponse(200, {
+					token: "tok",
+					expires_at: farFutureExpiry(55),
+				});
+			}
+			if (call.url.endsWith("/labels")) {
+				labelsCallCount++;
+				if (labelsCallCount === 1) {
+					return jsonResponse(401, { message: "Bad credentials" });
+				}
+				return jsonResponse(200, [{ name: "automated-fix" }]);
+			}
+			return jsonResponse(404, { message: "unexpected" });
+		});
+		const client = new GitHubAppClient(
+			{ appId: "1", privateKey: pkcs8Pem },
+			silentLogger(),
+			fetchImpl,
+			tracer,
+		);
+
+		await client.addLabels("acme", "widgets", 7, ["automated-fix"]);
+
+		const labelsSpans = exporter
+			.getFinishedSpans()
+			.filter(
+				(s) =>
+					s.name === "github.request" &&
+					s.attributes["paperhanger.github.path"] ===
+						"/repos/acme/widgets/issues/7/labels",
+			);
+		// One span for the whole logical operation, not one per HTTP attempt.
+		expect(labelsSpans.length).toBe(1);
+		expect(labelsSpans[0]?.attributes["paperhanger.github.auth_retried"]).toBe(
+			true,
+		);
+		expect(labelsSpans[0]?.attributes["http.response.status_code"]).toBe(200);
+		expect(labelsSpans[0]?.status.code).not.toBe(SpanStatusCode.ERROR);
+	});
+
+	test("records ERROR status (redacted message, no exception event) when a GitHubApiError request ultimately fails", async () => {
+		const { pkcs8Pem } = generateTestKeyMaterial();
+		const { tracer, exporter } = testTracerProvider();
+		const { fetchImpl } = createFakeFetch((call) => {
+			const bootstrapped = installationBootstrapResponse(call.url);
+			if (bootstrapped) {
+				return bootstrapped;
+			}
+			return jsonResponse(422, { message: "Validation Failed" });
+		});
+		const client = new GitHubAppClient(
+			{ appId: "1", privateKey: pkcs8Pem },
+			silentLogger(),
+			fetchImpl,
+			tracer,
+		);
+
+		await expect(
+			client.createPullRequest("acme", "widgets", {
+				title: "t",
+				head: "h",
+				base: "main",
+			}),
+		).rejects.toThrow(GitHubApiError);
+
+		const prSpan = exporter
+			.getFinishedSpans()
+			.find(
+				(s) =>
+					s.name === "github.request" &&
+					s.attributes["paperhanger.github.path"] ===
+						"/repos/acme/widgets/pulls",
+			);
+		expect(prSpan).toBeDefined();
+		expect(prSpan?.status.code).toBe(SpanStatusCode.ERROR);
+		expect(prSpan?.attributes["http.response.status_code"]).toBe(422);
+		// GitHubApiError.message can embed the raw GitHub response body
+		// (see the WAF/proxy HTML-body test below); this client never records
+		// it via recordException or the span status message, even when -- as
+		// here -- the body happens to be an innocuous JSON error.
+		expect(prSpan?.events.some((e) => e.name === "exception")).toBe(false);
+		expect(prSpan?.status.message).not.toContain("Validation Failed");
+		expect(prSpan?.status.message).toBe("GitHub request failed (status=422)");
+	});
+
+	test("redacts a non-JSON (e.g. WAF/proxy HTML) error body from the span entirely, while the thrown error keeps the full message", async () => {
+		const { pkcs8Pem } = generateTestKeyMaterial();
+		const { tracer, exporter } = testTracerProvider();
+		const secretMarker = "<html>SECRET-MARKER</html>";
+		const { fetchImpl } = createFakeFetch((call) => {
+			const bootstrapped = installationBootstrapResponse(call.url);
+			if (bootstrapped) {
+				return bootstrapped;
+			}
+			return new Response(secretMarker, {
+				status: 503,
+				headers: { "content-type": "text/html" },
+			});
+		});
+		const client = new GitHubAppClient(
+			{ appId: "1", privateKey: pkcs8Pem },
+			silentLogger(),
+			fetchImpl,
+			tracer,
+		);
+
+		let thrown: unknown;
+		try {
+			await client.createPullRequest("acme", "widgets", {
+				title: "t",
+				head: "h",
+				base: "main",
+			});
+			throw new Error("expected rejection");
+		} catch (err) {
+			thrown = err;
+		}
+
+		// Error semantics for callers/logs are unchanged: the full raw body is
+		// still on the thrown GitHubApiError.
+		expect(thrown).toBeInstanceOf(GitHubApiError);
+		expect((thrown as InstanceType<typeof GitHubApiError>).status).toBe(503);
+		expect((thrown as Error).message).toBe(secretMarker);
+
+		const prSpan = exporter
+			.getFinishedSpans()
+			.find(
+				(s) =>
+					s.name === "github.request" &&
+					s.attributes["paperhanger.github.path"] ===
+						"/repos/acme/widgets/pulls",
+			);
+		expect(prSpan).toBeDefined();
+		expect(prSpan?.status.code).toBe(SpanStatusCode.ERROR);
+		expect(prSpan?.attributes["http.response.status_code"]).toBe(503);
+
+		// No trace of the raw body anywhere on the exported span: not in the
+		// status message, not in any attribute, not in any event (recordException
+		// must not have run).
+		expect(prSpan?.status.message ?? "").not.toContain("SECRET-MARKER");
+		for (const value of Object.values(prSpan?.attributes ?? {})) {
+			expect(String(value)).not.toContain("SECRET-MARKER");
+		}
+		expect(prSpan?.events).toEqual([]);
+	});
+
+	test("activates the github.request span so trace.getActiveSpan() resolves to it inside fetchImpl", async () => {
+		const { pkcs8Pem } = generateTestKeyMaterial();
+		const { tracer, exporter } = testTracerProvider();
+		let activeSpanIdDuringFetch: string | undefined;
+		const { fetchImpl } = createFakeFetch((_call) => {
+			activeSpanIdDuringFetch = trace.getActiveSpan()?.spanContext().spanId;
+			return jsonResponse(200, { id: 1 });
+		});
+		const client = new GitHubAppClient(
+			{ appId: "1", privateKey: pkcs8Pem },
+			silentLogger(),
+			fetchImpl,
+			tracer,
+		);
+
+		await client.getRepoInstallation("acme", "widgets");
+
+		const span = exporter
+			.getFinishedSpans()
+			.find((s) => s.name === "github.request");
+		expect(span).toBeDefined();
+		expect(activeSpanIdDuringFetch).toBeDefined();
+		expect(activeSpanIdDuringFetch).toBe(span?.spanContext().spanId);
+	});
+
+	test("falls back to a working no-op tracer when none is injected", async () => {
+		const { pkcs8Pem } = generateTestKeyMaterial();
+		const { fetchImpl } = createFakeFetch(() => jsonResponse(200, { id: 1 }));
+		const client = new GitHubAppClient(
+			{ appId: "1", privateKey: pkcs8Pem },
+			silentLogger(),
+			fetchImpl,
+		);
+
+		await expect(
+			client.getRepoInstallation("acme", "widgets"),
+		).resolves.toEqual({ id: 1 });
 	});
 });

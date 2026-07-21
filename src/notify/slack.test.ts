@@ -1,4 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { SpanKind } from "@opentelemetry/api";
+import {
+	BasicTracerProvider,
+	InMemorySpanExporter,
+	SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
 import { createLogger } from "../observability/logger";
 import { SlackNotifier } from "./slack";
 import type { IncidentSnapshot, NotificationEvent } from "./types";
@@ -55,7 +61,7 @@ describe("SlackNotifier", () => {
 		const notifier = new SlackNotifier(
 			{ type: "slack", webhookUrl: WEBHOOK_URL },
 			silentLogger(),
-			fetchImpl,
+			{ fetchImpl },
 		);
 		const event: NotificationEvent = { kind: "diagnosis_started", incident };
 
@@ -91,7 +97,7 @@ describe("SlackNotifier", () => {
 		const notifier = new SlackNotifier(
 			{ type: "slack", webhookUrl: WEBHOOK_URL },
 			silentLogger(),
-			fetchImpl,
+			{ fetchImpl },
 		);
 		const event: NotificationEvent = {
 			kind: "pr_created",
@@ -125,7 +131,7 @@ describe("SlackNotifier", () => {
 		const notifier = new SlackNotifier(
 			{ type: "slack", webhookUrl: WEBHOOK_URL },
 			silentLogger(),
-			fetchImpl,
+			{ fetchImpl },
 		);
 		const longReport = "x".repeat(4000);
 		const event: NotificationEvent = {
@@ -149,7 +155,7 @@ describe("SlackNotifier", () => {
 		const notifier = new SlackNotifier(
 			{ type: "slack", webhookUrl: WEBHOOK_URL },
 			silentLogger(),
-			fetchImpl,
+			{ fetchImpl },
 		);
 		const exactReport = "z".repeat(3000);
 		const event: NotificationEvent = {
@@ -173,7 +179,7 @@ describe("SlackNotifier", () => {
 		const notifier = new SlackNotifier(
 			{ type: "slack", webhookUrl: WEBHOOK_URL },
 			silentLogger(),
-			fetchImpl,
+			{ fetchImpl },
 		);
 		const event: NotificationEvent = {
 			kind: "report_only",
@@ -196,7 +202,7 @@ describe("SlackNotifier", () => {
 		const notifier = new SlackNotifier(
 			{ type: "slack", webhookUrl: WEBHOOK_URL },
 			silentLogger(),
-			fetchImpl,
+			{ fetchImpl },
 		);
 		const shortReport = "Root cause: config drift in the deployment manifest.";
 		const event: NotificationEvent = {
@@ -219,7 +225,7 @@ describe("SlackNotifier", () => {
 		const notifier = new SlackNotifier(
 			{ type: "slack", webhookUrl: WEBHOOK_URL },
 			silentLogger(),
-			fetchImpl,
+			{ fetchImpl },
 		);
 
 		await notifier.notify({
@@ -256,7 +262,7 @@ describe("SlackNotifier", () => {
 		const notifier = new SlackNotifier(
 			{ type: "slack", webhookUrl: WEBHOOK_URL },
 			logger,
-			fetchImpl,
+			{ fetchImpl },
 		);
 
 		await expect(
@@ -268,5 +274,26 @@ describe("SlackNotifier", () => {
 		expect(entry.level).toBe("error");
 		expect(entry.status).toBe(400);
 		expect(entry.bodyExcerpt).toBe("invalid_payload");
+	});
+
+	test("threads the injected tracer into postJson, producing a notify.post span with component 'slack'", async () => {
+		const { fetchImpl } = mockFetch(new Response("ok", { status: 200 }));
+		const exporter = new InMemorySpanExporter();
+		const provider = new BasicTracerProvider({
+			spanProcessors: [new SimpleSpanProcessor(exporter)],
+		});
+		const notifier = new SlackNotifier(
+			{ type: "slack", webhookUrl: WEBHOOK_URL },
+			silentLogger(),
+			{ fetchImpl, tracer: provider.getTracer("test") },
+		);
+
+		await notifier.notify({ kind: "diagnosis_started", incident });
+
+		const spans = exporter.getFinishedSpans();
+		expect(spans.length).toBe(1);
+		expect(spans[0]?.name).toBe("notify.post");
+		expect(spans[0]?.kind).toBe(SpanKind.CLIENT);
+		expect(spans[0]?.attributes["paperhanger.notify.component"]).toBe("slack");
 	});
 });

@@ -1,4 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import { SpanKind } from "@opentelemetry/api";
+import {
+	BasicTracerProvider,
+	InMemorySpanExporter,
+	SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
 import { createLogger } from "../observability/logger";
 import type { IncidentSnapshot, NotificationEvent } from "./types";
 import { NotifierResponseError } from "./types";
@@ -57,7 +63,7 @@ describe("WebhookNotifier", () => {
 		const notifier = new WebhookNotifier(
 			{ type: "webhook", url: WEBHOOK_URL },
 			silentLogger(),
-			fetchImpl,
+			{ fetchImpl },
 		);
 		const event: NotificationEvent = {
 			kind: "pr_created",
@@ -79,7 +85,7 @@ describe("WebhookNotifier", () => {
 		const notifier = new WebhookNotifier(
 			{ type: "webhook", url: WEBHOOK_URL },
 			silentLogger(),
-			fetchImpl,
+			{ fetchImpl },
 		);
 
 		await notifier.notify({ kind: "skipped", incident, reason: "cooldown" });
@@ -97,7 +103,7 @@ describe("WebhookNotifier", () => {
 		const notifier = new WebhookNotifier(
 			{ type: "webhook", url: WEBHOOK_URL },
 			logger,
-			fetchImpl,
+			{ fetchImpl },
 		);
 
 		await expect(
@@ -109,5 +115,28 @@ describe("WebhookNotifier", () => {
 		expect(entry.notifier).toBe("webhook");
 		expect(entry.status).toBe(500);
 		expect(entry.bodyExcerpt).toBe("internal error");
+	});
+
+	test("threads the injected tracer into postJson, producing a notify.post span with component 'webhook'", async () => {
+		const { fetchImpl } = mockFetch(new Response("ok", { status: 200 }));
+		const exporter = new InMemorySpanExporter();
+		const provider = new BasicTracerProvider({
+			spanProcessors: [new SimpleSpanProcessor(exporter)],
+		});
+		const notifier = new WebhookNotifier(
+			{ type: "webhook", url: WEBHOOK_URL },
+			silentLogger(),
+			{ fetchImpl, tracer: provider.getTracer("test") },
+		);
+
+		await notifier.notify({ kind: "diagnosis_started", incident });
+
+		const spans = exporter.getFinishedSpans();
+		expect(spans.length).toBe(1);
+		expect(spans[0]?.name).toBe("notify.post");
+		expect(spans[0]?.kind).toBe(SpanKind.CLIENT);
+		expect(spans[0]?.attributes["paperhanger.notify.component"]).toBe(
+			"webhook",
+		);
 	});
 });

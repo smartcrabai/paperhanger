@@ -1,4 +1,11 @@
 import { describe, expect, test } from "bun:test";
+import { context, SpanStatusCode } from "@opentelemetry/api";
+import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
+import {
+	BasicTracerProvider,
+	InMemorySpanExporter,
+	SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
 import type { FixAgentRunResult } from "../agent/runner";
 import { createLogger } from "../observability/logger";
 import type { ResolvedRepo, ResolveRepoInput } from "../repo/resolver";
@@ -15,6 +22,24 @@ import {
 	type PipelineGitHubClient,
 	type PipelineResolver,
 } from "./pipeline";
+
+// Registered once at module scope so spans created inside nested
+// `context.with(...)` calls (across `await`s, e.g. child spans in
+// `pipeline.ts`) correctly nest under their parent -- see
+// docs design section 10. A second registration in the same bun process
+// returns `false` and keeps the first, which is harmless (same manager
+// class); `bun test src/core` only loads this one test file that touches
+// tracing, so there is no cross-file interference here.
+context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
+
+/** Fresh in-memory tracer + exporter pair for a single test's span assertions. */
+function newTracing() {
+	const exporter = new InMemorySpanExporter();
+	const provider = new BasicTracerProvider({
+		spanProcessors: [new SimpleSpanProcessor(exporter)],
+	});
+	return { tracer: provider.getTracer("test"), exporter };
+}
 
 function silentLogger() {
 	return createLogger({ sink: () => {} });
@@ -650,5 +675,488 @@ describe("IncidentPipeline - notification emission matrix", () => {
 				scenario.expectedKinds,
 			);
 		}
+	});
+});
+
+describe("IncidentPipeline - OTel span tree (design section 5+6)", () => {
+	test("starts a forced-root incident.process span with incident attributes and the pr_created outcome", async () => {
+		const { store, incident } = await setup();
+		const { tracer, exporter } = newTracing();
+		const resolved: ResolvedRepo = {
+			owner: "acme",
+			repo: "widgets",
+			method: "attribute",
+			confidence: "high",
+		};
+		const runnerResult: FixAgentRunResult = {
+			status: "pr_created",
+			prUrl: "https://github.com/acme/widgets/pull/9",
+			diagnosis: "diag",
+			report: "report",
+		};
+
+		const pipeline = makePipeline({
+			store,
+			tracer,
+			resolver: fakeResolver(resolved),
+			agentRunner: fakeAgentRunner(runnerResult),
+		});
+
+		await pipeline.process(incident);
+
+		const rootSpan = exporter
+			.getFinishedSpans()
+			.find((s) => s.name === "incident.process");
+		if (!rootSpan) {
+			throw new Error("expected an incident.process span");
+		}
+
+		// Forced root: no parent, even though this ran inside the surrounding
+		// test's own active context (there isn't one here, but the design
+		// requires `root: true` regardless of what's active).
+		expect(rootSpan.parentSpanContext).toBeUndefined();
+		expect(rootSpan.attributes["paperhanger.incident.id"]).toBe(incident.id);
+		expect(rootSpan.attributes["paperhanger.incident.fingerprint"]).toBe(
+			incident.fingerprint,
+		);
+		expect(rootSpan.attributes["paperhanger.incident.source"]).toBe(
+			incident.source,
+		);
+		expect(rootSpan.attributes["paperhanger.incident.severity"]).toBe(
+			incident.severity,
+		);
+		expect(rootSpan.attributes["paperhanger.incident.outcome"]).toBe(
+			"pr_created",
+		);
+		expect(rootSpan.ended).toBe(true);
+	});
+
+	test("nests incident.collect_telemetry / incident.resolve_repo / incident.agent_run under the root span, sharing its trace id", async () => {
+		const { store, incident } = await setup();
+		const { tracer, exporter } = newTracing();
+		const resolved: ResolvedRepo = {
+			owner: "acme",
+			repo: "widgets",
+			method: "attribute",
+			confidence: "high",
+		};
+
+		const pipeline = makePipeline({
+			store,
+			tracer,
+			resolver: fakeResolver(resolved),
+			agentRunner: fakeAgentRunner({
+				status: "pr_created",
+				prUrl: "https://github.com/acme/widgets/pull/1",
+				diagnosis: "d",
+				report: "r",
+			}),
+		});
+
+		await pipeline.process(incident);
+
+		const spans = exporter.getFinishedSpans();
+		const root = spans.find((s) => s.name === "incident.process");
+		const collect = spans.find((s) => s.name === "incident.collect_telemetry");
+		const resolve = spans.find((s) => s.name === "incident.resolve_repo");
+		const agentRun = spans.find((s) => s.name === "incident.agent_run");
+		if (!root || !collect || !resolve || !agentRun) {
+			throw new Error(
+				"expected all four incident.* spans to have been created",
+			);
+		}
+
+		const rootSpanId = root.spanContext().spanId;
+		const rootTraceId = root.spanContext().traceId;
+		for (const child of [collect, resolve, agentRun]) {
+			expect(child.parentSpanContext?.spanId).toBe(rootSpanId);
+			expect(child.spanContext().traceId).toBe(rootTraceId);
+		}
+	});
+
+	test("records a `notify` span event on the root span for every notifier call, in order", async () => {
+		const { store, incident } = await setup();
+		const { tracer, exporter } = newTracing();
+		const resolved: ResolvedRepo = {
+			owner: "acme",
+			repo: "widgets",
+			method: "attribute",
+			confidence: "high",
+		};
+
+		const pipeline = makePipeline({
+			store,
+			tracer,
+			resolver: fakeResolver(resolved),
+			agentRunner: fakeAgentRunner({
+				status: "pr_created",
+				prUrl: "https://github.com/acme/widgets/pull/1",
+				diagnosis: "d",
+				report: "r",
+			}),
+		});
+
+		await pipeline.process(incident);
+
+		const root = exporter
+			.getFinishedSpans()
+			.find((s) => s.name === "incident.process");
+		if (!root) {
+			throw new Error("expected an incident.process span");
+		}
+
+		const notifyEvents = root.events.filter((e) => e.name === "notify");
+		expect(
+			notifyEvents.map((e) => e.attributes?.["paperhanger.notify.kind"]),
+		).toEqual(["diagnosis_started", "pr_created"]);
+	});
+
+	test("incident.resolve_repo sets repo.resolved=false (not an error status) and the root outcome is 'unresolved' when nothing is found", async () => {
+		const { store, incident } = await setup();
+		const { tracer, exporter } = newTracing();
+
+		const pipeline = makePipeline({
+			store,
+			tracer,
+			resolver: fakeResolver(null),
+		});
+
+		await pipeline.process(incident);
+
+		const spans = exporter.getFinishedSpans();
+		const resolveSpan = spans.find((s) => s.name === "incident.resolve_repo");
+		if (!resolveSpan) {
+			throw new Error("expected an incident.resolve_repo span");
+		}
+		expect(resolveSpan.attributes["paperhanger.repo.resolved"]).toBe(false);
+		expect(resolveSpan.status.code).not.toBe(SpanStatusCode.ERROR);
+
+		const root = spans.find((s) => s.name === "incident.process");
+		expect(root?.attributes["paperhanger.incident.outcome"]).toBe("unresolved");
+	});
+
+	test("incident.resolve_repo records owner/name/method/confidence on a successful resolution", async () => {
+		const { store, incident } = await setup();
+		const { tracer, exporter } = newTracing();
+		const resolved: ResolvedRepo = {
+			owner: "acme",
+			repo: "widgets",
+			method: "mapping",
+			confidence: "high",
+		};
+
+		const pipeline = makePipeline({
+			store,
+			tracer,
+			resolver: fakeResolver(resolved),
+			agentRunner: fakeAgentRunner({
+				status: "report_only",
+				diagnosis: "d",
+				report: "r",
+			}),
+		});
+
+		await pipeline.process(incident);
+
+		const span = exporter
+			.getFinishedSpans()
+			.find((s) => s.name === "incident.resolve_repo");
+		if (!span) {
+			throw new Error("expected an incident.resolve_repo span");
+		}
+		expect(span.attributes["paperhanger.repo.owner"]).toBe("acme");
+		expect(span.attributes["paperhanger.repo.name"]).toBe("widgets");
+		expect(span.attributes["paperhanger.repo.method"]).toBe("mapping");
+		expect(span.attributes["paperhanger.repo.confidence"]).toBe("high");
+	});
+
+	test("incident.agent_run gets an ERROR status with the failure reason as message when the agent run fails", async () => {
+		const { store, incident } = await setup();
+		const { tracer, exporter } = newTracing();
+		const resolved: ResolvedRepo = {
+			owner: "acme",
+			repo: "widgets",
+			method: "attribute",
+			confidence: "high",
+		};
+
+		const pipeline = makePipeline({
+			store,
+			tracer,
+			resolver: fakeResolver(resolved),
+			agentRunner: fakeAgentRunner({
+				status: "failed",
+				failureReason: "tests did not pass",
+			}),
+		});
+
+		await pipeline.process(incident);
+
+		const span = exporter
+			.getFinishedSpans()
+			.find((s) => s.name === "incident.agent_run");
+		if (!span) {
+			throw new Error("expected an incident.agent_run span");
+		}
+		expect(span.attributes["paperhanger.agent.outcome"]).toBe("failed");
+		expect(span.status.code).toBe(SpanStatusCode.ERROR);
+		expect(span.status.message).toBe("tests did not pass");
+	});
+
+	test("incident.collect_telemetry records the exception + ERROR status (without aborting the run) when telemetry collection fails", async () => {
+		const { store, incident } = await setup();
+		const { tracer, exporter } = newTracing();
+		const resolved: ResolvedRepo = {
+			owner: "acme",
+			repo: "widgets",
+			method: "mapping",
+			confidence: "high",
+		};
+		const failingSource = fakeTelemetrySource({
+			queryLogs: async () => {
+				throw new Error("greptimedb unreachable");
+			},
+		});
+
+		const pipeline = makePipeline({
+			store,
+			tracer,
+			telemetrySource: failingSource,
+			resolver: fakeResolver(resolved),
+			agentRunner: fakeAgentRunner({
+				status: "report_only",
+				diagnosis: "d",
+				report: "r",
+			}),
+		});
+
+		await pipeline.process(incident);
+
+		const span = exporter
+			.getFinishedSpans()
+			.find((s) => s.name === "incident.collect_telemetry");
+		if (!span) {
+			throw new Error("expected an incident.collect_telemetry span");
+		}
+		expect(span.status.code).toBe(SpanStatusCode.ERROR);
+		expect(span.status.message).toBe("telemetry collection failed");
+		// Redacted universally: no recordException (telemetrySource errors, e.g.
+		// GreptimeDbError, can echo GreptimeDB's response body -- which may
+		// contain the submitted SQL/PromQL text). Only the constructor name is
+		// recorded, never the raw message.
+		expect(span.events.some((e) => e.name === "exception")).toBe(false);
+		expect(span.attributes["paperhanger.telemetry.error_name"]).toBe("Error");
+
+		// Collection failure degrades gracefully -- the pipeline itself still
+		// reaches a normal terminal state, never an unexpected failure.
+		expect((await store.getIncident(incident.id))?.status).toBe("report_only");
+	});
+
+	test("never leaks the raw telemetry error message onto the collect_telemetry span, even when it embeds upstream-tainted text (e.g. a GreptimeDbError response body echoing submitted SQL/PromQL)", async () => {
+		const { store, incident } = await setup();
+		const { tracer, exporter } = newTracing();
+		const resolved: ResolvedRepo = {
+			owner: "acme",
+			repo: "widgets",
+			method: "mapping",
+			confidence: "high",
+		};
+		const marker = "SELECT__SECRET_MARKER__FROM_UPSTREAM_SQL_9f3a";
+		const failingSource = fakeTelemetrySource({
+			queryLogs: async () => {
+				throw new Error(`GreptimeDB query failed: ${marker}`);
+			},
+		});
+
+		const pipeline = makePipeline({
+			store,
+			tracer,
+			telemetrySource: failingSource,
+			resolver: fakeResolver(resolved),
+			agentRunner: fakeAgentRunner({
+				status: "report_only",
+				diagnosis: "d",
+				report: "r",
+			}),
+		});
+
+		await pipeline.process(incident);
+
+		const span = exporter
+			.getFinishedSpans()
+			.find((s) => s.name === "incident.collect_telemetry");
+		if (!span) {
+			throw new Error("expected an incident.collect_telemetry span");
+		}
+
+		const serialized = JSON.stringify({
+			status: span.status,
+			events: span.events,
+			attributes: span.attributes,
+		});
+		expect(serialized.includes(marker)).toBe(false);
+	});
+
+	test("incident.collect_telemetry records telemetry.configured=false and no error when no telemetry source is configured", async () => {
+		const { store, incident } = await setup();
+		const { tracer, exporter } = newTracing();
+		const resolved: ResolvedRepo = {
+			owner: "acme",
+			repo: "widgets",
+			method: "mapping",
+			confidence: "high",
+		};
+
+		const pipeline = makePipeline({
+			store,
+			tracer,
+			telemetrySource: undefined,
+			resolver: fakeResolver(resolved),
+			agentRunner: fakeAgentRunner({
+				status: "report_only",
+				diagnosis: "d",
+				report: "r",
+			}),
+		});
+
+		await pipeline.process(incident);
+
+		const span = exporter
+			.getFinishedSpans()
+			.find((s) => s.name === "incident.collect_telemetry");
+		if (!span) {
+			throw new Error("expected an incident.collect_telemetry span");
+		}
+		expect(span.attributes["paperhanger.telemetry.configured"]).toBe(false);
+		expect(span.status.code).not.toBe(SpanStatusCode.ERROR);
+	});
+
+	test("records a generic ERROR status (no exception event, no raw message) plus an error_name attribute on the root span, and outcome=failed, for an unexpected pipeline failure", async () => {
+		const { store, incident } = await setup();
+		const { tracer, exporter } = newTracing();
+		const resolver: PipelineResolver = {
+			async resolve() {
+				throw new Error("resolver blew up");
+			},
+		};
+
+		const pipeline = makePipeline({ store, tracer, resolver });
+
+		await pipeline.process(incident);
+
+		const root = exporter
+			.getFinishedSpans()
+			.find((s) => s.name === "incident.process");
+		if (!root) {
+			throw new Error("expected an incident.process span");
+		}
+		expect(root.status.code).toBe(SpanStatusCode.ERROR);
+		expect(root.status.message).toBe("incident processing failed unexpectedly");
+		// Redacted: `finalizeUnexpectedFailure` is the pipeline's guaranteed
+		// catch-all, so the caught error can be anything upstream (e.g. a
+		// GitHubApiError echoing a raw org-search query or response body) --
+		// no recordException and no raw err.message ever reach the root span.
+		expect(root.events.some((e) => e.name === "exception")).toBe(false);
+		expect(root.attributes["paperhanger.incident.error_name"]).toBe("Error");
+		expect(root.attributes["paperhanger.incident.outcome"]).toBe("failed");
+
+		const notifyEvents = root.events.filter((e) => e.name === "notify");
+		expect(
+			notifyEvents.map((e) => e.attributes?.["paperhanger.notify.kind"]),
+		).toEqual(["diagnosis_started", "failed"]);
+	});
+
+	test("never leaks a raw error message onto the root span via finalizeUnexpectedFailure, even when it embeds upstream-tainted text (e.g. a GitHubApiError echoing a raw org-search query or response body)", async () => {
+		const { store, incident } = await setup();
+		const { tracer, exporter } = newTracing();
+		const marker = "ORG_SEARCH__SECRET_MARKER__RAW_GITHUB_BODY_7c1d";
+		const resolver: PipelineResolver = {
+			async resolve() {
+				throw new Error(`GitHub org search failed: ${marker}`);
+			},
+		};
+
+		const pipeline = makePipeline({ store, tracer, resolver });
+
+		await pipeline.process(incident);
+
+		const root = exporter
+			.getFinishedSpans()
+			.find((s) => s.name === "incident.process");
+		if (!root) {
+			throw new Error("expected an incident.process span");
+		}
+
+		const serialized = JSON.stringify({
+			status: root.status,
+			events: root.events,
+			attributes: root.attributes,
+		});
+		expect(serialized.includes(marker)).toBe(false);
+	});
+
+	test("incident.resolve_repo gets a generic ERROR status (no raw message) and an error_name attribute when resolver.resolve throws, and never leaks the raw error text onto the span", async () => {
+		const { store, incident } = await setup();
+		const { tracer, exporter } = newTracing();
+		const marker = "GH_API__SECRET_MARKER__ORG_SEARCH_QUERY_4e2b";
+		const resolver: PipelineResolver = {
+			async resolve() {
+				throw new Error(`GitHub org search failed: ${marker}`);
+			},
+		};
+
+		const pipeline = makePipeline({ store, tracer, resolver });
+
+		await pipeline.process(incident);
+
+		const span = exporter
+			.getFinishedSpans()
+			.find((s) => s.name === "incident.resolve_repo");
+		if (!span) {
+			throw new Error("expected an incident.resolve_repo span");
+		}
+		expect(span.status.code).toBe(SpanStatusCode.ERROR);
+		expect(span.status.message).toBe("repo resolution failed");
+		expect(span.attributes["paperhanger.repo.error_name"]).toBe("Error");
+		expect(span.events.some((e) => e.name === "exception")).toBe(false);
+
+		const serialized = JSON.stringify({
+			status: span.status,
+			events: span.events,
+			attributes: span.attributes,
+		});
+		expect(serialized.includes(marker)).toBe(false);
+
+		// resolveRepo rethrows unchanged, so process()'s outer catch-all still
+		// runs and the incident still reaches a terminal 'failed' state.
+		expect((await store.getIncident(incident.id))?.status).toBe("failed");
+	});
+
+	test("keeps the exact store.updateIncident transition order when a tracer is configured", async () => {
+		const { store, incident } = await setup();
+		const { transitions } = trackTransitions(store);
+		const { tracer } = newTracing();
+		const resolved: ResolvedRepo = {
+			owner: "acme",
+			repo: "widgets",
+			method: "attribute",
+			confidence: "high",
+		};
+
+		const pipeline = makePipeline({
+			store,
+			tracer,
+			resolver: fakeResolver(resolved),
+			agentRunner: fakeAgentRunner({
+				status: "pr_created",
+				prUrl: "https://github.com/acme/widgets/pull/1",
+				diagnosis: "d",
+				report: "r",
+			}),
+		});
+
+		await pipeline.process(incident);
+
+		expect(transitions).toEqual(["collecting", "resolving_repo", "pr_created"]);
 	});
 });

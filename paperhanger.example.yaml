@@ -45,6 +45,17 @@ telemetry:
   # tracesTable: opentelemetry_traces
   # timeoutMs: 30000
 
+# Self-instrumentation: where paperhanger exports ITS OWN OTLP traces (see
+# src/observability/tracing.ts). Distinct from `telemetry` above, which is
+# where paperhanger reads other services' telemetry from. Omit this whole
+# section to run with tracing disabled (the default).
+# observability:
+#   endpoint: http://localhost:4318/v1/traces
+#   serviceName: paperhanger
+#   headers:
+#     x-greptime-db-name: public
+#     Authorization: Bearer ${OTEL_EXPORTER_AUTH_TOKEN}
+
 # Telemetry collection window, relative to the alert's startsAt time.
 collect:
   windowBeforeMinutes: 30

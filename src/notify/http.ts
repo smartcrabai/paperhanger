@@ -9,6 +9,13 @@
  * zero log output.
  */
 
+import {
+	context,
+	SpanKind,
+	SpanStatusCode,
+	type Tracer,
+	trace,
+} from "@opentelemetry/api";
 import type { Logger } from "../observability/logger";
 import { NotifierResponseError, NotifierTimeoutError } from "./types";
 
@@ -36,6 +43,10 @@ async function readBodyExcerpt(res: Response): Promise<string> {
  * `NotifierTimeoutError` instead. Callers (individual `Notifier`
  * implementations) are expected to let both propagate; `CompositeNotifier` is
  * the layer that catches and logs them.
+ *
+ * Wraps the call in a `notify.post` CLIENT span. Deliberately records no
+ * `url` attribute: notifier webhook URLs (Slack/Discord in particular) embed
+ * secrets in the path/query.
  */
 export async function postJson(params: {
 	fetchImpl: typeof fetch;
@@ -44,6 +55,10 @@ export async function postJson(params: {
 	notifierName: string;
 	logger: Logger;
 	timeoutMs?: number;
+	/** Tracer for the `notify.post` span. Defaults to a no-op tracer (tracing disabled) when omitted. */
+	tracer?: Tracer;
+	/** Notifier type ("slack" / "discord" / "webhook"), recorded as `paperhanger.notify.component`. */
+	component?: string;
 }): Promise<void> {
 	const {
 		fetchImpl,
@@ -52,40 +67,79 @@ export async function postJson(params: {
 		notifierName,
 		logger,
 		timeoutMs = DEFAULT_NOTIFY_TIMEOUT_MS,
+		tracer = trace.getTracer("notify"),
+		component,
 	} = params;
 
-	const controller = new AbortController();
-	let timedOut = false;
-	const timer = setTimeout(() => {
-		timedOut = true;
-		controller.abort();
-	}, timeoutMs);
+	const span = tracer.startSpan("notify.post", { kind: SpanKind.CLIENT });
+	if (component !== undefined) {
+		span.setAttribute("paperhanger.notify.component", component);
+	}
 
-	let res: Response;
 	try {
-		res = await fetchImpl(url, {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify(body),
-			signal: controller.signal,
+		// Activate the leaf span for the duration of the request so that
+		// logger.error("notify.timeout" / "notify.http_error", ...) calls
+		// inside this closure correlate (traceId/spanId) to THIS span.
+		await context.with(trace.setSpan(context.active(), span), async () => {
+			const controller = new AbortController();
+			let timedOut = false;
+			const timer = setTimeout(() => {
+				timedOut = true;
+				controller.abort();
+			}, timeoutMs);
+
+			let res: Response;
+			try {
+				res = await fetchImpl(url, {
+					method: "POST",
+					headers: { "content-type": "application/json" },
+					body: JSON.stringify(body),
+					signal: controller.signal,
+				});
+			} catch (err) {
+				if (timedOut || controller.signal.aborted) {
+					logger.error("notify.timeout", { notifier: notifierName, timeoutMs });
+					throw new NotifierTimeoutError(notifierName, timeoutMs);
+				}
+				throw err;
+			} finally {
+				clearTimeout(timer);
+			}
+
+			span.setAttribute("http.response.status_code", res.status);
+
+			if (!res.ok) {
+				const bodyExcerpt = await readBodyExcerpt(res);
+				logger.error("notify.http_error", {
+					notifier: notifierName,
+					status: res.status,
+					bodyExcerpt,
+				});
+				throw new NotifierResponseError(notifierName, res.status, bodyExcerpt);
+			}
 		});
 	} catch (err) {
-		if (timedOut || controller.signal.aborted) {
-			logger.error("notify.timeout", { notifier: notifierName, timeoutMs });
-			throw new NotifierTimeoutError(notifierName, timeoutMs);
+		if (err instanceof NotifierResponseError) {
+			// NotifierResponseError.message embeds up to 500 chars of the
+			// target's RAW response body (see readBodyExcerpt above).
+			// recordException would export that raw body to the trace
+			// backend, so record a redacted status message instead;
+			// http.response.status_code (set above) already carries the code.
+			span.setStatus({
+				code: SpanStatusCode.ERROR,
+				message: `notifier request failed (status=${err.status})`,
+			});
+		} else {
+			// NotifierTimeoutError's message is locally constructed
+			// (notifierName + configured timeoutMs, both trusted values) and
+			// carries no upstream-controlled content, so recording the full
+			// exception is safe here.
+			const message = err instanceof Error ? err.message : String(err);
+			span.recordException(err instanceof Error ? err : new Error(message));
+			span.setStatus({ code: SpanStatusCode.ERROR, message });
 		}
 		throw err;
 	} finally {
-		clearTimeout(timer);
-	}
-
-	if (!res.ok) {
-		const bodyExcerpt = await readBodyExcerpt(res);
-		logger.error("notify.http_error", {
-			notifier: notifierName,
-			status: res.status,
-			bodyExcerpt,
-		});
-		throw new NotifierResponseError(notifierName, res.status, bodyExcerpt);
+		span.end();
 	}
 }

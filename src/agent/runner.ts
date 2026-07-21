@@ -18,12 +18,12 @@
 
 import { createFlueClient as defaultCreateFlueClient } from "@flue/sdk";
 import {
-	FIX_INCIDENT_WORKFLOW_NAME,
-	type FixAgentWorkflowInput,
-	type FixAgentWorkflowOutput,
-	FixAgentWorkflowOutputSchema,
-} from "./contract";
-import { findForbiddenPaths } from "./forbidden-paths";
+	context,
+	SpanKind,
+	SpanStatusCode,
+	type Tracer,
+	trace,
+} from "@opentelemetry/api";
 import type { Incident, IncidentEvent } from "../core/types";
 import type { Logger } from "../observability/logger";
 import type {
@@ -32,9 +32,16 @@ import type {
 	CreatePullRequestResult,
 } from "../repo/github";
 import type { ResolvedRepo } from "../repo/resolver";
+import type { IncidentStore } from "../storage/types";
 import { renderContextMarkdown } from "../telemetry/context-builder";
 import type { IncidentContext } from "../telemetry/types";
-import type { IncidentStore } from "../storage/types";
+import {
+	FIX_INCIDENT_WORKFLOW_NAME,
+	type FixAgentWorkflowInput,
+	type FixAgentWorkflowOutput,
+	FixAgentWorkflowOutputSchema,
+} from "./contract";
+import { findForbiddenPaths } from "./forbidden-paths";
 
 /** Structural subset of `GitHubAppClient` this runner depends on. */
 export interface FixAgentGitHubClient {
@@ -107,6 +114,8 @@ export interface FixAgentRunnerDeps {
 	logger: Logger;
 	/** Injectable for tests; defaults to `@flue/sdk`'s `createFlueClient`. Only used for the `{ baseUrl }` `FlueClientProvider` form. */
 	createFlueClient?: typeof defaultCreateFlueClient;
+	/** Tracer for the `agent.invoke_workflow` span. Defaults to a no-op tracer (tracing disabled) when omitted. */
+	tracer?: Tracer;
 }
 
 export type FixAgentRunResult =
@@ -345,45 +354,102 @@ export class FixAgentRunner {
 	): Promise<
 		{ ok: true; result: unknown } | { ok: false; failureReason: string }
 	> {
-		const client = this.getFlueClient();
-		const controller = new AbortController();
-		let timedOut = false;
-		const timer = setTimeout(() => {
-			timedOut = true;
-			controller.abort();
-		}, timeoutMinutes * 60_000);
+		const tracer = this.deps.tracer ?? trace.getTracer("fix-agent-runner");
+		const span = tracer.startSpan("agent.invoke_workflow", {
+			kind: SpanKind.CLIENT,
+		});
+		span.setAttribute("paperhanger.incident.id", incidentId);
+		span.setAttribute("paperhanger.agent.timeout_minutes", timeoutMinutes);
 
 		try {
-			const { result } = await client.workflows.invoke(
-				FIX_INCIDENT_WORKFLOW_NAME,
-				{ input, wait: "result", signal: controller.signal },
+			// Active so that logger calls inside this scope (e.g.
+			// fix_agent.workflow_wait_timed_out) correlate to this span.
+			return await context.with(
+				trace.setSpan(context.active(), span),
+				async () => {
+					let invocation:
+						| { ok: true; result: unknown }
+						| { ok: false; failureReason: string };
+					try {
+						// getFlueClient() lives inside this try too: a malformed
+						// `agent.hostUrl` (e.g. "127.0.0.1:8700") makes @flue/sdk's
+						// createFlueClient throw synchronously from `new URL(...)`,
+						// and that must be converted into the same resolved
+						// `{ ok: false, failureReason }` shape as every other
+						// failure path -- otherwise it would escape this method
+						// entirely, breaking invokeWorkflow's never-throw contract
+						// and leaving the span below UNSET instead of ERROR.
+						const client = this.getFlueClient();
+						const controller = new AbortController();
+						let timedOut = false;
+						const timer = setTimeout(() => {
+							timedOut = true;
+							controller.abort();
+						}, timeoutMinutes * 60_000);
+
+						try {
+							const { result } = await client.workflows.invoke(
+								FIX_INCIDENT_WORKFLOW_NAME,
+								{ input, wait: "result", signal: controller.signal },
+							);
+							invocation = { ok: true, result };
+						} catch (err) {
+							if (timedOut || controller.signal.aborted) {
+								const runId = extractRunId(err);
+								this.logger.warn("fix_agent.workflow_wait_timed_out", {
+									incidentId,
+									timeoutMinutes,
+									runId,
+								});
+								invocation = {
+									ok: false,
+									failureReason:
+										`Timed out after waiting ${timeoutMinutes}m for the fix-incident workflow to finish. ` +
+										"paperhanger has stopped waiting, but the agent-host may still be executing the " +
+										"workflow in the background and could push a branch or otherwise modify the " +
+										"repository later; @flue/sdk currently exposes no workflow-level cancellation API " +
+										"(see docs/research/flue.md section 5).",
+								};
+							} else {
+								const message =
+									err instanceof Error ? err.message : String(err);
+								invocation = {
+									ok: false,
+									failureReason: `Failed to invoke the fix-incident workflow: ${message}`,
+								};
+							}
+						} finally {
+							clearTimeout(timer);
+						}
+					} catch (err) {
+						const message = err instanceof Error ? err.message : String(err);
+						invocation = {
+							ok: false,
+							failureReason: `Failed to invoke the fix-incident workflow: ${message}`,
+						};
+					}
+
+					// Span status is set from the RESOLVED value, not from a catch: this
+					// method's contract is to never reject (a wait-timeout, an SDK-level
+					// failure, and a throwing client factory are all captured above as
+					// `{ ok: false, failureReason }`), so a try/catch around this whole
+					// method would never observe an error. Note also that the span only
+					// exports once `.end()` runs below, after `invokeWorkflow` has already
+					// resolved -- a long-running workflow gives no partial visibility
+					// while it's in flight; this is an accepted limitation of a
+					// request/response CLIENT span here.
+					if (!invocation.ok) {
+						span.setAttribute("paperhanger.agent.ok", false);
+						span.setStatus({
+							code: SpanStatusCode.ERROR,
+							message: invocation.failureReason,
+						});
+					}
+					return invocation;
+				},
 			);
-			return { ok: true, result };
-		} catch (err) {
-			if (timedOut || controller.signal.aborted) {
-				const runId = extractRunId(err);
-				this.logger.warn("fix_agent.workflow_wait_timed_out", {
-					incidentId,
-					timeoutMinutes,
-					runId,
-				});
-				return {
-					ok: false,
-					failureReason:
-						`Timed out after waiting ${timeoutMinutes}m for the fix-incident workflow to finish. ` +
-						"paperhanger has stopped waiting, but the agent-host may still be executing the " +
-						"workflow in the background and could push a branch or otherwise modify the " +
-						"repository later; @flue/sdk currently exposes no workflow-level cancellation API " +
-						"(see docs/research/flue.md section 5).",
-				};
-			}
-			const message = err instanceof Error ? err.message : String(err);
-			return {
-				ok: false,
-				failureReason: `Failed to invoke the fix-incident workflow: ${message}`,
-			};
 		} finally {
-			clearTimeout(timer);
+			span.end();
 		}
 	}
 

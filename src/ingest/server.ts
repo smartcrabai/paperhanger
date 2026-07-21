@@ -12,6 +12,8 @@
  * `/readyz` are never gated.
  */
 
+import type { Tracer } from "@opentelemetry/api";
+import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
 import type { IncidentManager } from "../core/incident-manager";
 import type { IncidentEvent } from "../core/types";
 import type { Logger } from "../observability/logger";
@@ -36,6 +38,45 @@ export interface ServerDeps {
 	/** Keyed by source name, e.g. "grafana", "generic". */
 	adapters: Record<string, SourceAdapter>;
 	store: Pick<IncidentStore, "ping" | "getIncident" | "listIncidents">;
+	/** Falls back to a no-op tracer (no global provider registered) when omitted. See docs/spec.md section 3.9. */
+	tracer?: Tracer;
+}
+
+/** `http.route` template values this server ever dispatches to (design section 6). */
+type RouteTemplate =
+	| "/healthz"
+	| "/readyz"
+	| "/webhooks/:source"
+	| "/incidents"
+	| "/incidents/:id"
+	| "unmatched";
+
+/**
+ * Derives the `http.route` template for a request's path, mirroring the path
+ * checks in `route()` below (independent of method — a template describes the
+ * URL shape, and `route()` itself decides per-method whether it actually
+ * matches or falls through to "not found").
+ */
+function deriveRouteTemplate(url: URL): RouteTemplate {
+	if (url.pathname === "/healthz") {
+		return "/healthz";
+	}
+	if (url.pathname === "/readyz") {
+		return "/readyz";
+	}
+	if (url.pathname.startsWith(WEBHOOK_PATH_PREFIX)) {
+		return "/webhooks/:source";
+	}
+	if (url.pathname === "/incidents") {
+		return "/incidents";
+	}
+	if (
+		url.pathname.startsWith(INCIDENTS_PATH_PREFIX) &&
+		url.pathname.length > INCIDENTS_PATH_PREFIX.length
+	) {
+		return "/incidents/:id";
+	}
+	return "unmatched";
 }
 
 /** Parses the `?limit=` query param for `GET /incidents`; falls back/clamps to sane bounds on bad input. */
@@ -109,6 +150,7 @@ function checkApiToken(
 
 export function createServer(deps: ServerDeps): ReturnType<typeof Bun.serve> {
 	const { config, logger, manager, adapters, store } = deps;
+	const tracer = deps.tracer ?? trace.getTracer("server");
 
 	async function handleWebhook(
 		req: Request,
@@ -138,9 +180,36 @@ export function createServer(deps: ServerDeps): ReturnType<typeof Bun.serve> {
 			return new Response("invalid payload", { status: 400 });
 		}
 
+		// Enrich the active SERVER span (created in the `fetch` handler below)
+		// rather than starting a child span — the design's v1 correlates
+		// webhook handling with the request span via attributes only.
+		const span = trace.getActiveSpan();
+		span?.setAttribute("paperhanger.ingest.source", source);
+
+		// A batch can carry multiple events; scalar span attributes can only
+		// ever hold the LAST value written, so overwriting
+		// paperhanger.ingest.action / paperhanger.incident.id on every
+		// iteration would silently drop every event but the last from the
+		// exported span. Record one span EVENT per ingest event so the full
+		// per-event record survives, while ALSO keeping the two scalar
+		// attributes in sync with the last event -- the common case is a
+		// single-event batch, and simple span-attribute queries stay
+		// ergonomic for that case. The event count is set once after the
+		// loop.
 		for (const event of events) {
-			await manager.handleEvent(event);
+			const result = await manager.handleEvent(event);
+			span?.addEvent("ingest.event", {
+				"paperhanger.ingest.action": result.action,
+				...(result.incident
+					? { "paperhanger.incident.id": result.incident.id }
+					: {}),
+			});
+			span?.setAttribute("paperhanger.ingest.action", result.action);
+			if (result.incident) {
+				span?.setAttribute("paperhanger.incident.id", result.incident.id);
+			}
 		}
+		span?.setAttribute("paperhanger.ingest.event_count", events.length);
 
 		return Response.json({ accepted: events.length }, { status: 202 });
 	}
@@ -196,13 +265,60 @@ export function createServer(deps: ServerDeps): ReturnType<typeof Bun.serve> {
 		async fetch(req) {
 			const start = Date.now();
 			const url = new URL(req.url);
-			const response = await route(req, url);
-			logger.info("http.request", {
-				method: req.method,
-				path: url.pathname,
-				status: response.status,
-				durationMs: Date.now() - start,
+			const routeTemplate = deriveRouteTemplate(url);
+			const span = tracer.startSpan(`${req.method} ${routeTemplate}`, {
+				kind: SpanKind.SERVER,
+				attributes: {
+					"http.request.method": req.method,
+					"url.path": url.pathname,
+					"http.route": routeTemplate,
+				},
 			});
+
+			// Make the span active for the duration of `route()` so everything
+			// awaited in-request (manager.handleEvent -> store, etc.) nests under
+			// it. This relies on a globally registered
+			// AsyncLocalStorageContextManager to propagate across the `await`s
+			// inside `route()` (see src/observability/tracing.ts); with no
+			// context manager registered (tracing disabled), `context.with` is a
+			// no-op wrapper around a no-op span, so behavior is unchanged.
+			//
+			// The `http.request` summary log is written from INSIDE this same
+			// scope, once the response is known but before the scope (and the
+			// span) closes -- `logger.info` correlates a line with
+			// traceId/spanId only while `trace.getActiveSpan()` resolves to this
+			// span, which is only true inside `context.with`. Logging after
+			// `context.with` resolves (or after `span.end()`) would silently
+			// drop that correlation.
+			let response: Response;
+			try {
+				response = await context.with(
+					trace.setSpan(context.active(), span),
+					async () => {
+						const res = await route(req, url);
+						span.setAttribute("http.response.status_code", res.status);
+						logger.info("http.request", {
+							method: req.method,
+							path: url.pathname,
+							status: res.status,
+							durationMs: Date.now() - start,
+						});
+						return res;
+					},
+				);
+			} catch (err) {
+				span.recordException(
+					err instanceof Error ? err : new Error(String(err)),
+				);
+				span.setStatus({
+					code: SpanStatusCode.ERROR,
+					message: err instanceof Error ? err.message : String(err),
+				});
+				throw err;
+			} finally {
+				span.end();
+			}
+
 			return response;
 		},
 	});

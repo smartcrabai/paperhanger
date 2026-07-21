@@ -2,8 +2,12 @@
  * Minimal structured JSON-lines logger.
  *
  * Every log line is a single JSON object with at least `level`, `ts`, and
- * `msg`. Additional fields (from `child()` or per-call) are merged in.
+ * `msg`. Additional fields (from `child()` or per-call) are merged in. When
+ * called while an OTel span is active (see `src/observability/tracing.ts`),
+ * the line also carries `traceId`/`spanId` so logs and traces correlate.
  */
+
+import { isSpanContextValid, trace } from "@opentelemetry/api";
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 
@@ -57,10 +61,16 @@ export function createLogger(options: LoggerOptions = {}): Logger {
 		if (LEVEL_ORDER[msgLevel] < LEVEL_ORDER[level]) {
 			return;
 		}
+		const spanContext = trace.getActiveSpan()?.spanContext();
+		const correlation =
+			spanContext !== undefined && isSpanContextValid(spanContext)
+				? { traceId: spanContext.traceId, spanId: spanContext.spanId }
+				: {};
 		const entry = {
 			level: msgLevel,
 			ts: new Date().toISOString(),
 			msg,
+			...correlation,
 			...baseFields,
 			...fields,
 		};

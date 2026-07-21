@@ -11,7 +11,7 @@
 
 import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
 import { SeverityNumber } from "@opentelemetry/api-logs";
-import { AsyncHooksContextManager } from "@opentelemetry/context-async-hooks";
+import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-proto";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { resourceFromAttributes } from "@opentelemetry/resources";
@@ -43,7 +43,17 @@ export async function seedTelemetry(
 	// Required for context.active() to reflect context.with(...) — without a
 	// registered context manager, emitted logs would carry empty trace/span
 	// ids even inside a context.with block (see docs/research/greptimedb.md).
-	context.setGlobalContextManager(new AsyncHooksContextManager().enable());
+	//
+	// This MUST be AsyncLocalStorageContextManager (same class production uses
+	// in src/observability/tracing.ts), NOT the deprecated
+	// AsyncHooksContextManager: registration is first-wins per process, and on
+	// Bun runtimes where `bun test` shares globals across test files, an
+	// AsyncHooksContextManager registered here would poison every
+	// later-loaded suite's cross-`await` context propagation (AsyncHooks
+	// loses the active context after any `await` on Bun).
+	context.setGlobalContextManager(
+		new AsyncLocalStorageContextManager().enable(),
+	);
 
 	const resource = resourceFromAttributes({
 		"service.name": serviceName,

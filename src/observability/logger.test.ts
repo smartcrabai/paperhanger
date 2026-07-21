@@ -1,5 +1,17 @@
 import { describe, expect, test } from "bun:test";
+import { context, trace } from "@opentelemetry/api";
+import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
+import {
+	BasicTracerProvider,
+	InMemorySpanExporter,
+	SimpleSpanProcessor,
+} from "@opentelemetry/sdk-trace-base";
 import { createLogger } from "./logger";
+
+// Registered once at module scope so `context.with(...)` below reflects in
+// `context.active()` -- mirrors the shared hermetic test pattern used across
+// this OTel instrumentation work (see src/observability/tracing.test.ts).
+context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
 
 function collectLines(): { lines: string[]; sink: (line: string) => void } {
 	const lines: string[] = [];
@@ -69,5 +81,56 @@ describe("createLogger", () => {
 		expect(lines.length).toBe(1);
 		const entry = JSON.parse(lines[0] as string);
 		expect(entry.msg).toBe("kept");
+	});
+
+	test("omits traceId/spanId when no span is active", () => {
+		const { lines, sink } = collectLines();
+		const logger = createLogger({ sink });
+
+		logger.info("no active span");
+
+		const entry = JSON.parse(lines[0] as string);
+		expect(entry.traceId).toBeUndefined();
+		expect(entry.spanId).toBeUndefined();
+	});
+
+	test("includes traceId/spanId matching the active span", () => {
+		const { lines, sink } = collectLines();
+		const logger = createLogger({ sink });
+		const exporter = new InMemorySpanExporter();
+		const provider = new BasicTracerProvider({
+			spanProcessors: [new SimpleSpanProcessor(exporter)],
+		});
+		const tracer = provider.getTracer("logger-correlation-test");
+		const span = tracer.startSpan("test-span");
+		const spanContext = span.spanContext();
+
+		context.with(trace.setSpan(context.active(), span), () => {
+			logger.info("inside span");
+		});
+		span.end();
+
+		const entry = JSON.parse(lines[0] as string);
+		expect(entry.traceId).toBe(spanContext.traceId);
+		expect(entry.spanId).toBe(spanContext.spanId);
+	});
+
+	test("caller fields override the active span's traceId/spanId", () => {
+		const { lines, sink } = collectLines();
+		const logger = createLogger({ sink });
+		const exporter = new InMemorySpanExporter();
+		const provider = new BasicTracerProvider({
+			spanProcessors: [new SimpleSpanProcessor(exporter)],
+		});
+		const tracer = provider.getTracer("logger-correlation-override-test");
+		const span = tracer.startSpan("test-span");
+
+		context.with(trace.setSpan(context.active(), span), () => {
+			logger.info("inside span", { traceId: "overridden" });
+		});
+		span.end();
+
+		const entry = JSON.parse(lines[0] as string);
+		expect(entry.traceId).toBe("overridden");
 	});
 });

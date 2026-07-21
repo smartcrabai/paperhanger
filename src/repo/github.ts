@@ -17,6 +17,13 @@
  *   and only falls back to unauthenticated search when no org is present.
  */
 
+import {
+	context,
+	SpanKind,
+	SpanStatusCode,
+	type Tracer,
+	trace,
+} from "@opentelemetry/api";
 import type { Logger } from "../observability/logger";
 
 const DEFAULT_BASE_URL = "https://api.github.com";
@@ -379,6 +386,7 @@ export class GitHubAppClient {
 	private readonly logger: Logger;
 	private readonly fetchImpl: typeof fetch;
 	private readonly timeoutMs: number;
+	private readonly tracer: Tracer;
 
 	private signingKeyPromise: Promise<CryptoKey> | undefined;
 	private appJwtCache: { token: string; expiresAtSeconds: number } | undefined;
@@ -393,6 +401,7 @@ export class GitHubAppClient {
 		options: GitHubAppClientOptions,
 		logger: Logger,
 		fetchImpl: typeof fetch = fetch,
+		tracer?: Tracer,
 	) {
 		this.appId = options.appId;
 		this.privateKey = options.privateKey;
@@ -401,6 +410,7 @@ export class GitHubAppClient {
 		this.logger = logger.child({ component: "github-app-client" });
 		this.fetchImpl = fetchImpl;
 		this.timeoutMs = options.timeoutMs ?? DEFAULT_GITHUB_API_TIMEOUT_MS;
+		this.tracer = tracer ?? trace.getTracer("github-app-client");
 	}
 
 	/** `GET /repos/{owner}/{repo}/installation`. Requires the app JWT. */
@@ -654,12 +664,18 @@ export class GitHubAppClient {
 		return undefined;
 	}
 
+	/**
+	 * Issues one authenticated REST call and returns both the parsed body and
+	 * the HTTP status, so callers (namely `request()`, for its `github.request`
+	 * span's `http.response.status_code` attribute) can observe the status of a
+	 * *successful* response too, not just a thrown `GitHubApiError`'s.
+	 */
 	private async fetchJson<T>(
 		method: string,
 		path: string,
 		token: string | undefined,
 		body?: Record<string, unknown>,
-	): Promise<T> {
+	): Promise<{ data: T; status: number }> {
 		const headers: Record<string, string> = {
 			Accept: "application/vnd.github+json",
 			"X-GitHub-Api-Version": "2022-11-28",
@@ -708,15 +724,23 @@ export class GitHubAppClient {
 			);
 		}
 		if (res.status === 204) {
-			return undefined as T;
+			return { data: undefined as T, status: res.status };
 		}
-		return (await res.json()) as T;
+		return { data: (await res.json()) as T, status: res.status };
 	}
 
 	/**
 	 * Issues a request with the given auth mode, resolving/caching whatever
 	 * credential that mode needs. On a 401, refreshes the credential once
 	 * (bypassing its cache) and retries exactly once before giving up.
+	 *
+	 * Wrapped in a single `github.request` CLIENT span per logical operation
+	 * (the 401 retry, when it fires, nests inside the same span rather than
+	 * getting one of its own). `paperhanger.github.path` is truncated at the
+	 * first `?`: some callers (`searchRepositories`) build the query string
+	 * from upstream-controlled free text (alert labels), which must never be
+	 * recorded, while the path segment itself (including owner/repo
+	 * identifiers) is fine.
 	 */
 	private async request<T>(
 		method: string,
@@ -724,24 +748,77 @@ export class GitHubAppClient {
 		auth: AuthMode,
 		body?: Record<string, unknown>,
 	): Promise<T> {
-		const token = await this.tokenFor(auth, false);
-		try {
-			return await this.fetchJson<T>(method, path, token, body);
-		} catch (err) {
-			if (
-				err instanceof GitHubApiError &&
-				err.status === 401 &&
-				auth.type !== "none"
-			) {
-				this.logger.warn("github.request.retry_after_401", {
-					method,
-					path,
-					authType: auth.type,
-				});
-				const refreshedToken = await this.tokenFor(auth, true);
-				return this.fetchJson<T>(method, path, refreshedToken, body);
+		const span = this.tracer.startSpan("github.request", {
+			kind: SpanKind.CLIENT,
+		});
+		span.setAttribute("http.request.method", method);
+		span.setAttribute("paperhanger.github.path", path.split("?")[0] ?? path);
+
+		// Activate the span so logger calls inside this body (e.g. the 401
+		// retry warning) correlate to it rather than to whatever span was
+		// active on the caller's side.
+		return context.with(trace.setSpan(context.active(), span), async () => {
+			try {
+				const token = await this.tokenFor(auth, false);
+				try {
+					const { data, status } = await this.fetchJson<T>(
+						method,
+						path,
+						token,
+						body,
+					);
+					span.setAttribute("http.response.status_code", status);
+					return data;
+				} catch (err) {
+					if (
+						err instanceof GitHubApiError &&
+						err.status === 401 &&
+						auth.type !== "none"
+					) {
+						this.logger.warn("github.request.retry_after_401", {
+							method,
+							path,
+							authType: auth.type,
+						});
+						span.setAttribute("paperhanger.github.auth_retried", true);
+						const refreshedToken = await this.tokenFor(auth, true);
+						const { data, status } = await this.fetchJson<T>(
+							method,
+							path,
+							refreshedToken,
+							body,
+						);
+						span.setAttribute("http.response.status_code", status);
+						return data;
+					}
+					throw err;
+				}
+			} catch (err) {
+				if (err instanceof GitHubApiError) {
+					// GitHubApiError.message can embed the RAW response body verbatim
+					// (see readErrorBody/extractErrorMessage above) -- e.g. an HTML
+					// error page from a proxy/WAF in front of GitHub, unbounded and
+					// unredacted. Never pass it to recordException or into the span
+					// status message; http.response.status_code (set here) already
+					// carries the actionable signal for a span.
+					span.setAttribute("http.response.status_code", err.status);
+					span.setStatus({
+						code: SpanStatusCode.ERROR,
+						message: `GitHub request failed (status=${err.status})`,
+					});
+				} else {
+					// Non-GitHubApiError exceptions originate locally (e.g. an
+					// AbortError surfaced before the timeout mapping below, or a
+					// programming error) and carry no upstream-controlled content,
+					// so recording the full exception is safe here.
+					const message = err instanceof Error ? err.message : String(err);
+					span.recordException(err instanceof Error ? err : new Error(message));
+					span.setStatus({ code: SpanStatusCode.ERROR, message });
+				}
+				throw err;
+			} finally {
+				span.end();
 			}
-			throw err;
-		}
+		});
 	}
 }

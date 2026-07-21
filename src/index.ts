@@ -5,11 +5,13 @@
  *
  * Wiring order (docs/spec.md section 2, docs/architecture.md):
  *
- *   config -> store -> [telemetry source, if configured] -> GitHub App client
+ *   config -> tracing (self-instrumentation, see src/observability/tracing.ts)
+ *   -> store -> [telemetry source, if configured] -> GitHub App client
  *   -> repo resolver -> agent-host sidecar -> fix agent runner
  *   -> notifiers -> incident pipeline -> incident manager -> ingest server
  */
 
+import type { Tracer } from "@opentelemetry/api";
 import { FixAgentRunner } from "./agent/runner";
 import { AgentHostSidecar } from "./agent/sidecar";
 import { loadConfig } from "./config/load";
@@ -23,6 +25,7 @@ import { grafanaAdapter } from "./ingest/adapters/grafana";
 import { createServer } from "./ingest/server";
 import { createLogger } from "./observability/logger";
 import type { Logger } from "./observability/logger";
+import { createTracing } from "./observability/tracing";
 import { DiscordNotifier } from "./notify/discord";
 import { SlackNotifier } from "./notify/slack";
 import { CompositeNotifier, type Notifier } from "./notify/types";
@@ -47,19 +50,34 @@ function buildStore(config: Config): IncidentStore {
 	return new SqliteIncidentStore(config.storage.path);
 }
 
-function buildNotifier(config: NotifierConfig, log: Logger): Notifier {
+function buildNotifier(
+	config: NotifierConfig,
+	log: Logger,
+	tracer: Tracer,
+): Notifier {
 	switch (config.type) {
 		case "slack":
-			return new SlackNotifier(config, log);
+			return new SlackNotifier(config, log, { tracer });
 		case "discord":
-			return new DiscordNotifier(config, log);
+			return new DiscordNotifier(config, log, { tracer });
 		case "webhook":
-			return new WebhookNotifier(config, log);
+			return new WebhookNotifier(config, log, { tracer });
 	}
 }
 
 async function main(): Promise<void> {
 	const config = await loadConfig();
+
+	// Registers the global context manager (when tracing is enabled) before
+	// any component is constructed, so every span created below propagates
+	// context correctly. See docs/architecture.md "Dependency injection" for
+	// why the context manager is the sole accepted exception to the
+	// no-globals DI rule.
+	const tracing = createTracing(
+		config.observability,
+		logger.child({ component: "tracing" }),
+	);
+
 	const store = buildStore(config);
 	await store.init();
 
@@ -67,12 +85,15 @@ async function main(): Promise<void> {
 		? createTelemetrySource(
 				config.telemetry,
 				logger.child({ component: `telemetry-${config.telemetry.source}` }),
+				tracing.getTracer(`telemetry-${config.telemetry.source}`),
 			)
 		: undefined;
 
 	const github = new GitHubAppClient(
 		{ appId: config.github.appId, privateKey: config.github.privateKey },
 		logger.child({ component: "github-app-client" }),
+		undefined,
+		tracing.getTracer("github-app-client"),
 	);
 
 	const resolver = new RepoResolver(
@@ -106,11 +127,13 @@ async function main(): Promise<void> {
 		store,
 		config,
 		logger: logger.child({ component: "fix-agent-runner" }),
+		tracer: tracing.getTracer("fix-agent-runner"),
 	});
 
+	const notifyTracer = tracing.getTracer("notify");
 	const notifier = new CompositeNotifier(
 		config.notifiers.map((n) =>
-			buildNotifier(n, logger.child({ component: "notify" })),
+			buildNotifier(n, logger.child({ component: "notify" }), notifyTracer),
 		),
 		logger.child({ component: "notify" }),
 	);
@@ -124,6 +147,7 @@ async function main(): Promise<void> {
 		notifier,
 		config,
 		logger: logger.child({ component: "incident-pipeline" }),
+		tracer: tracing.getTracer("incident-pipeline"),
 	});
 
 	const manager = new IncidentManager({
@@ -150,6 +174,7 @@ async function main(): Promise<void> {
 		manager,
 		adapters,
 		store,
+		tracer: tracing.getTracer("server"),
 	});
 
 	logger.info("startup", {
@@ -158,6 +183,7 @@ async function main(): Promise<void> {
 		telemetryConfigured: telemetrySource !== undefined,
 		agentHostMode: sidecar.isExternal ? "external" : "internal",
 		notifierCount: config.notifiers.length,
+		tracingEnabled: config.observability !== undefined,
 	});
 
 	let shuttingDown = false;
@@ -179,6 +205,9 @@ async function main(): Promise<void> {
 
 		await sidecar.stop();
 		logger.info("shutdown.sidecar_stopped", {});
+
+		await tracing.shutdown();
+		logger.info("shutdown.tracing_stopped", {});
 
 		await store.close();
 		logger.info("shutdown.complete", { signal });

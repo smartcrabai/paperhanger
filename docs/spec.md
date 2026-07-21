@@ -180,6 +180,10 @@ telemetry:
   database: public
   auth: ${GREPTIMEDB_AUTH}
   # logsTable / tracesTable / timeoutMs are optional overrides
+observability:                # optional; omit entirely to run with self-instrumentation disabled
+  endpoint: ${OTEL_EXPORTER_OTLP_TRACES_ENDPOINT}   # OTLP/HTTP traces endpoint, paperhanger's OWN spans
+  # serviceName: paperhanger  # `service.name` resource attribute (default shown)
+  # headers: { x-greptime-db-name: public }  # extra OTLP export headers, values may use ${ENV_VAR}
 repos:
   attributeKeys: [service.repository, repository]
   mappings:
@@ -208,7 +212,8 @@ notifiers:
 
 - 配布: 単一コンテナイメージ(既存 Dockerfile を拡張)。SQLite 利用時は `/data` を volume に
 - エンドポイント: `/healthz`(liveness)、`/readyz`(DB 接続確認)、`GET /incidents` / `GET /incidents/:id`(状態確認用。`server.apiToken` による Bearer/X-Api-Token 認証必須、未設定時は 401)
-- ログ: 構造化 JSON(将来 OTel export)
+- ログ: 構造化 JSON。`observability` 設定時はアクティブな span の `traceId`/`spanId` をログ行に付与し相関可能にする
+- トレース: `observability` 設定時、paperhanger 自身のスパンを OTLP/HTTP でエクスポート(`@opentelemetry/sdk-trace-base` + `exporter-trace-otlp-proto`。§3.9 参照)。OTel **ログ** export(paperhanger 自身のログの OTLP 送信)は引き続き将来対応
 - ローカル開発: `compose.yml` で paperhanger + GreptimeDB + Grafana を起動し E2E 検証できるようにする
 
 ## 4. 技術スタック

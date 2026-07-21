@@ -8,6 +8,7 @@ const ENV_KEYS = [
 	"GREPTIMEDB_URL",
 	"GITHUB_APP_ID",
 	"GITHUB_APP_PRIVATE_KEY",
+	"OTEL_EXPORTER_HEADER_VALUE",
 ] as const;
 
 const MINIMAL_YAML = `
@@ -212,6 +213,105 @@ github:
 		await expect(loadConfig("/nonexistent/paperhanger.yaml")).rejects.toThrow(
 			ConfigError,
 		);
+	});
+});
+
+describe("loadConfig - observability", () => {
+	function setRequiredEnv(): void {
+		process.env.GRAFANA_WEBHOOK_SECRET = "grafana-secret";
+		process.env.GITHUB_APP_ID = "12345";
+		process.env.GITHUB_APP_PRIVATE_KEY = "-----BEGIN KEY-----";
+	}
+
+	test("omitted section leaves config.observability undefined", async () => {
+		setRequiredEnv();
+		const yaml = `
+storage:
+  driver: sqlite
+  path: /data/paperhanger.db
+sources:
+  grafana:
+    secret: \${GRAFANA_WEBHOOK_SECRET}
+github:
+  appId: \${GITHUB_APP_ID}
+  privateKey: \${GITHUB_APP_PRIVATE_KEY}
+`;
+		const path = await writeFixture(yaml);
+		const config = await loadConfig(path);
+
+		expect(config.observability).toBeUndefined();
+	});
+
+	test("applies documented defaults when only endpoint is set", async () => {
+		setRequiredEnv();
+		const yaml = `
+storage:
+  driver: sqlite
+  path: /data/paperhanger.db
+sources:
+  grafana:
+    secret: \${GRAFANA_WEBHOOK_SECRET}
+observability:
+  endpoint: http://localhost:4318/v1/traces
+github:
+  appId: \${GITHUB_APP_ID}
+  privateKey: \${GITHUB_APP_PRIVATE_KEY}
+`;
+		const path = await writeFixture(yaml);
+		const config = await loadConfig(path);
+
+		expect(config.observability?.endpoint).toBe(
+			"http://localhost:4318/v1/traces",
+		);
+		expect(config.observability?.serviceName).toBe("paperhanger");
+		expect(config.observability?.headers).toEqual({});
+	});
+
+	test("expands ${ENV_VAR} references inside observability.headers values", async () => {
+		setRequiredEnv();
+		process.env.OTEL_EXPORTER_HEADER_VALUE = "secret-token";
+		const yaml = `
+storage:
+  driver: sqlite
+  path: /data/paperhanger.db
+sources:
+  grafana:
+    secret: \${GRAFANA_WEBHOOK_SECRET}
+observability:
+  endpoint: http://localhost:4318/v1/traces
+  serviceName: paperhanger-test
+  headers:
+    x-api-key: \${OTEL_EXPORTER_HEADER_VALUE}
+github:
+  appId: \${GITHUB_APP_ID}
+  privateKey: \${GITHUB_APP_PRIVATE_KEY}
+`;
+		const path = await writeFixture(yaml);
+		const config = await loadConfig(path);
+
+		expect(config.observability?.serviceName).toBe("paperhanger-test");
+		expect(config.observability?.headers).toEqual({
+			"x-api-key": "secret-token",
+		});
+	});
+
+	test("rejects an empty observability.endpoint", async () => {
+		setRequiredEnv();
+		const yaml = `
+storage:
+  driver: sqlite
+  path: /data/paperhanger.db
+sources:
+  grafana:
+    secret: \${GRAFANA_WEBHOOK_SECRET}
+observability:
+  endpoint: ""
+github:
+  appId: \${GITHUB_APP_ID}
+  privateKey: \${GITHUB_APP_PRIVATE_KEY}
+`;
+		const path = await writeFixture(yaml);
+		await expect(loadConfig(path)).rejects.toThrow(ConfigError);
 	});
 });
 
