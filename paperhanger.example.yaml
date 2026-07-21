@@ -14,7 +14,7 @@ server:
   apiToken: ${PAPERHANGER_API_TOKEN}
 
 # Storage driver. Use "sqlite" for single-instance deployments (mount /data
-# as a volume), or "postgres" for replicated deployments (M6).
+# as a volume), or "postgres" for replicated deployments.
 storage:
   driver: sqlite
   path: /data/paperhanger.db
@@ -24,7 +24,7 @@ storage:
 
 # One entry per webhook source. The map key is the {source} path segment in
 # POST /webhooks/{source}, and must match an implemented SourceAdapter name
-# (e.g. "grafana", "generic"; "alertmanager" arrives in M6).
+# (e.g. "grafana", "generic", "alertmanager").
 sources:
   grafana:
     secret: ${GRAFANA_WEBHOOK_SECRET}

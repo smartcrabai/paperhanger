@@ -23,10 +23,13 @@ export interface WaitForDrainOptions {
  * Polls `pendingCount` until it drains to zero or `timeoutMs` elapses.
  * This is a best-effort wait, not a guarantee: an incident still mid-flight
  * when the timeout fires is simply abandoned at whatever status it last
- * persisted (crash-observable per docs/architecture.md) -- it is not resumed
- * automatically on the next start. A full fix-agent run can take up to
- * `agent.timeoutMinutes`, far longer than any reasonable shutdown grace
- * period, so waiting for full drain unconditionally is not attempted.
+ * persisted (crash-observable per docs/architecture.md). It IS automatically
+ * re-queued and reprocessed on the next start
+ * (`IncidentManager.recoverOpenIncidents`), but that recovery restarts the
+ * pipeline from the top rather than resuming from the abandoned stage. A
+ * full fix-agent run can take up to `agent.timeoutMinutes`, far longer than
+ * any reasonable shutdown grace period, so waiting for full drain
+ * unconditionally is not attempted.
  */
 export async function waitForDrain(
 	pendingCount: () => number,
