@@ -1,0 +1,70 @@
+# Fallback language/build-tool versions for the fix agent's target-repository
+# test runs (see README.md "Current limitations" -- the shipped image
+# otherwise only has git, Bun, and Node). NOT installed at build time -- this
+# file only pins *which* version each tool's `mise-tool-wrapper` symlink (see
+# the mise step in the Dockerfile) installs on first use, via `mise exec`,
+# when the target repo itself doesn't say otherwise. Renovate's `mise`
+# manager keeps these pinned versions current (see renovate.json5).
+#
+# For python/go/ruby/java/deno/dotnet/rust, the `[settings]` block below
+# makes mise prefer whatever version the *target repo* pins in its own
+# idiomatic version file (.python-version, .go-version, .ruby-version,
+# .java-version/.sdkmanrc, .deno-version/package.json, global.json,
+# rust-toolchain.toml) over the fallback here -- verified empirically: with
+# a tool listed in `idiomatic_version_file_enable_tools`, `mise exec <tool>`
+# run from a cwd containing that file installs the version it names instead
+# of the version pinned below, and only falls back to the version below when
+# no such file is present. Without that setting these files are silently
+# ignored (mise disables idiomatic version files by default) and the
+# fallback below would always win regardless of what the target repo needs.
+#
+# maven/gradle/php can't join that list: they're vfox/aqua-backed (see
+# registry.toml upstream), and idiomatic-version-file detection is a
+# mise-*core*-backend feature only -- there's no equivalent for them, so
+# they always use the fallback version below regardless of the target repo,
+# UNLESS the target repo has a .tool-versions file (the asdf-compatible
+# format): that's a plain mise/asdf project-config file rather than a
+# per-backend feature, so it takes precedence for every tool here, maven/
+# gradle/php included (verified empirically).
+#
+# Node.js/Bun are intentionally NOT managed here at all: they're the system
+# runtimes the container itself and the agent-host sidecar depend on (see
+# Dockerfile). Nothing here would actually conflict with them on PATH (no
+# node/bun wrapper is wired up -- see the Dockerfile's mise step), but adding
+# one would risk exactly that, and there's no need to.
+
+[settings]
+idiomatic_version_file_enable_tools = [
+	"python",
+	"go",
+	"ruby",
+	"java",
+	"deno",
+	"dotnet",
+	"rust",
+]
+
+[tools]
+python = "3.14.6"
+go = "1.26.5"
+# `profile = "minimal"` (skips clippy/rustfmt/rust-docs, keeping just
+# rustc/cargo/rust-std): rustup's *default* profile fails outright in this
+# environment with "Invalid cross-device link" while rolling back a
+# clippy-component install step (verified empirically, reproduces with
+# rustup run directly, not just through mise), so this isn't a size
+# optimization -- it's the only profile confirmed to install successfully
+# here. Consequence: `rustfmt`/`cargo clippy` are unavailable when this
+# fallback version is what installs -- the Dockerfile's mise-tool-wrapper
+# deliberately doesn't symlink `rustfmt`/`clippy-driver` at all, so a fix
+# run hits a plain "command not found" for those rather than a misleading
+# on-demand-install attempt that would still fail afterwards. A target repo
+# with its own rust-toolchain.toml (see the idiomatic-version-file
+# precedence above) can pin a `default`/`complete` profile and get both.
+rust = { version = "1.97.1", profile = "minimal" }
+java = "26.0.1"
+maven = "3.9.16"
+gradle = "9.6.1"
+ruby = "4.0.6"
+php = "8.5.8"
+dotnet = "10.0.302"
+deno = "2.9.3"

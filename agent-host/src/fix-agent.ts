@@ -53,7 +53,29 @@ export const fixAgent = defineAgent((context) => {
 		thinkingLevel: "high",
 		// The agent-host container is the isolation boundary (docs/architecture.md
 		// "Flue agent host (Node sidecar)"); local() itself provides none.
-		sandbox: local({ env: { GIT_TERMINAL_PROMPT: "0" } }),
+		//
+		// MISE_YES/MISE_RUBY_COMPILE: local()'s env allowlist (see
+		// agent-host/README.md "Env sanitization for model-facing shells")
+		// doesn't include either, so they'd otherwise never reach a
+		// model-facing or harness shell even though the Dockerfile sets both
+		// container-wide -- passing them here as overrides bypasses the
+		// allowlist entirely, the same way GIT_TERMINAL_PROMPT already does.
+		// Without MISE_YES, the mise-tool-wrapper shims a target repo's test
+		// run invokes on demand (see .mise.toml) would hang on mise's install
+		// confirmation prompt instead of installing non-interactively.
+		// Without MISE_RUBY_COMPILE, an on-demand Ruby install here would
+		// silently fall back to mise's real default (compile from source,
+		// ~13 minutes) despite the Dockerfile comment claiming that cost was
+		// eliminated -- this was missed once already (verified by re-finding
+		// it via code review) precisely because it's easy to set a container-
+		// wide ENV and forget this allowlist exists at all.
+		sandbox: local({
+			env: {
+				GIT_TERMINAL_PROMPT: "0",
+				MISE_YES: "1",
+				MISE_RUBY_COMPILE: "false",
+			},
+		}),
 		cwd: workDir,
 		tools: createTelemetryTools(),
 	};

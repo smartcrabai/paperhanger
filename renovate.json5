@@ -27,5 +27,21 @@
       ],
       minimumReleaseAge: "7 days"
     }
+  ],
+  customManagers: [
+    {
+      // Dockerfile binaries fetched straight from a GitHub Release (no apt
+      // repo to pull a moving version from) -- yq (mikefarah/yq) today. Add
+      // the same `# renovate: datasource=... depName=...` comment above any
+      // future `ARG ..._VERSION=...` added the same way.
+      customType: "regex",
+      managerFilePatterns: [
+        "/(^|/|\\.)Dockerfile$/"
+      ],
+      matchStrings: [
+        "# renovate: datasource=(?<datasource>[a-z-]+?) depName=(?<depName>[^\\s]+)\\s+ARG \\w+_VERSION=(?<currentValue>[^\\s]+)"
+      ],
+      versioningTemplate: "semver-coerced"
+    }
   ]
 }
