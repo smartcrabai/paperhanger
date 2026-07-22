@@ -201,6 +201,33 @@ describe("AgentHostSidecar - internal mode spawn arguments", () => {
 		expect(fake.killCalls).toBe(1);
 	});
 
+	test("uses an absolute nodeBinPath when provided, instead of bare `node`", async () => {
+		const fake = createFakeProcess();
+		let capturedCmd: string[] | undefined;
+		const spawn: SpawnFn = (cmd, options) => {
+			capturedCmd = cmd;
+			void options;
+			return fake.process;
+		};
+
+		const sidecar = new AgentHostSidecar({
+			config: baseConfig({ hostPort: 8765 }),
+			logger: silentLogger(),
+			spawn,
+			fetchImpl: okFetch(),
+			serverPath: "./agent-host/dist/server.mjs",
+			nodeBinPath: "/usr/bin/node",
+			env: { PATH: "/usr/local/bin:/usr/bin", HOME: "/home/paperhanger" },
+		});
+
+		await sidecar.start();
+
+		expect(capturedCmd).toEqual([
+			"/usr/bin/node",
+			"./agent-host/dist/server.mjs",
+		]);
+	});
+
 	test("omits an unset provider key; serializes telemetry without an auth field when absent", async () => {
 		const fake = createFakeProcess();
 		let capturedEnv: Record<string, string> | undefined;

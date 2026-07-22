@@ -94,6 +94,14 @@ export interface AgentHostSidecarOptions {
 	logger: Logger;
 	/** Path to the built agent-host Node server entrypoint (`flue build --target node` output). */
 	serverPath?: string;
+	/**
+	 * Path (or bare name) of the Node binary used to run the server. Defaults
+	 * to the bare `"node"`, resolved via `PATH`. Pin this to an absolute path
+	 * (e.g. `/usr/bin/node`) in images that also expose other Node builds on
+	 * `PATH` (asdf/mise shims, a repo-local `.nvmrc`-selected version, ...) so
+	 * this spawn can't accidentally resolve one of those instead.
+	 */
+	nodeBinPath?: string;
 	/** Injectable for tests; defaults to a thin `Bun.spawn` wrapper. */
 	spawn?: SpawnFn;
 	/** Injectable for tests; defaults to the global `fetch`. */
@@ -117,6 +125,7 @@ export interface AgentHostSidecarOptions {
 }
 
 const DEFAULT_SERVER_PATH = "./agent-host/dist/server.mjs";
+const DEFAULT_NODE_BIN_PATH = "node";
 const DEFAULT_READINESS_POLL_INTERVAL_MS = 250;
 const DEFAULT_READINESS_TIMEOUT_MS = 30_000;
 const DEFAULT_RESTART_BASE_DELAY_MS = 1_000;
@@ -212,6 +221,7 @@ export class AgentHostSidecar {
 	private readonly mode: "external" | "internal";
 	private readonly logger: Logger;
 	private readonly serverPath: string;
+	private readonly nodeBinPath: string;
 	private readonly spawnFn: SpawnFn;
 	private readonly fetchImpl: FetchLike;
 	private readonly readinessPollIntervalMs: number;
@@ -232,6 +242,7 @@ export class AgentHostSidecar {
 		const { config } = options;
 		this.logger = options.logger.child({ component: "agent-host-sidecar" });
 		this.serverPath = options.serverPath ?? DEFAULT_SERVER_PATH;
+		this.nodeBinPath = options.nodeBinPath ?? DEFAULT_NODE_BIN_PATH;
 		this.spawnFn = options.spawn ?? defaultSpawn;
 		this.fetchImpl = options.fetchImpl ?? fetch;
 		this.readinessPollIntervalMs =
@@ -291,7 +302,7 @@ export class AgentHostSidecar {
 
 	private async spawnAndWaitForReadiness(): Promise<void> {
 		const startedAt = this.now();
-		const child = this.spawnFn(["node", this.serverPath], {
+		const child = this.spawnFn([this.nodeBinPath, this.serverPath], {
 			env: this.spawnEnv,
 		});
 		this.process = child;

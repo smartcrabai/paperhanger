@@ -346,6 +346,15 @@ The agent-host (`agent-host/`) is a separate Node-only package with its own
   storage handle uncleanly. Set the container termination grace period to
   at least ~30s in production (Compose's `stop_grace_period`, Kubernetes'
   `terminationGracePeriodSeconds`).
+- **mise/Nix on-demand installs land on the container's writable layer, not
+  a volume**: only `/data` is a `VOLUME` (see the Dockerfile). Recreating
+  the container (a redeploy, `docker compose up` after a `down`, a
+  Kubernetes pod reschedule, ...) throws away every language mise installed
+  on demand for prior fix runs, so the next run that needs one of them pays
+  the install cost again -- see "Current limitations" above. Mount
+  `${MISE_DATA_DIR:-/root/.local/share/mise}` (and `/nix`, if Nix installs
+  matter for your workload) as a volume to persist installs across
+  recreates, if that tradeoff matters for your deployment.
 
 ## Security notes
 
@@ -380,11 +389,75 @@ The agent-host (`agent-host/`) is a separate Node-only package with its own
 
 ## Current limitations
 
-- **Fix-run toolchain availability**: the shipped image only has `git`,
-  Bun, and Node. Whatever language/build toolchain a *target* repository's
-  own test suite needs (Python, Go, Rust, ...) must also be present in the
-  image for that repo's tests to actually run during a fix -- extend the
-  Dockerfile's runtime stage for the repos you point paperhanger at.
+- **Fix-run toolchain availability**: the shipped image bundles `git`, Bun,
+  Node, a C/C++ toolchain (gcc/clang/cmake/ninja/conan), Docker/GitHub/
+  PostgreSQL/Redis CLIs, and [mise](https://mise.jdx.dev/) + [Nix](https://nixos.org/)
+  as on-demand sources for anything else a target repo's test suite needs.
+  Python, Go, Rust, Java (+Maven/Gradle), Ruby, PHP, .NET, and Deno are
+  *not* pre-installed in the image (building Ruby/PHP from source alone
+  added ~15 minutes per build) -- they install on demand, the first time the
+  model runs one of them. This isn't mise's own shims (those only work for a
+  tool mise has already installed once, so they can't front a cold-start
+  install -- see the Dockerfile's mise step); it's a thin wrapper wired up
+  under every binary name those tools provide that calls `mise exec` instead.
+  For Python/Go/Ruby/Java/Deno/.NET/Rust, *which version* installs is the
+  target repo's own call: mise reads that repo's own idiomatic version file
+  (`.python-version`, `.go-version`, `.ruby-version`, `.java-version`/
+  `.sdkmanrc`, `.deno-version`/`package.json`, `global.json`,
+  `rust-toolchain.toml`) when the checkout has one, falling back to
+  `.mise.toml`'s pinned version only when it doesn't -- see the `[settings]`
+  block atop `.mise.toml` for how that's wired up, and why Maven/Gradle/PHP
+  can't join it (they're vfox/aqua-backed, not mise-core, and idiomatic
+  version file detection is a mise-core-only feature) and always get
+  `.mise.toml`'s pinned version regardless of the target repo. A
+  `.tool-versions` file (the asdf-compatible format) in the target repo is a
+  second way to pin a version and, unlike idiomatic version files, works for
+  *every* mise-managed tool including Maven/Gradle/PHP (verified
+  empirically) -- it's a plain mise/asdf project-config file, not a
+  per-backend feature. Either way,
+  the first fix run that touches a given language+version pays a one-time
+  install cost (network access required; Ruby/PHP compile from source) and
+  every run after that is fast, **as long as the same container is still
+  running** -- see "Operational notes" below for why a recreated container
+  loses that cache.
+  Node/Bun themselves are intentionally *not* mise-managed -- see the
+  comment atop `.mise.toml` and `AGENT_HOST_NODE_PATH` in the Dockerfile for
+  why. A few things this doesn't cover:
+  - **Automatic test-command detection** (`detectTestCommand()` in
+    `agent-host/src/lib/test-detection.ts`) only recognizes Node
+    (npm/yarn/pnpm/bun)/Go/Rust project markers. For any other language the
+    toolchain is available for the model's own shell commands, but
+    paperhanger won't pick a test command for it automatically -- which also
+    means the on-demand install for one of those other languages (e.g.
+    compiling PHP from source, ~13 minutes) happens during the model's own
+    shell commands, bounded only by `agent.timeoutMinutes` for the whole fix
+    attempt, not by the separate 10-minute bound on the deterministic
+    `detectAndRunTests()` step (`TEST_SHELL_TIMEOUT_MS` in
+    `agent-host/src/workflows/fix-incident.ts`) that a detected language
+    would go through instead.
+  - **Docker**: CLI + compose plugin only, no `dockerd` -- the fix agent can
+    drive a Docker daemon reachable via a bind-mounted host
+    `/var/run/docker.sock`, which is an operator/deploy-time setup, not
+    something this image provides on its own (running a nested `dockerd`
+    here would need `privileged: true`, undermining the isolation model in
+    "Security notes" below).
+  - **PostgreSQL/Redis**: client CLIs only (`psql`, `redis-cli`); a target
+    repo's integration tests still need a real server reachable over the
+    network (e.g. `testcontainers`, or a service in the deploy environment).
+  - **On-demand installs can misfire under GitHub API rate limiting or
+    transient network timeouts**: `mise-tool-wrapper`'s per-tool lockfile
+    (see the Dockerfile's mise step) distinguishes a tool's build script
+    legitimately re-invoking itself (PHP's configure probing for an
+    existing `php`) from a tool legitimately shelling out to a different
+    one (Maven's `mvn` launcher calling `java`) -- but when mise's *own*
+    remote-version lookup fails (rate limit, timeout) and it retries or
+    falls back internally, that can also re-invoke this same wrapper while
+    the outer call is still "installing," which one 2-second retry usually
+    but not always tells apart from a genuine stuck self-reference
+    (verified empirically against ruby/rust while this image's own testing
+    had exhausted unauthenticated GitHub API quota -- 60 requests/hour).
+    Unlikely to matter at normal fix-run request rates; if it does, a
+    failed shell command here is something the model can simply retry.
 - **Cost containment is bounded operationally, not by a true cost/token
   budget**: `@flue/sdk` does not currently expose aggregated per-workflow
   token/cost usage (see `docs/research/flue.md` and the doc comment on

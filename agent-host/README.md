@@ -234,8 +234,11 @@ bundled `guide/sandboxes` doc), per-command env sanitization is not just
   explicitly passed is simply absent from the child process's environment —
   the underlying `child_process.spawn()` call receives exactly this resolved
   env object, never a `{ ...process.env, ...overrides }` merge.
-- `src/fix-agent.ts` calls `local({ env: { GIT_TERMINAL_PROMPT: "0" } })` —
-  the only var explicitly added on top of the allowlist. Every provider API
+- `src/fix-agent.ts` calls `local({ env: { GIT_TERMINAL_PROMPT: "0", MISE_YES:
+  "1", MISE_RUBY_COMPILE: "false" } })` — the only vars explicitly added on
+  top of the allowlist (the latter two exist to make the paperhanger
+  Dockerfile's mise-tool-wrapper on-demand installs behave the same inside a
+  model-facing shell as they do container-wide). Every provider API
   key env var the sidecar forwards to this process (`PROVIDER_API_KEY_ENV_VARS`
   in the parent repo's `src/agent/sidecar.ts` — `AI_GATEWAY_API_KEY`,
   `ANTHROPIC_API_KEY`, `ANTHROPIC_OAUTH_TOKEN`, `CEREBRAS_API_KEY`,

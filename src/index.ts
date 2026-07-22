@@ -109,6 +109,7 @@ async function main(): Promise<void> {
 		config,
 		logger: logger.child({ component: "agent-host-sidecar" }),
 		serverPath: Bun.env.AGENT_HOST_SERVER_PATH,
+		nodeBinPath: Bun.env.AGENT_HOST_NODE_PATH,
 	});
 	try {
 		await sidecar.start();
