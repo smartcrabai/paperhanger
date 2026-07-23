@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
+import type { RepoDefinition } from "../core/types";
 import { createLogger } from "../observability/logger";
 import type { RepoSearchResult } from "./github";
 import {
+	type RepoDefinitionSource,
 	type RepoResolverConfig,
 	type RepoSearchClient,
 	RepoResolver,
@@ -74,6 +76,41 @@ function repoItem(
 	};
 }
 
+function repoDefinition(
+	overrides: Partial<RepoDefinition> = {},
+): RepoDefinition {
+	return {
+		id: crypto.randomUUID(),
+		owner: "acme",
+		repo: "widgets",
+		mappings: [],
+		enabled: true,
+		createdAt: "2024-01-01T00:00:00.000Z",
+		updatedAt: "2024-01-01T00:00:00.000Z",
+		...overrides,
+	};
+}
+
+/** A `RepoDefinitionSource` that always returns `[]` - the default when a test doesn't care about the definition step. */
+function noDefinitions(): RepoDefinitionSource {
+	return { listRepoDefinitions: async () => [] };
+}
+
+class StubDefinitionSource implements RepoDefinitionSource {
+	constructor(private readonly definitions: RepoDefinition[]) {}
+
+	async listRepoDefinitions(): Promise<RepoDefinition[]> {
+		return this.definitions;
+	}
+}
+
+/** A `RepoDefinitionSource` whose `listRepoDefinitions` always rejects - used to assert store-error fallthrough. */
+class FailingDefinitionSource implements RepoDefinitionSource {
+	async listRepoDefinitions(): Promise<RepoDefinition[]> {
+		throw new Error("listRepoDefinitions should have failed for this test");
+	}
+}
+
 describe("RepoResolver - priority order", () => {
 	test("attribute resolution short-circuits mapping and org search", async () => {
 		const config = baseConfig({
@@ -85,6 +122,7 @@ describe("RepoResolver - priority order", () => {
 			config,
 			new UnreachableSearchClient(),
 			silentLogger(),
+			noDefinitions(),
 		);
 
 		const result = await resolver.resolve(
@@ -111,6 +149,7 @@ describe("RepoResolver - priority order", () => {
 			config,
 			new UnreachableSearchClient(),
 			silentLogger(),
+			noDefinitions(),
 		);
 
 		const result = await resolver.resolve(
@@ -135,7 +174,12 @@ describe("RepoResolver - priority order", () => {
 			totalCount: 1,
 			items: [repoItem("acme", "my-api")],
 		});
-		const resolver = new RepoResolver(config, searchClient, silentLogger());
+		const resolver = new RepoResolver(
+			config,
+			searchClient,
+			silentLogger(),
+			noDefinitions(),
+		);
 
 		const result = await resolver.resolve(
 			baseInput({ labels: { service: "my-api" } }),
@@ -149,6 +193,37 @@ describe("RepoResolver - priority order", () => {
 			confidence: "high",
 		});
 	});
+
+	test("attribute resolution short-circuits a matching enabled definition", async () => {
+		const config = baseConfig({ attributeKeys: ["repository"] });
+		const definitions = new StubDefinitionSource([
+			repoDefinition({
+				owner: "acme",
+				repo: "from-definition",
+				mappings: [{ service: "my-api" }],
+			}),
+		]);
+		const resolver = new RepoResolver(
+			config,
+			new UnreachableSearchClient(),
+			silentLogger(),
+			definitions,
+		);
+
+		const result = await resolver.resolve(
+			baseInput({
+				annotations: { repository: "acme/widgets" },
+				labels: { service: "my-api" },
+			}),
+		);
+
+		expect(result).toEqual({
+			owner: "acme",
+			repo: "widgets",
+			method: "attribute",
+			confidence: "high",
+		});
+	});
 });
 
 describe("RepoResolver - attribute step", () => {
@@ -158,6 +233,7 @@ describe("RepoResolver - attribute step", () => {
 			config,
 			new UnreachableSearchClient(),
 			silentLogger(),
+			noDefinitions(),
 		);
 
 		const result = await resolver.resolve(
@@ -181,6 +257,7 @@ describe("RepoResolver - attribute step", () => {
 			config,
 			new UnreachableSearchClient(),
 			silentLogger(),
+			noDefinitions(),
 		);
 
 		const result = await resolver.resolve(
@@ -201,6 +278,7 @@ describe("RepoResolver - attribute step", () => {
 			config,
 			new UnreachableSearchClient(),
 			silentLogger(),
+			noDefinitions(),
 		);
 
 		const result = await resolver.resolve(
@@ -225,6 +303,7 @@ describe("RepoResolver - attribute step", () => {
 			config,
 			new UnreachableSearchClient(),
 			silentLogger(),
+			noDefinitions(),
 		);
 
 		const result = await resolver.resolve(
@@ -241,6 +320,7 @@ describe("RepoResolver - attribute step", () => {
 			config,
 			new UnreachableSearchClient(),
 			logger,
+			noDefinitions(),
 		);
 
 		const result = await resolver.resolve(
@@ -269,11 +349,197 @@ describe("RepoResolver - attribute step", () => {
 			config,
 			new UnreachableSearchClient(),
 			silentLogger(),
+			noDefinitions(),
 		);
 
 		const result = await resolver.resolve(baseInput());
 
 		expect(result).toBeNull();
+	});
+});
+
+describe("RepoResolver - definition step", () => {
+	test("a matching definition short-circuits static YAML mapping", async () => {
+		const config = baseConfig({
+			mappings: [{ match: { service: "my-api" }, repo: "should-not/be-used" }],
+		});
+		const definitions = new StubDefinitionSource([
+			repoDefinition({
+				owner: "acme",
+				repo: "my-api",
+				mappings: [{ service: "my-api" }],
+			}),
+		]);
+		const resolver = new RepoResolver(
+			config,
+			new UnreachableSearchClient(),
+			silentLogger(),
+			definitions,
+		);
+
+		const result = await resolver.resolve(
+			baseInput({ labels: { service: "my-api" } }),
+		);
+
+		expect(result).toEqual({
+			owner: "acme",
+			repo: "my-api",
+			method: "definition",
+			confidence: "high",
+		});
+	});
+
+	test("skips disabled definitions", async () => {
+		const config = baseConfig({
+			mappings: [{ match: { service: "my-api" }, repo: "acme/from-yaml" }],
+		});
+		const definitions = new StubDefinitionSource([
+			repoDefinition({
+				owner: "acme",
+				repo: "disabled-repo",
+				enabled: false,
+				mappings: [{ service: "my-api" }],
+			}),
+		]);
+		const resolver = new RepoResolver(
+			config,
+			new UnreachableSearchClient(),
+			silentLogger(),
+			definitions,
+		);
+
+		const result = await resolver.resolve(
+			baseInput({ labels: { service: "my-api" } }),
+		);
+
+		expect(result).toEqual({
+			owner: "acme",
+			repo: "from-yaml",
+			method: "mapping",
+			confidence: "high",
+		});
+	});
+
+	test("matches when any mapping entry in the OR'd list is fully satisfied", async () => {
+		const config = baseConfig();
+		const definitions = new StubDefinitionSource([
+			repoDefinition({
+				owner: "acme",
+				repo: "my-api",
+				mappings: [{ service: "other" }, { service: "my-api", env: "prod" }],
+			}),
+		]);
+		const resolver = new RepoResolver(
+			config,
+			new UnreachableSearchClient(),
+			silentLogger(),
+			definitions,
+		);
+
+		const noMatch = await resolver.resolve(
+			baseInput({ labels: { service: "my-api", env: "staging" } }),
+		);
+		expect(noMatch).toBeNull();
+
+		const result = await resolver.resolve(
+			baseInput({ labels: { service: "my-api", env: "prod" } }),
+		);
+		expect(result).toEqual({
+			owner: "acme",
+			repo: "my-api",
+			method: "definition",
+			confidence: "high",
+		});
+	});
+
+	test("uses the first matching definition in store order when multiple enabled definitions match the same labels", async () => {
+		const config = baseConfig();
+		// `StubDefinitionSource` hands back its array as-is, standing in for
+		// `listRepoDefinitions()`'s owner/repo ASC ordering (see
+		// `runRepoDefinitionStoreSuite`'s "ordered by owner then repo" test).
+		const definitions = new StubDefinitionSource([
+			repoDefinition({
+				owner: "acme",
+				repo: "first",
+				mappings: [{ service: "my-api" }],
+			}),
+			repoDefinition({
+				owner: "acme",
+				repo: "second",
+				mappings: [{ service: "my-api" }],
+			}),
+		]);
+		const resolver = new RepoResolver(
+			config,
+			new UnreachableSearchClient(),
+			silentLogger(),
+			definitions,
+		);
+
+		const result = await resolver.resolve(
+			baseInput({ labels: { service: "my-api" } }),
+		);
+
+		expect(result).toEqual({
+			owner: "acme",
+			repo: "first",
+			method: "definition",
+			confidence: "high",
+		});
+	});
+
+	test("a definition with an empty mappings array never matches", async () => {
+		const config = baseConfig();
+		const definitions = new StubDefinitionSource([
+			repoDefinition({ owner: "acme", repo: "no-mappings", mappings: [] }),
+		]);
+		const resolver = new RepoResolver(
+			config,
+			new UnreachableSearchClient(),
+			silentLogger(),
+			definitions,
+		);
+
+		const result = await resolver.resolve(
+			baseInput({ labels: { service: "my-api" } }),
+		);
+
+		expect(result).toBeNull();
+	});
+
+	test("logs and falls through to the next stage when the store read fails", async () => {
+		const config = baseConfig({
+			mappings: [{ match: { service: "my-api" }, repo: "acme/from-yaml" }],
+		});
+		const { logger, lines } = collectingLogger();
+		const resolver = new RepoResolver(
+			config,
+			new UnreachableSearchClient(),
+			logger,
+			new FailingDefinitionSource(),
+		);
+
+		const result = await resolver.resolve(
+			baseInput({ labels: { service: "my-api" } }),
+		);
+
+		expect(result).toEqual({
+			owner: "acme",
+			repo: "from-yaml",
+			method: "mapping",
+			confidence: "high",
+		});
+		const entries = lines.map((line) => JSON.parse(line));
+		const storeErrorEntry = entries.find(
+			(entry) => entry.msg === "repo_resolver.definition.store_error",
+		);
+		expect(storeErrorEntry).toBeDefined();
+		// The raw `Error` must not be logged directly: its `message` property
+		// is non-enumerable, so spreading it into the JSON log entry would
+		// silently emit `{}` instead of anything actionable.
+		expect(storeErrorEntry.error).toBe(
+			"listRepoDefinitions should have failed for this test",
+		);
 	});
 });
 
@@ -288,6 +554,7 @@ describe("RepoResolver - mapping step", () => {
 			config,
 			new UnreachableSearchClient(),
 			silentLogger(),
+			noDefinitions(),
 		);
 
 		const partial = await resolver.resolve(
@@ -317,6 +584,7 @@ describe("RepoResolver - mapping step", () => {
 			config,
 			new UnreachableSearchClient(),
 			silentLogger(),
+			noDefinitions(),
 		);
 
 		const result = await resolver.resolve(
@@ -338,6 +606,7 @@ describe("RepoResolver - mapping step", () => {
 			config,
 			new UnreachableSearchClient(),
 			logger,
+			noDefinitions(),
 		);
 
 		const result = await resolver.resolve(
@@ -363,6 +632,7 @@ describe("RepoResolver - org search step", () => {
 			config,
 			new UnreachableSearchClient(),
 			silentLogger(),
+			noDefinitions(),
 		);
 
 		const result = await resolver.resolve(
@@ -378,6 +648,7 @@ describe("RepoResolver - org search step", () => {
 			config,
 			new UnreachableSearchClient(),
 			silentLogger(),
+			noDefinitions(),
 		);
 
 		const result = await resolver.resolve(
@@ -393,6 +664,7 @@ describe("RepoResolver - org search step", () => {
 			config,
 			new UnreachableSearchClient(),
 			silentLogger(),
+			noDefinitions(),
 		);
 
 		const result = await resolver.resolve(
@@ -405,7 +677,12 @@ describe("RepoResolver - org search step", () => {
 	test("derives the service name with the documented label priority", async () => {
 		const config = baseConfig({ orgSearch: { enabled: true, org: "acme" } });
 		const searchClient = new StubSearchClient({ totalCount: 0, items: [] });
-		const resolver = new RepoResolver(config, searchClient, silentLogger());
+		const resolver = new RepoResolver(
+			config,
+			searchClient,
+			silentLogger(),
+			noDefinitions(),
+		);
 
 		await resolver.resolve(
 			baseInput({
@@ -422,7 +699,12 @@ describe("RepoResolver - org search step", () => {
 			totalCount: 2,
 			items: [repoItem("acme", "My-API"), repoItem("acme", "unrelated-repo")],
 		});
-		const resolver = new RepoResolver(config, searchClient, silentLogger());
+		const resolver = new RepoResolver(
+			config,
+			searchClient,
+			silentLogger(),
+			noDefinitions(),
+		);
 
 		const result = await resolver.resolve(
 			baseInput({ labels: { service: "my-api" } }),
@@ -442,7 +724,12 @@ describe("RepoResolver - org search step", () => {
 			totalCount: 1,
 			items: [repoItem("acme", "my-api-service")],
 		});
-		const resolver = new RepoResolver(config, searchClient, silentLogger());
+		const resolver = new RepoResolver(
+			config,
+			searchClient,
+			silentLogger(),
+			noDefinitions(),
+		);
 
 		const result = await resolver.resolve(
 			baseInput({ labels: { service: "my-api" } }),
@@ -465,7 +752,12 @@ describe("RepoResolver - org search step", () => {
 				repoItem("acme", "my-api-worker"),
 			],
 		});
-		const resolver = new RepoResolver(config, searchClient, silentLogger());
+		const resolver = new RepoResolver(
+			config,
+			searchClient,
+			silentLogger(),
+			noDefinitions(),
+		);
 
 		const result = await resolver.resolve(
 			baseInput({ labels: { service: "my-api" } }),
@@ -477,7 +769,12 @@ describe("RepoResolver - org search step", () => {
 	test("zero hits resolve to null", async () => {
 		const config = baseConfig({ orgSearch: { enabled: true, org: "acme" } });
 		const searchClient = new StubSearchClient({ totalCount: 0, items: [] });
-		const resolver = new RepoResolver(config, searchClient, silentLogger());
+		const resolver = new RepoResolver(
+			config,
+			searchClient,
+			silentLogger(),
+			noDefinitions(),
+		);
 
 		const result = await resolver.resolve(
 			baseInput({ labels: { service: "my-api" } }),

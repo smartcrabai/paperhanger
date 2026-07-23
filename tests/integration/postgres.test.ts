@@ -12,8 +12,14 @@ import { SQL } from "bun";
 import { GenericContainer, Wait } from "testcontainers";
 import type { StartedTestContainer } from "testcontainers";
 import { PostgresIncidentStore } from "../../src/storage/postgres";
-import type { IncidentStoreHarness } from "../../src/storage/store-suite";
-import { runIncidentStoreSuite } from "../../src/storage/store-suite";
+import type {
+	IncidentStoreHarness,
+	RepoDefinitionStoreHarness,
+} from "../../src/storage/store-suite";
+import {
+	runIncidentStoreSuite,
+	runRepoDefinitionStoreSuite,
+} from "../../src/storage/store-suite";
 
 const POSTGRES_IMAGE = "postgres:17-alpine";
 const POSTGRES_USER = "paperhanger";
@@ -94,7 +100,18 @@ describe.skipIf(!dockerAvailable)(
 			// Reuse the same container/connection across the whole suite (starting
 			// a fresh container per test would be far too slow); reset table
 			// contents instead so each test sees an empty store.
-			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incidents RESTART IDENTITY CASCADE`;
+			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incidents, repo_definitions RESTART IDENTITY CASCADE`;
+			currentTime = new Date();
+			return {
+				store: sharedStore,
+				advance: (ms) => {
+					currentTime = new Date(currentTime.getTime() + ms);
+				},
+			};
+		}
+
+		async function makeRepoDefinitionStore(): Promise<RepoDefinitionStoreHarness> {
+			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incidents, repo_definitions RESTART IDENTITY CASCADE`;
 			currentTime = new Date();
 			return {
 				store: sharedStore,
@@ -105,6 +122,10 @@ describe.skipIf(!dockerAvailable)(
 		}
 
 		runIncidentStoreSuite("PostgresIncidentStore", makeStore);
+		runRepoDefinitionStoreSuite(
+			"PostgresIncidentStore (RepoDefinitionStore)",
+			makeRepoDefinitionStore,
+		);
 
 		test("ping returns false once the connection is closed", async () => {
 			const store = new PostgresIncidentStore(connectionString);

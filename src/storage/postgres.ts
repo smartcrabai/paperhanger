@@ -14,16 +14,22 @@ import { SQL } from "bun";
 import { TERMINAL_INCIDENT_STATUSES } from "../core/types";
 import type {
 	AgentRun,
+	CreateRepoDefinitionInput,
 	Incident,
 	IncidentEvent,
 	IncidentStatus,
+	RepoDefinition,
+	UpdateRepoDefinitionInput,
 } from "../core/types";
 import {
 	DuplicateOpenIncidentError,
+	DuplicateRepoDefinitionError,
+	RepoDefinitionNotFoundError,
 	type CreateAgentRunInput,
 	type CreateIncidentInput,
 	type IncidentEventRecord,
 	type IncidentStore,
+	type RepoDefinitionStore,
 	type UpdateAgentRunInput,
 	type UpdateIncidentInput,
 } from "./types";
@@ -36,7 +42,7 @@ import {
  * method (and a version check in `init()`) for future schema changes instead
  * of mutating an already-shipped migration in place.
  */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 /** SQL literal list of terminal statuses, safe to inline: sourced from our own constant, never user input. */
 const TERMINAL_STATUS_LITERALS = TERMINAL_INCIDENT_STATUSES.map(
@@ -57,6 +63,17 @@ function isDuplicateOpenIncidentViolation(err: unknown): boolean {
 		err instanceof SQL.PostgresError &&
 		err.errno === POSTGRES_UNIQUE_VIOLATION &&
 		(err.constraint?.includes("fingerprint") ?? false)
+	);
+}
+
+/** Name of the unique index backing `DuplicateRepoDefinitionError` (see `migrateV3`). */
+const REPO_DEFINITIONS_UNIQUE_INDEX = "idx_repo_definitions_owner_repo";
+
+function isDuplicateRepoDefinitionViolation(err: unknown): boolean {
+	return (
+		err instanceof SQL.PostgresError &&
+		err.errno === POSTGRES_UNIQUE_VIOLATION &&
+		(err.constraint?.includes(REPO_DEFINITIONS_UNIQUE_INDEX) ?? false)
 	);
 }
 
@@ -93,6 +110,18 @@ interface AgentRunRow {
 	outcome: string | null;
 	cost_usd: number | null;
 	model: string;
+}
+
+interface RepoDefinitionRow {
+	id: string;
+	owner: string;
+	repo: string;
+	mappings: unknown;
+	setup_script: string | null;
+	test_command: string | null;
+	enabled: boolean;
+	created_at: unknown;
+	updated_at: unknown;
 }
 
 /**
@@ -162,12 +191,28 @@ export function mapIncidentEventRow(
 	};
 }
 
+export function mapRepoDefinitionRow(row: RepoDefinitionRow): RepoDefinition {
+	return {
+		id: row.id,
+		owner: row.owner,
+		repo: row.repo,
+		mappings: parseJsonColumn<Array<Record<string, string>>>(row.mappings),
+		setupScript: row.setup_script ?? undefined,
+		testCommand: row.test_command ?? undefined,
+		enabled: row.enabled,
+		createdAt: toIso(row.created_at),
+		updatedAt: toIso(row.updated_at),
+	};
+}
+
 export interface PostgresIncidentStoreOptions {
 	/** Injectable clock for `created_at`/`updated_at` stamping. Defaults to the real wall clock; tests use this to pin cooldown-window boundaries deterministically. */
 	now?: () => Date;
 }
 
-export class PostgresIncidentStore implements IncidentStore {
+export class PostgresIncidentStore
+	implements IncidentStore, RepoDefinitionStore
+{
 	private readonly sql: SQL;
 	private readonly now: () => Date;
 
@@ -201,6 +246,11 @@ export class PostgresIncidentStore implements IncidentStore {
 		if (version < 2) {
 			await this.migrateV2();
 			version = 2;
+			await this.setSchemaVersion(version);
+		}
+		if (version < 3) {
+			await this.migrateV3();
+			version = 3;
 			await this.setSchemaVersion(version);
 		}
 		if (version !== SCHEMA_VERSION) {
@@ -272,6 +322,32 @@ export class PostgresIncidentStore implements IncidentStore {
 			CREATE UNIQUE INDEX IF NOT EXISTS idx_incidents_open_fingerprint
 			ON incidents (fingerprint)
 			WHERE status NOT IN (${TERMINAL_STATUS_LITERALS})
+		`);
+	}
+
+	/**
+	 * Adds `repo_definitions`, the dashboard-managed target-repository table
+	 * (docs/spec.md). The unique index is keyed on lower(owner)/lower(repo) so
+	 * case-variant duplicates (e.g. "Foo/Bar" vs "foo/bar") are rejected too;
+	 * see `DuplicateRepoDefinitionError` in `./types.ts`.
+	 */
+	private async migrateV3(): Promise<void> {
+		await this.sql`
+			CREATE TABLE IF NOT EXISTS repo_definitions (
+				id TEXT PRIMARY KEY,
+				owner TEXT NOT NULL,
+				repo TEXT NOT NULL,
+				mappings JSONB NOT NULL,
+				setup_script TEXT,
+				test_command TEXT,
+				enabled BOOLEAN NOT NULL,
+				created_at TIMESTAMPTZ NOT NULL,
+				updated_at TIMESTAMPTZ NOT NULL
+			)
+		`;
+		await this.sql.unsafe(`
+			CREATE UNIQUE INDEX IF NOT EXISTS ${REPO_DEFINITIONS_UNIQUE_INDEX}
+			ON repo_definitions (lower(owner), lower(repo))
 		`);
 	}
 
@@ -470,5 +546,124 @@ export class PostgresIncidentStore implements IncidentStore {
 			WHERE id = ${id}
 		`;
 		return next;
+	}
+
+	async createRepoDefinition(
+		input: CreateRepoDefinitionInput,
+	): Promise<RepoDefinition> {
+		const now = this.now().toISOString();
+		const id = crypto.randomUUID();
+		const mappings = input.mappings ?? [];
+		const enabled = input.enabled ?? true;
+		try {
+			await this.sql`
+				INSERT INTO repo_definitions
+					(id, owner, repo, mappings, setup_script, test_command, enabled, created_at, updated_at)
+				VALUES
+					(${id}, ${input.owner}, ${input.repo}, ${JSON.stringify(mappings)}::jsonb,
+					 ${input.setupScript ?? null}, ${input.testCommand ?? null}, ${enabled}, ${now}, ${now})
+			`;
+		} catch (err) {
+			if (isDuplicateRepoDefinitionViolation(err)) {
+				throw new DuplicateRepoDefinitionError(input.owner, input.repo);
+			}
+			throw err;
+		}
+		const definition = await this.getRepoDefinition(id);
+		if (!definition) {
+			throw new Error(`Failed to read back created repo definition ${id}`);
+		}
+		return definition;
+	}
+
+	async getRepoDefinition(id: string): Promise<RepoDefinition | undefined> {
+		const rows = await this.sql<RepoDefinitionRow[]>`
+			SELECT * FROM repo_definitions WHERE id = ${id}
+		`;
+		return rows[0] ? mapRepoDefinitionRow(rows[0]) : undefined;
+	}
+
+	async listRepoDefinitions(): Promise<RepoDefinition[]> {
+		const rows = await this.sql<RepoDefinitionRow[]>`
+			SELECT * FROM repo_definitions ORDER BY owner ASC, repo ASC
+		`;
+		return rows.map(mapRepoDefinitionRow);
+	}
+
+	async findRepoDefinitionByRepo(
+		owner: string,
+		repo: string,
+	): Promise<RepoDefinition | undefined> {
+		const rows = await this.sql<RepoDefinitionRow[]>`
+			SELECT * FROM repo_definitions
+			WHERE lower(owner) = lower(${owner}) AND lower(repo) = lower(${repo})
+		`;
+		return rows[0] ? mapRepoDefinitionRow(rows[0]) : undefined;
+	}
+
+	async updateRepoDefinition(
+		id: string,
+		patch: UpdateRepoDefinitionInput,
+	): Promise<RepoDefinition> {
+		const columns: Record<string, unknown> = {
+			updated_at: this.now().toISOString(),
+		};
+		const columnNames: string[] = ["updated_at"];
+
+		if (patch.owner !== undefined) {
+			columns.owner = patch.owner;
+			columnNames.push("owner");
+		}
+		if (patch.repo !== undefined) {
+			columns.repo = patch.repo;
+			columnNames.push("repo");
+		}
+		if (patch.mappings !== undefined) {
+			columns.mappings = JSON.stringify(patch.mappings);
+			columnNames.push("mappings");
+		}
+		if ("setupScript" in patch) {
+			columns.setup_script = patch.setupScript ?? null;
+			columnNames.push("setup_script");
+		}
+		if ("testCommand" in patch) {
+			columns.test_command = patch.testCommand ?? null;
+			columnNames.push("test_command");
+		}
+		if (patch.enabled !== undefined) {
+			columns.enabled = patch.enabled;
+			columnNames.push("enabled");
+		}
+
+		let rows: RepoDefinitionRow[];
+		try {
+			rows = await this.sql<RepoDefinitionRow[]>`
+				UPDATE repo_definitions
+				SET ${this.sql(columns, ...columnNames)}
+				WHERE id = ${id}
+				RETURNING *
+			`;
+		} catch (err) {
+			if (isDuplicateRepoDefinitionViolation(err)) {
+				const current = await this.getRepoDefinition(id);
+				throw new DuplicateRepoDefinitionError(
+					patch.owner ?? current?.owner ?? id,
+					patch.repo ?? current?.repo ?? id,
+				);
+			}
+			throw err;
+		}
+		const row = rows[0];
+		if (!row) {
+			throw new RepoDefinitionNotFoundError(id);
+		}
+		return mapRepoDefinitionRow(row);
+	}
+
+	async deleteRepoDefinition(id: string): Promise<boolean> {
+		const rows = await this.sql<{ id: string }[]>`
+			DELETE FROM repo_definitions WHERE id = ${id} RETURNING id
+		`;
+		return rows.length > 0;
 	}
 }

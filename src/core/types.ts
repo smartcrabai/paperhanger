@@ -96,3 +96,51 @@ export interface AgentRun {
 	costUsd?: number;
 	model: string;
 }
+
+/** Dashboard-managed target repository definition (docs/spec.md). */
+export interface RepoDefinition {
+	/** Store-generated UUID (crypto.randomUUID, same as incidents). */
+	id: string;
+	/** GitHub owner/org. */
+	owner: string;
+	/** GitHub repo name. */
+	repo: string;
+	/**
+	 * Label matchers: an entry matches when EVERY key===labels[key]; entries
+	 * are OR'd. Empty array = never used for resolution (the definition still
+	 * supplies setupScript/testCommand when the repo is resolved another way).
+	 */
+	mappings: Array<Record<string, string>>;
+	/** Shell script executed in the cloned repo before diagnosis. */
+	setupScript?: string;
+	/** Overrides agent-host test auto-detection. */
+	testCommand?: string;
+	/** Disabled definitions are ignored by resolver AND runner lookup. */
+	enabled: boolean;
+	/** ISO 8601 timestamp. */
+	createdAt: string;
+	/** ISO 8601 timestamp. */
+	updatedAt: string;
+}
+
+export interface CreateRepoDefinitionInput {
+	owner: string;
+	repo: string;
+	/** Defaults to `[]`. */
+	mappings?: Array<Record<string, string>>;
+	setupScript?: string;
+	testCommand?: string;
+	/** Defaults to `true`. */
+	enabled?: boolean;
+}
+
+/** Partial patch, same semantics as UpdateIncidentInput. Optional string fields
+ *  accept null to clear (setupScript/testCommand). */
+export interface UpdateRepoDefinitionInput {
+	owner?: string;
+	repo?: string;
+	mappings?: Array<Record<string, string>>;
+	setupScript?: string | null;
+	testCommand?: string | null;
+	enabled?: boolean;
+}

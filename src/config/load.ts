@@ -81,7 +81,12 @@ export function expandEnvVars(
 	return value;
 }
 
-function formatZodError(error: import("zod").ZodError): string {
+/**
+ * Renders zod issues as a human-readable plain-text list. Exported so
+ * `src/ingest/repo-definitions.ts` can reuse it for its own 400-body
+ * formatting instead of duplicating it.
+ */
+export function formatZodError(error: import("zod").ZodError): string {
 	return error.issues
 		.map((issue) => {
 			const path = issue.path.length > 0 ? issue.path.join(".") : "(root)";

@@ -87,6 +87,7 @@ const CLONE_SHELL_TIMEOUT_MS = 300_000; // 5 minutes
 const LOCAL_GIT_SHELL_TIMEOUT_MS = 60_000; // 1 minute: checkout/config/add/commit/status/tamper-check reads
 const PUSH_SHELL_TIMEOUT_MS = 120_000; // 2 minutes
 const TEST_SHELL_TIMEOUT_MS = 10 * 60_000; // 10 minutes, unchanged
+const SETUP_SHELL_TIMEOUT_MS = 10 * 60_000; // 10 minutes, same discipline as TEST_SHELL_TIMEOUT_MS
 const MAX_TEST_OUTPUT_CHARS = 8_000;
 
 const DiagnosisResultSchema = v.object({
@@ -195,6 +196,48 @@ async function cloneAndPrepareBranch(
 	);
 }
 
+/**
+ * Runs an operator-configured setup script (a RepoDefinition's `setupScript`,
+ * threaded through `WorkflowInput.repo.setupScript`) once, immediately after
+ * `cloneAndPrepareBranch` and strictly before the first model turn. A
+ * non-zero exit terminates the run outright with `outcome: "failed"` -- the
+ * model never sees or retries a failed setup. Output is redacted with the
+ * same `secrets` list every other shell step uses (finding 2) and bounded to
+ * `MAX_TEST_OUTPUT_CHARS`, even though by this point `.git/config` no longer
+ * carries the clone token (finding 1a already ran).
+ */
+async function runSetupScript(
+	harness: FlueHarness,
+	setupScript: string,
+	secrets: ReadonlyArray<string | undefined>,
+): Promise<{ ok: true } | { ok: false; failureReason: string }> {
+	const startedAt = Date.now();
+	const result = await harness.shell(setupScript, {
+		timeoutMs: SETUP_SHELL_TIMEOUT_MS,
+	});
+	if (result.exitCode === 0) {
+		return { ok: true };
+	}
+	const tail = redactSecrets(
+		`${result.stdout}\n${result.stderr}`,
+		secrets,
+	).slice(-MAX_TEST_OUTPUT_CHARS);
+	// Mirrors runOrThrow/runRemoteGitCommandOrThrow: ShellResult carries no
+	// timeout flag, so a killed-at-timeout process is only distinguishable
+	// from a genuine script failure by comparing elapsed wall-clock time
+	// against the timeout we passed in.
+	if (Date.now() - startedAt >= SETUP_SHELL_TIMEOUT_MS) {
+		return {
+			ok: false,
+			failureReason: `setup script timed out after ${SETUP_SHELL_TIMEOUT_MS}ms\n${tail}`,
+		};
+	}
+	return {
+		ok: false,
+		failureReason: `setup script failed (exit ${result.exitCode})\n${tail}`,
+	};
+}
+
 /** Parses `git status --porcelain` output into a flat list of changed file paths. */
 function parsePorcelainStatus(output: string): string[] {
 	return output
@@ -287,33 +330,50 @@ interface TestRunResult {
 
 /**
  * Best-effort test-suite detection: probes the checkout for recognized
- * ecosystem files/lockfiles, then hands that plain-data probe to the pure
- * `detectTestCommand` (agent-host/src/lib/test-detection.ts) to pick a
- * command -- package.json `scripts.test`, `go test ./...`, or `cargo test`.
+ * ecosystem files/lockfiles, then hands that plain-data probe (plus an
+ * optional `testCommandOverride`, from a matching RepoDefinition's
+ * `testCommand`) to the pure `detectTestCommand`
+ * (agent-host/src/lib/test-detection.ts) to pick a command -- the override
+ * verbatim when set, otherwise package.json `scripts.test`, `go test ./...`,
+ * or `cargo test`.
  */
-async function detectAndRunTests(harness: FlueHarness): Promise<TestRunResult> {
-	const probe: TestSuiteProbe = {
-		packageJsonExists: await harness.fs.exists("package.json"),
-		bunLockExists: await harness.fs.exists("bun.lock"),
-		bunLockbExists: await harness.fs.exists("bun.lockb"),
-		pnpmLockExists: await harness.fs.exists("pnpm-lock.yaml"),
-		yarnLockExists: await harness.fs.exists("yarn.lock"),
-		goModExists: await harness.fs.exists("go.mod"),
-		cargoTomlExists: await harness.fs.exists("Cargo.toml"),
-	};
+async function detectAndRunTests(
+	harness: FlueHarness,
+	testCommandOverride?: string,
+): Promise<TestRunResult> {
+	// An override always wins in detectTestCommand, so the probe below (7
+	// fs.exists calls plus a package.json read/parse) would be run and its
+	// result discarded. Skip it entirely and run the override directly, with
+	// the same shell/timeout/redaction handling as the detected-command path
+	// below.
+	let command: string | undefined;
+	if (testCommandOverride && testCommandOverride.trim().length > 0) {
+		command = testCommandOverride;
+	} else {
+		const probe: TestSuiteProbe = {
+			packageJsonExists: await harness.fs.exists("package.json"),
+			bunLockExists: await harness.fs.exists("bun.lock"),
+			bunLockbExists: await harness.fs.exists("bun.lockb"),
+			pnpmLockExists: await harness.fs.exists("pnpm-lock.yaml"),
+			yarnLockExists: await harness.fs.exists("yarn.lock"),
+			goModExists: await harness.fs.exists("go.mod"),
+			cargoTomlExists: await harness.fs.exists("Cargo.toml"),
+		};
 
-	if (probe.packageJsonExists) {
-		try {
-			const raw = await harness.fs.readFile("package.json");
-			const pkg = JSON.parse(raw) as { scripts?: Record<string, string> };
-			probe.packageJsonScripts = pkg.scripts;
-		} catch {
-			// Malformed package.json; detectTestCommand falls through to other
-			// ecosystems below.
+		if (probe.packageJsonExists) {
+			try {
+				const raw = await harness.fs.readFile("package.json");
+				const pkg = JSON.parse(raw) as { scripts?: Record<string, string> };
+				probe.packageJsonScripts = pkg.scripts;
+			} catch {
+				// Malformed package.json; detectTestCommand falls through to other
+				// ecosystems below.
+			}
 		}
+
+		command = detectTestCommand(probe, testCommandOverride);
 	}
 
-	const command = detectTestCommand(probe);
 	if (!command) {
 		return { passed: false, output: "", found: false };
 	}
@@ -371,6 +431,29 @@ async function runFixIncident(
 	const secrets = collectSecrets(input);
 	await cloneAndPrepareBranch(harness, input, secrets);
 
+	// Operator-configured setup (RepoDefinition.setupScript, when a matching,
+	// enabled definition was found by the parent repo's runner). Runs before
+	// any model turn; a failure here terminates the run without ever invoking
+	// the model.
+	if (input.repo.setupScript) {
+		const setup = await runSetupScript(
+			harness,
+			input.repo.setupScript,
+			secrets,
+		);
+		if (!setup.ok) {
+			return {
+				outcome: "failed",
+				diagnosis:
+					"The configured setup script failed before diagnosis could begin.",
+				report:
+					"The configured setup script failed before the fix agent could begin " +
+					`diagnosis.\n\n\`\`\`\n${setup.failureReason}\n\`\`\``,
+				failureReason: setup.failureReason,
+			};
+		}
+	}
+
 	// Note (finding 1e, verified): `input.repo.cloneUrl` (and its embedded
 	// token) is never interpolated into any prompt below -- `buildDiagnosisPrompt`
 	// only surfaces `contextMarkdown`/`forbiddenPaths`/`limits.maxDiffLines`,
@@ -397,7 +480,7 @@ async function runFixIncident(
 	const maxFixAttempts = input.limits.maxFixAttempts;
 
 	for (let attempt = 1; attempt <= maxFixAttempts; attempt++) {
-		lastTestRun = await detectAndRunTests(harness);
+		lastTestRun = await detectAndRunTests(harness, input.repo.testCommand);
 		const decision = decideFixAttempt({
 			attempt,
 			maxFixAttempts,

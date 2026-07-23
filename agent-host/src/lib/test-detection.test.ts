@@ -114,4 +114,34 @@ describe("detectTestCommand", () => {
 			}),
 		).toBe("go test ./...");
 	});
+
+	test("an explicit override wins over auto-detection", () => {
+		expect(
+			detectTestCommand(
+				{
+					...NOTHING,
+					packageJsonExists: true,
+					packageJsonScripts: { test: "jest" },
+					bunLockExists: true,
+				},
+				"make test",
+			),
+		).toBe("make test");
+	});
+
+	test("an explicit override is used verbatim even when nothing is auto-detectable", () => {
+		expect(detectTestCommand(NOTHING, "make test")).toBe("make test");
+	});
+
+	test("an empty-string override is ignored and falls through to auto-detection", () => {
+		expect(detectTestCommand({ ...NOTHING, goModExists: true }, "")).toBe(
+			"go test ./...",
+		);
+	});
+
+	test("a whitespace-only override is ignored and falls through to auto-detection", () => {
+		expect(
+			detectTestCommand({ ...NOTHING, goModExists: true }, "   \n\t "),
+		).toBe("go test ./...");
+	});
 });

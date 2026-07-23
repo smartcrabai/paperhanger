@@ -1,0 +1,40 @@
+/* Mazzard @font-face declarations, copied verbatim (same weights/styles) from
+   the SmartCrab design system's fonts.css (Open Design project
+   brand-eloqwnt-7dc978). Font files live alongside this stylesheet so the
+   bundle stays self-contained -- see docs/architecture.md. */
+
+@font-face {
+	font-family: "Mazzard";
+	src: url("./mazzard-600.ttf") format("truetype");
+	font-weight: 600;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: "Mazzard";
+	src: url("./mazzard-400.ttf") format("truetype");
+	font-weight: 400;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: "Mazzard";
+	src: url("./mazzard-500.ttf") format("truetype");
+	font-weight: 500;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: "Mazzard";
+	src: url("./mazzard-300.ttf") format("truetype");
+	font-weight: 300;
+	font-style: normal;
+	font-display: swap;
+}
+@font-face {
+	font-family: "Mazzard";
+	src: url("./mazzard-400-italic.ttf") format("truetype");
+	font-weight: 400;
+	font-style: italic;
+	font-display: swap;
+}

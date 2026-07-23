@@ -42,16 +42,17 @@ src/
     incident-manager.ts    # Dedup, cooldown, lifecycle, concurrency-limited queue
     pipeline.ts            # Stage orchestration: collect → resolve → agent → notify
   ingest/
-    server.ts              # Bun.serve routes: POST /webhooks/:source, /healthz, /readyz
+    server.ts              # Bun.serve routes: POST /webhooks/:source, /healthz, /readyz, GET /incidents(+:id, +:id/events), /repo-definitions CRUD, GET / + /dashboard (htmlRoutes passthrough)
+    repo-definitions.ts    # Zod validation + route handlers for the /repo-definitions CRUD routes (split out to keep server.ts readable)
     adapters/
       types.ts             # SourceAdapter interface
       grafana.ts           # Grafana Alerting webhook payloads
       alertmanager.ts      # Prometheus Alertmanager webhook payloads
       generic.ts           # Pass-through internal format
   storage/
-    types.ts               # IncidentStore interface
-    sqlite.ts              # bun:sqlite implementation
-    postgres.ts            # Bun.sql implementation
+    types.ts               # IncidentStore + RepoDefinitionStore interfaces
+    sqlite.ts              # bun:sqlite implementation (both interfaces)
+    postgres.ts            # Bun.sql implementation (both interfaces)
   telemetry/
     types.ts               # TelemetrySource, LogRecord, TraceRecord, MetricSeries
     greptimedb.ts          # HTTP SQL + PromQL-compatible API client
@@ -72,6 +73,18 @@ src/
   observability/
     logger.ts              # Structured JSON line logger
     tracing.ts             # OTel tracer provider setup (traces-only self-instrumentation)
+  dashboard/                # Personal-use configuration + observation UI (Bun HTML import + React)
+    index.html              # Entry point; imported only from src/index.ts, the composition root
+    app.tsx                 # Token gate + Repositories/Incidents tab state
+    api.ts                  # Fetch wrapper for the dashboard's own HTTP API calls
+    repositories-view.tsx   # Repo definition table + create/edit form (repo-definition-form.tsx, mappings-editor.tsx)
+    incidents-view.tsx      # Incident list (auto-refreshing) + detail panel (incident-detail.tsx, status-badge.tsx)
+    token-prompt.tsx        # Full-screen API-token gate, shown until a working token is supplied
+    dashboard.css           # Semantic layer over tokens.css -- restyle here, not in tokens.css
+    tokens.css              # Generated design tokens, SmartCrab design system (Open Design project
+                             # brand-eloqwnt-7dc978, imported from the user's Open Design install);
+                             # do not hand-tune values here
+    fonts/                  # Mazzard font files + fonts.css, copied from the same Open Design project
 agent-host/                # Flue app (Node.js sidecar) — separate package.json
   src/
     app.ts                 # Custom Hono entrypoint: mounts Flue's routes + a /healthz route
@@ -118,11 +131,31 @@ Findings from `docs/research/flue.md` (verified against `@flue/*` `1.0.0-beta.9`
   can share paperhanger's PostgreSQL when configured, falling back to its default local
   persistence otherwise.
 
+## Dashboard (repo definitions + incident browser)
+
+- Served from the same process as the ingest server, not a separate service. `src/index.ts`
+  imports `src/dashboard/index.html` and passes it to `createServer` as
+  `htmlRoutes: { "/": dashboard, "/dashboard": dashboard }`, which `Bun.serve` serves ahead of the `fetch`
+  fallback. `src/index.ts` is the **only** file allowed to import a `.html` bundle —
+  `src/ingest/server.ts` (and its unit tests) never do, keeping that module's import graph
+  bundler-free.
+- `buildStore()` in `src/index.ts` returns `IncidentStore & RepoDefinitionStore` —
+  `SqliteIncidentStore`/`PostgresIncidentStore` implement both interfaces on the same
+  class/DB handle (see `docs/spec.md` §3.3). That single `store` value is then threaded to
+  every consumer that needs either half: `RepoResolver`'s repo-definition-source
+  constructor param, `FixAgentRunner`'s `repoDefinitions` dep, and `createServer`'s
+  `repoDefinitions` dep — kept as a separate `ServerDeps` field rather than folded into
+  `store`'s `Pick<IncidentStore, ...>`, so that `Pick` stays an honest, narrow slice of
+  `IncidentStore` alone.
+- `src/ingest/repo-definitions.ts` holds the zod validation and route handlers for the
+  `/repo-definitions` CRUD routes; `server.ts` itself still owns routing dispatch and the
+  `server.apiToken` auth gate for every dashboard data route.
+
 ## Interface contracts
 
 The canonical interface signatures live in `docs/spec.md` §3 (`SourceAdapter`,
-`IncidentEvent`, `TelemetrySource`, `IncidentStore`, `Notifier`). Implementations must not
-widen those contracts without updating the spec first.
+`IncidentEvent`, `TelemetrySource`, `IncidentStore`, `RepoDefinitionStore`, `Notifier`).
+Implementations must not widen those contracts without updating the spec first.
 
 ## Incident state machine
 

@@ -84,6 +84,20 @@ interface IncidentEvent {
 - `IncidentStore` インターフェースで抽象化。**SQLite(`bun:sqlite`)と PostgreSQL(`Bun.sql`)の両実装**を提供
 - 単一インスタンス運用は SQLite(volume マウント)、レプリカ構成は PostgreSQL
 - 主なテーブル: `incidents`(状態・PR リンク・診断結果)、`incident_events`(受信イベント履歴・raw payload)、`agent_runs`(エージェント実行履歴・コスト)
+- ダッシュボード(§3.11)が管理する対象リポジトリ定義は `RepoDefinitionStore` インターフェースで抽象化する。`SqliteIncidentStore` / `PostgresIncidentStore` は同一クラス・同一 DB ハンドルのまま `IncidentStore` と `RepoDefinitionStore` の両方を実装し、マイグレーションチェーンも共有する(SCHEMA_VERSION は 2 → 3。新しい `migrateV3()` を各ドライバに追加し、既存の `migrateV1`/`migrateV2` は変更しない)
+
+```ts
+interface RepoDefinitionStore {
+  createRepoDefinition(input: CreateRepoDefinitionInput): Promise<RepoDefinition>;
+  getRepoDefinition(id: string): Promise<RepoDefinition | undefined>;
+  listRepoDefinitions(): Promise<RepoDefinition[]>;        // ALL rows (incl. disabled), ordered by owner, then repo
+  findRepoDefinitionByRepo(owner: string, repo: string): Promise<RepoDefinition | undefined>; // case-insensitive
+  updateRepoDefinition(id: string, patch: UpdateRepoDefinitionInput): Promise<RepoDefinition>;
+  deleteRepoDefinition(id: string): Promise<boolean>;      // true if a row was deleted
+}
+```
+
+- テーブル `repo_definitions`(`id`, `owner`, `repo`, `mappings`: JSON/JSONB 配列, `setup_script`, `test_command`, `enabled`, `created_at`, `updated_at`)。`lower(owner), lower(repo)` のユニークインデックスを持ち、違反時は `DuplicateRepoDefinitionError` を送出する(大文字小文字違いの重複も拒否)。`updatedAt` は更新のたびにストアが設定する
 
 ### 3.4 Telemetry Collector(テレメトリ収集・抽象化)
 
@@ -118,8 +132,9 @@ interface TelemetrySource {
 優先順位でフォールバック:
 
 1. **attribute 指定**: アラートの annotation / テレメトリの resource attribute(例: `service.repository = "owner/repo"`)
-2. **マッピング設定**: 設定ファイルのラベルマッチャー → リポジトリ対応表
-3. **GitHub org 動的探索**: サービス名等で org 内リポジトリを検索。確信度が低い場合は修正せず `report_only` にフォールバック(誤爆防止)
+2. **ダッシュボード管理の repo definition**(§3.11): `enabled` な定義のみを対象に、解決のたびに `listRepoDefinitions()` を呼んで最新の一覧を取得する(キャッシュしない)。ストアが返した順に走査し、各定義の `mappings`(OR 条件)を `labels` に対して評価する(全 key が一致した最初のマッチが勝つ。次の「マッピング設定」と同一の「全 key 一致」判定)。ストア読み取りに失敗した場合はログを残して次のフォールバックへ進む(解決処理自体は止めない)
+3. **マッピング設定**: 設定ファイルのラベルマッチャー → リポジトリ対応表
+4. **GitHub org 動的探索**: サービス名等で org 内リポジトリを検索。確信度が低い場合は修正せず `report_only` にフォールバック(誤爆防止)
 
 ### 3.6 Fix Agent(Flue エージェント)
 
@@ -132,6 +147,10 @@ interface TelemetrySource {
   4. コード起因なら修正 → ビルド・テスト実行
   5. ブランチ `paperhanger/incident-{id}` へ push → PR 作成
   6. PR 本文: 診断サマリ / 根拠となるテレメトリ(ログ・トレース抜粋)/ アラートへのリンク / 修正内容の説明
+- **repo definition によるセットアップ / テストコマンドの上書き**(ダッシュボード §3.11 が管理する `setupScript` / `testCommand`。両方とも任意で、解決されたリポジトリに一致する有効な定義がある場合のみ `agent-host` へ渡される):
+  - `setupScript` が設定されている場合、clone 直後・モデルの最初のターン開始前にそのシェルスクリプトを実行する(タイムアウト 10 分。テスト実行と同じ規律の専用タイムアウトを用意)
+  - 終了コードが非ゼロなら、モデルには一切見せず・リトライもさせずにその場でインシデントを `failed` として打ち切る(`failureReason` に exit code とリダクション済みの末尾ログを記録)
+  - `testCommand` が設定されている場合、テストコマンドの自動検出結果をその値でそのまま上書きする(package.json の `scripts.test` / `go test ./...` / `cargo test` の自動判定より優先)
 - **ガードレール**:
   - 変更可能行数の上限(設定可。push 後に GitHub compare API で実差分を検証し、エージェントの自己申告は信用しない)
   - 変更禁止パス(`.github/workflows/`、secrets、CI 設定等)。違反時はリモートブランチを削除して `failed`
@@ -211,10 +230,27 @@ notifiers:
 ### 3.10 運用
 
 - 配布: 単一コンテナイメージ(既存 Dockerfile を拡張)。SQLite 利用時は `/data` を volume に
-- エンドポイント: `/healthz`(liveness)、`/readyz`(DB 接続確認)、`GET /incidents` / `GET /incidents/:id`(状態確認用。`server.apiToken` による Bearer/X-Api-Token 認証必須、未設定時は 401)。`GET /incidents` は `?limit=` クエリパラメータで件数を指定可能(デフォルト 100、上限 500)
+- エンドポイント: `/healthz`(liveness)、`/readyz`(DB 接続確認)、`GET /incidents` / `GET /incidents/:id` / `GET /incidents/:id/events`(状態確認用。いずれも `server.apiToken` による Bearer/X-Api-Token 認証必須、未設定時は 401)。`GET /incidents` は `?limit=` クエリパラメータで件数を指定可能(デフォルト 100、上限 500)。ダッシュボード(§3.11)の `/repo-definitions` 系ルートも同じ認証ゲートを通る
 - ログ: 構造化 JSON。`observability` 設定時はアクティブな span の `traceId`/`spanId` をログ行に付与し相関可能にする
 - トレース: `observability` 設定時、paperhanger 自身のスパンを OTLP/HTTP でエクスポート(`@opentelemetry/sdk-trace-base` + `exporter-trace-otlp-proto`。§3.9 参照)。OTel **ログ** export(paperhanger 自身のログの OTLP 送信)は引き続き将来対応
 - ローカル開発: `compose.yml` で paperhanger + GreptimeDB + Grafana を起動し E2E 検証できるようにする
+
+### 3.11 ダッシュボード(設定・観覧 UI)
+
+- 個人利用を前提とした、設定と観覧専用の UI。ingest サーバーと同一プロセスから `GET /` および `GET /dashboard`(Bun HTML import; React)で配信する
+- 用途は 2 つのみ:
+  1. **対象リポジトリ定義(repo definition)の管理**: GitHub owner/repo、アラート→リポジトリ解決に使うラベルマッチャー(`mappings`。§3.5)、クローン後・診断前に実行する任意の `setupScript`、テストコマンド自動検出を上書きする任意の `testCommand`(§3.6)を CRUD する
+  2. **インシデントの閲覧**: 一覧(新しい順・自動更新)・詳細・イベントタイムライン(読み取り専用)
+- **§1 の非ゴールはダッシュボードにも適用される**: マージ・承認・デプロイ・インフラ緩和操作は一切存在しない。設定と観覧のみ
+- **認証**: すべてのデータ API は既存の `server.apiToken` ゲートを通る(未設定時は 401、secure by default)。静的ページ自体(`GET /` / `GET /dashboard`)はデータを含まないため無認証。UI はトークンを一度入力すると `localStorage` に保持し、以降のリクエストに `X-Api-Token` ヘッダとして付与する。いずれかのリクエストが 401 になればトークン入力画面へ戻す
+- **HTTP API**(すべて `server.apiToken` 必須。エラー応答は plain text、成功応答は JSON):
+  - `GET    /repo-definitions`        → 200 `{ repoDefinitions: [...] }`
+  - `POST   /repo-definitions`        → 201(作成した定義)/ 400(不正な body)/ 409(owner/repo の重複。大文字小文字を区別しない)
+  - `GET    /repo-definitions/:id`    → 200 / 404
+  - `PUT    /repo-definitions/:id`    → 200(部分更新後の定義)/ 400 / 404 / 409
+  - `DELETE /repo-definitions/:id`    → 204 / 404
+  - `GET    /incidents/:id/events`    → 200 `{ events: [...] }` / 404(インシデントが存在しない)
+- リクエストボディは zod で検証: `owner`/`repo` は GitHub の命名規則に一致する非空文字列(`/^[A-Za-z0-9_.-]+$/`、100 文字以内)、`mappings` は非空の key/value からなるオブジェクトの配列(空オブジェクトは全件マッチしてしまうため拒否。key は 100 文字以内・value は 1,000 文字以内、1 エントリあたり最大 50 key/value ペア、配列全体で最大 100 エントリ)、`setupScript` は 10 万文字以内、`testCommand` は単一行かつ 1,000 文字以内で空白のみの値は拒否、未知のキーは拒否(`.strict()`)。400 応答の本文には zod の issue 一覧を人間可読な形式で含める
 
 ## 4. 技術スタック
 

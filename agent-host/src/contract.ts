@@ -26,6 +26,10 @@ export const RepoInputSchema = v.object({
 	cloneUrl: v.string(),
 	defaultBranch: v.string(),
 	branchName: v.string(),
+	/** Shell script executed in the cloned repo before diagnosis (from a matching, enabled RepoDefinition). */
+	setupScript: v.optional(v.string()),
+	/** Overrides agent-host test auto-detection (from a matching, enabled RepoDefinition). */
+	testCommand: v.optional(v.string()),
 });
 
 export const LimitsSchema = v.object({

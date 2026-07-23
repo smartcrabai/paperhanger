@@ -1,7 +1,11 @@
 {
 	"compilerOptions": {
 		// Environment setup & latest features
-		"lib": ["ESNext"],
+		// DOM/DOM.Iterable are needed for src/dashboard/** (browser-side React
+		// code, e.g. window/document/HTMLInputElement) -- everything else in
+		// src/ runs under Bun, which layers its own fetch/Request/Response
+		// types over these via the "bun" entry in `types` below.
+		"lib": ["ESNext", "DOM", "DOM.Iterable"],
 		"target": "ESNext",
 		"module": "Preserve",
 		"moduleDetection": "force",

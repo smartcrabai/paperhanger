@@ -28,6 +28,10 @@ export const FixAgentRepoInputSchema = z.object({
 	cloneUrl: z.string().min(1),
 	defaultBranch: z.string().min(1),
 	branchName: z.string().min(1),
+	/** Shell script executed in the cloned repo before diagnosis (from a matching, enabled RepoDefinition). */
+	setupScript: z.string().optional(),
+	/** Overrides agent-host test auto-detection (from a matching, enabled RepoDefinition). */
+	testCommand: z.string().optional(),
 });
 
 export const FixAgentLimitsSchema = z.object({

@@ -3,6 +3,7 @@ import {
 	mapAgentRunRow,
 	mapIncidentEventRow,
 	mapIncidentRow,
+	mapRepoDefinitionRow,
 } from "./postgres";
 
 /**
@@ -191,5 +192,57 @@ describe("mapIncidentEventRow", () => {
 		expect(record.receivedAt).toBe("2026-07-17T10:00:01.000Z");
 		expect(record.event).toEqual(event);
 		expect(record.rawPayload).toEqual({ original: true });
+	});
+});
+
+describe("mapRepoDefinitionRow", () => {
+	test("normalizes Date timestamps, an already-parsed mappings array, and null setup_script/test_command", () => {
+		const createdAt = new Date("2026-07-17T10:00:00.000Z");
+		const updatedAt = new Date("2026-07-17T10:05:00.000Z");
+
+		const definition = mapRepoDefinitionRow({
+			id: "repo-def-1",
+			owner: "acme",
+			repo: "widgets",
+			mappings: [{ service: "widgets" }],
+			setup_script: null,
+			test_command: null,
+			enabled: true,
+			created_at: createdAt,
+			updated_at: updatedAt,
+		});
+
+		expect(definition).toEqual({
+			id: "repo-def-1",
+			owner: "acme",
+			repo: "widgets",
+			mappings: [{ service: "widgets" }],
+			setupScript: undefined,
+			testCommand: undefined,
+			enabled: true,
+			createdAt: "2026-07-17T10:00:00.000Z",
+			updatedAt: "2026-07-17T10:05:00.000Z",
+		});
+	});
+
+	test("normalizes string timestamps, a stringified mappings JSON column, populated setup_script/test_command, and enabled: false", () => {
+		const definition = mapRepoDefinitionRow({
+			id: "repo-def-2",
+			owner: "acme",
+			repo: "gadgets",
+			mappings: JSON.stringify([{ service: "gadgets", env: "prod" }]),
+			setup_script: "npm ci",
+			test_command: "npm test",
+			enabled: false,
+			created_at: "2026-07-17T10:00:00+00:00",
+			updated_at: "2026-07-17T10:05:00+00:00",
+		});
+
+		expect(definition.mappings).toEqual([{ service: "gadgets", env: "prod" }]);
+		expect(definition.setupScript).toBe("npm ci");
+		expect(definition.testCommand).toBe("npm test");
+		expect(definition.enabled).toBe(false);
+		expect(definition.createdAt).toBe("2026-07-17T10:00:00.000Z");
+		expect(definition.updatedAt).toBe("2026-07-17T10:05:00.000Z");
 	});
 });

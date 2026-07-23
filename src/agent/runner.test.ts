@@ -16,6 +16,7 @@ import type {
 } from "../repo/github";
 import type { ResolvedRepo } from "../repo/resolver";
 import { SqliteIncidentStore } from "../storage/sqlite";
+import type { RepoDefinitionStore } from "../storage/types";
 import type { IncidentContext } from "../telemetry/types";
 import {
 	type FixAgentFlueClient,
@@ -259,6 +260,7 @@ describe("FixAgentRunner - fixed outcome happy path", () => {
 			flue: flue.client,
 			github: github.client,
 			store,
+			repoDefinitions: store,
 			config: makeConfig(),
 			logger: silentLogger(),
 		});
@@ -334,6 +336,7 @@ describe("FixAgentRunner - fixed outcome happy path", () => {
 			flue: flue.client,
 			github: github.client,
 			store,
+			repoDefinitions: store,
 			config: makeConfig(),
 			logger: silentLogger(),
 		});
@@ -370,6 +373,7 @@ describe("FixAgentRunner - guardrail violations", () => {
 			flue: flue.client,
 			github: github.client,
 			store,
+			repoDefinitions: store,
 			config: makeConfig(),
 			logger: silentLogger(),
 		});
@@ -413,6 +417,7 @@ describe("FixAgentRunner - guardrail violations", () => {
 			flue: flue.client,
 			github: github.client,
 			store,
+			repoDefinitions: store,
 			config: makeConfig({ maxDiffLines: 500 }),
 			logger: silentLogger(),
 		});
@@ -457,6 +462,7 @@ describe("FixAgentRunner - guardrail violations", () => {
 			flue: flue.client,
 			github: github.client,
 			store,
+			repoDefinitions: store,
 			config: makeConfig(),
 			logger: silentLogger(),
 		});
@@ -513,6 +519,7 @@ describe("FixAgentRunner - maxDiffLines boundary", () => {
 			flue: flue.client,
 			github: github.client,
 			store,
+			repoDefinitions: store,
 			config: makeConfig({ maxDiffLines: 500 }),
 			logger: silentLogger(),
 		});
@@ -547,6 +554,7 @@ describe("FixAgentRunner - maxDiffLines boundary", () => {
 			flue: flue.client,
 			github: github.client,
 			store,
+			repoDefinitions: store,
 			config: makeConfig({ maxDiffLines: 500 }),
 			logger: silentLogger(),
 		});
@@ -583,6 +591,7 @@ describe("FixAgentRunner - report_only and failed passthrough", () => {
 			flue: flue.client,
 			github: github.client,
 			store,
+			repoDefinitions: store,
 			config: makeConfig(),
 			logger: silentLogger(),
 		});
@@ -620,6 +629,7 @@ describe("FixAgentRunner - report_only and failed passthrough", () => {
 			flue: flue.client,
 			github: github.client,
 			store,
+			repoDefinitions: store,
 			config: makeConfig(),
 			logger: silentLogger(),
 		});
@@ -652,6 +662,7 @@ describe("FixAgentRunner - malformed workflow result", () => {
 			flue: flue.client,
 			github: github.client,
 			store,
+			repoDefinitions: store,
 			config: makeConfig(),
 			logger: silentLogger(),
 		});
@@ -678,6 +689,7 @@ describe("FixAgentRunner - malformed workflow result", () => {
 			flue: flue.client,
 			github: github.client,
 			store,
+			repoDefinitions: store,
 			config: makeConfig(),
 			logger: silentLogger(),
 		});
@@ -706,6 +718,7 @@ describe("FixAgentRunner - timeout", () => {
 			flue,
 			github: github.client,
 			store,
+			repoDefinitions: store,
 			// 0.0005 minutes = 30ms; keeps the test fast without changing the
 			// production default anywhere.
 			config: makeConfig({ timeoutMinutes: 0.0005 }),
@@ -747,6 +760,7 @@ describe("FixAgentRunner - flue client provider", () => {
 			flue: flue.client,
 			github: github.client,
 			store,
+			repoDefinitions: store,
 			config: makeConfig(),
 			logger: silentLogger(),
 		});
@@ -778,6 +792,7 @@ describe("FixAgentRunner - flue client provider", () => {
 			flue: { baseUrl: "http://agent-host.internal:9000" },
 			github: github.client,
 			store,
+			repoDefinitions: store,
 			config: makeConfig(),
 			logger: silentLogger(),
 			createFlueClient: fakeCreateFlueClient,
@@ -818,6 +833,7 @@ describe("FixAgentRunner - agent.invoke_workflow span", () => {
 			flue: flue.client,
 			github: github.client,
 			store,
+			repoDefinitions: store,
 			config: makeConfig({ timeoutMinutes: 30 }),
 			logger: silentLogger(),
 			tracer,
@@ -850,6 +866,7 @@ describe("FixAgentRunner - agent.invoke_workflow span", () => {
 			flue,
 			github: github.client,
 			store,
+			repoDefinitions: store,
 			// 0.0005 minutes = 30ms; keeps the test fast.
 			config: makeConfig({ timeoutMinutes: 0.0005 }),
 			logger: silentLogger(),
@@ -888,6 +905,7 @@ describe("FixAgentRunner - agent.invoke_workflow span", () => {
 			flue,
 			github: github.client,
 			store,
+			repoDefinitions: store,
 			// 0.0005 minutes = 30ms; keeps the test fast.
 			config: makeConfig({ timeoutMinutes: 0.0005 }),
 			logger,
@@ -929,6 +947,7 @@ describe("FixAgentRunner - agent.invoke_workflow span", () => {
 			flue: { baseUrl: "127.0.0.1:8700" },
 			github: github.client,
 			store,
+			repoDefinitions: store,
 			config: makeConfig(),
 			logger: silentLogger(),
 			tracer,
@@ -964,12 +983,205 @@ describe("FixAgentRunner - agent.invoke_workflow span", () => {
 			flue: flue.client,
 			github: github.client,
 			store,
+			repoDefinitions: store,
 			config: makeConfig(),
 			logger: silentLogger(),
 		});
 
 		const result = await runner.run(incident, context, testRepo);
 		expect(result.status).toBe("pr_created");
+
+		await store.close();
+	});
+});
+
+describe("FixAgentRunner - repo definition lookup", () => {
+	test("copies setupScript/testCommand from a matching, enabled repo definition into the workflow input", async () => {
+		const { store, incident } = await createStoreWithIncident();
+		const context = makeContext(incident, makeAlert());
+		const github = createFakeGithub();
+		const flue = createFakeFlue({
+			outcome: "report_only",
+			diagnosis: "d",
+			report: "r",
+		});
+		await store.createRepoDefinition({
+			owner: testRepo.owner,
+			repo: testRepo.repo,
+			setupScript: "bun install",
+			testCommand: "bun test",
+		});
+		const runner = new FixAgentRunner({
+			flue: flue.client,
+			github: github.client,
+			store,
+			repoDefinitions: store,
+			config: makeConfig(),
+			logger: silentLogger(),
+		});
+
+		const result = await runner.run(incident, context, testRepo);
+		expect(result.status).toBe("report_only");
+
+		const input = flue.invokeCalls[0]?.input as {
+			repo: { setupScript?: string; testCommand?: string };
+		};
+		expect(input.repo.setupScript).toBe("bun install");
+		expect(input.repo.testCommand).toBe("bun test");
+
+		await store.close();
+	});
+
+	test("ignores a matching but disabled repo definition", async () => {
+		const { store, incident } = await createStoreWithIncident();
+		const context = makeContext(incident, makeAlert());
+		const github = createFakeGithub();
+		const flue = createFakeFlue({
+			outcome: "report_only",
+			diagnosis: "d",
+			report: "r",
+		});
+		await store.createRepoDefinition({
+			owner: testRepo.owner,
+			repo: testRepo.repo,
+			setupScript: "bun install",
+			testCommand: "bun test",
+			enabled: false,
+		});
+		const runner = new FixAgentRunner({
+			flue: flue.client,
+			github: github.client,
+			store,
+			repoDefinitions: store,
+			config: makeConfig(),
+			logger: silentLogger(),
+		});
+
+		const result = await runner.run(incident, context, testRepo);
+		expect(result.status).toBe("report_only");
+
+		const input = flue.invokeCalls[0]?.input as {
+			repo: { setupScript?: string; testCommand?: string };
+		};
+		expect(input.repo.setupScript).toBeUndefined();
+		expect(input.repo.testCommand).toBeUndefined();
+
+		await store.close();
+	});
+
+	test("proceeds without overrides (and without failing the run) when no definition matches", async () => {
+		const { store, incident } = await createStoreWithIncident();
+		const context = makeContext(incident, makeAlert());
+		const github = createFakeGithub();
+		const flue = createFakeFlue({
+			outcome: "report_only",
+			diagnosis: "d",
+			report: "r",
+		});
+		const runner = new FixAgentRunner({
+			flue: flue.client,
+			github: github.client,
+			store,
+			repoDefinitions: store,
+			config: makeConfig(),
+			logger: silentLogger(),
+		});
+
+		const result = await runner.run(incident, context, testRepo);
+		expect(result.status).toBe("report_only");
+
+		const input = flue.invokeCalls[0]?.input as {
+			repo: { setupScript?: string; testCommand?: string };
+		};
+		expect(input.repo.setupScript).toBeUndefined();
+		expect(input.repo.testCommand).toBeUndefined();
+
+		await store.close();
+	});
+
+	test("logs and proceeds without overrides when the repo definition lookup throws", async () => {
+		const { store, incident } = await createStoreWithIncident();
+		const context = makeContext(incident, makeAlert());
+		const github = createFakeGithub();
+		const flue = createFakeFlue({
+			outcome: "report_only",
+			diagnosis: "d",
+			report: "r",
+		});
+		const { logger, lines } = capturingLogger();
+		const brokenRepoDefinitions: Pick<
+			RepoDefinitionStore,
+			"findRepoDefinitionByRepo"
+		> = {
+			async findRepoDefinitionByRepo() {
+				throw new Error("repo_definitions table is locked");
+			},
+		};
+		const runner = new FixAgentRunner({
+			flue: flue.client,
+			github: github.client,
+			store,
+			repoDefinitions: brokenRepoDefinitions,
+			config: makeConfig(),
+			logger,
+		});
+
+		const result = await runner.run(incident, context, testRepo);
+		expect(result.status).toBe("report_only");
+
+		const input = flue.invokeCalls[0]?.input as {
+			repo: { setupScript?: string; testCommand?: string };
+		};
+		expect(input.repo.setupScript).toBeUndefined();
+		expect(input.repo.testCommand).toBeUndefined();
+
+		const entries = lines.map(
+			(line) => JSON.parse(line) as Record<string, unknown>,
+		);
+		const warnEntry = entries.find(
+			(entry) => entry.msg === "fix_agent.repo_definition_lookup_failed",
+		);
+		expect(warnEntry).toBeDefined();
+		expect(warnEntry?.owner).toBe(testRepo.owner);
+		expect(warnEntry?.repo).toBe(testRepo.repo);
+		expect(warnEntry?.error).toBe("repo_definitions table is locked");
+
+		await store.close();
+	});
+
+	test("looks up the definition using the resolved repo's owner/repo", async () => {
+		const { store, incident } = await createStoreWithIncident();
+		const context = makeContext(incident, makeAlert());
+		const github = createFakeGithub();
+		const flue = createFakeFlue({
+			outcome: "report_only",
+			diagnosis: "d",
+			report: "r",
+		});
+		const lookupCalls: { owner: string; repo: string }[] = [];
+		const spyingRepoDefinitions: Pick<
+			RepoDefinitionStore,
+			"findRepoDefinitionByRepo"
+		> = {
+			async findRepoDefinitionByRepo(owner, repo) {
+				lookupCalls.push({ owner, repo });
+				return undefined;
+			},
+		};
+		const runner = new FixAgentRunner({
+			flue: flue.client,
+			github: github.client,
+			store,
+			repoDefinitions: spyingRepoDefinitions,
+			config: makeConfig(),
+			logger: silentLogger(),
+		});
+
+		await runner.run(incident, context, testRepo);
+
+		expect(lookupCalls).toEqual([
+			{ owner: testRepo.owner, repo: testRepo.repo },
+		]);
 
 		await store.close();
 	});

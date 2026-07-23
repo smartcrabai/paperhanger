@@ -19,6 +19,8 @@
 		"@opentelemetry/exporter-logs-otlp-proto": "^0.220.0",
 		"@opentelemetry/sdk-logs": "^0.220.0",
 		"@types/bun": "latest",
+		"@types/react": "^19.2.17",
+		"@types/react-dom": "^19.2.3",
 		"oxlint": "1.74.0",
 		"testcontainers": "^12.0.4"
 	},
@@ -33,6 +35,8 @@
 		"@opentelemetry/resources": "^2.9.0",
 		"@opentelemetry/sdk-trace-base": "^2.9.0",
 		"@typescript/native-preview": "^7.0.0-dev.20260707.2",
+		"react": "^19.2.8",
+		"react-dom": "^19.2.8",
 		"zod": "^4.4.3"
 	}
 }

@@ -61,7 +61,11 @@ collect:
   windowBeforeMinutes: 30
   windowAfterMinutes: 5
 
-# Repository resolution: attribute lookup -> mapping table -> org search.
+# Repository resolution: attribute lookup -> dashboard repo definitions ->
+# mapping table -> org search. Repo definitions created/edited via the
+# dashboard (GET /dashboard) take precedence over `mappings` below and can
+# each carry their own per-repo setup script (run in the clone before
+# diagnosis) and test-command override -- see docs/spec.md section 3.11.
 repos:
   attributeKeys:
     - service.repository

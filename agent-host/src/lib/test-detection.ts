@@ -27,11 +27,23 @@ export interface TestSuiteProbe {
 
 /**
  * Chooses a test command from a best-effort probe of the checked-out repo:
- * `package.json` `scripts.test` (lockfile-aware package manager selection)
- * takes precedence, then `go test ./...`, then `cargo test`. Returns
- * `undefined` when no recognized test suite/toolchain is found.
+ * an explicit `override` (a RepoDefinition's `testCommand`, threaded through
+ * `WorkflowInput.repo.testCommand`) always wins and is returned verbatim,
+ * bypassing detection entirely. A whitespace-only override is treated as
+ * absent (it would otherwise run a blank shell command that exits 0,
+ * falsely reporting tests as passed), falling through to auto-detection.
+ * Otherwise `package.json` `scripts.test` (lockfile-aware package manager
+ * selection) takes precedence, then `go test ./...`, then `cargo test`.
+ * Returns `undefined` when no usable override was given and no recognized
+ * test suite/toolchain is found.
  */
-export function detectTestCommand(probe: TestSuiteProbe): string | undefined {
+export function detectTestCommand(
+	probe: TestSuiteProbe,
+	override?: string,
+): string | undefined {
+	if (override && override.trim().length > 0) {
+		return override;
+	}
 	if (probe.packageJsonExists && probe.packageJsonScripts?.test) {
 		if (probe.bunLockExists || probe.bunLockbExists) {
 			return "bun run test";
