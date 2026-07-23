@@ -190,8 +190,10 @@ curl http://localhost:8080/healthz   # liveness
 curl http://localhost:8080/readyz    # DB connectivity
 ```
 
-`GET /incidents` and `GET /incidents/:id` refuse every request with 401
-unless `server.apiToken` is set in `paperhanger.yaml` (see the
+`GET /incidents`, `GET /incidents/:id`, `GET /incidents/:id/events`, and
+every `/repo-definitions` route (the dashboard's API -- see
+[Dashboard](#dashboard) below) refuse every request with 401 unless
+`server.apiToken` is set in `paperhanger.yaml` (see the
 [config reference](#config-reference) below) -- there is no unauthenticated
 fallback:
 
@@ -199,6 +201,21 @@ fallback:
 curl -H "Authorization: Bearer $PAPERHANGER_API_TOKEN" \
   http://localhost:8080/incidents    # recent incidents, newest first
 ```
+
+## Dashboard
+
+A personal-use, configuration-and-observation UI is served from the same
+process at `GET /` and `GET /dashboard` (Bun HTML import + React -- no
+separate service). It manages **repo definitions**: target GitHub owner/repo, the
+label-match `mappings` the repo resolver checks before falling back to
+`repos.mappings` (spec section 3.5), an optional per-repo `setupScript` run
+in the cloned repo before diagnosis, and an optional `testCommand` override
+-- plus a read-only incident list/detail/event-timeline view. It requires
+the same `server.apiToken` as every other data route above; the page itself
+prompts for the token once and keeps it in `localStorage`, sending it back
+as `X-Api-Token` on every request. Like the rest of paperhanger, the
+dashboard has no merge/approve/deploy action of any kind -- see spec
+section 1's non-goals, which apply here unchanged.
 
 ## Config reference
 
@@ -208,7 +225,7 @@ Every key from `paperhanger.example.yaml`, with its default when omitted
 | Key | Default | Notes |
 |---|---|---|
 | `server.port` | `8080` | |
-| `server.apiToken` | *(unset)* | Bearer token required by `GET /incidents` and `GET /incidents/:id` (`Authorization: Bearer <token>` or `X-Api-Token: <token>`). Secure by default: unset means those two endpoints refuse every request with 401 -- there is no unauthenticated fallback. `/healthz` and `/readyz` are never gated |
+| `server.apiToken` | *(unset)* | Bearer token required by `GET /incidents`, `GET /incidents/:id`, `GET /incidents/:id/events`, and every `/repo-definitions` route (the dashboard's API; see [Dashboard](#dashboard)) (`Authorization: Bearer <token>` or `X-Api-Token: <token>`). Secure by default: unset means those endpoints refuse every request with 401 -- there is no unauthenticated fallback. `/healthz` and `/readyz` are never gated |
 | `storage.driver` | *(required)* | `sqlite` or `postgres` |
 | `storage.path` | *(required if `sqlite`)* | SQLite file path; mount `/data` as a volume |
 | `storage.url` | *(required if `postgres`)* | `Bun.sql` connection string |
@@ -358,14 +375,18 @@ The agent-host (`agent-host/`) is a separate Node-only package with its own
 
 ## Security notes
 
-- **`GET /incidents` and `GET /incidents/:id` require `server.apiToken` by
+- **`GET /incidents`, `GET /incidents/:id`, `GET /incidents/:id/events`, and
+  every `/repo-definitions` route require `server.apiToken` by
   default-refused**: incident records can carry sensitive diagnosis/
-  failureReason text, so these two read endpoints demand a bearer token
-  (`Authorization: Bearer <token>` or `X-Api-Token: <token>`, constant-time
-  compared) whenever `server.apiToken` is set, and return 401 with an
-  explanatory body when it is *not* set -- there is no unauthenticated
-  fallback. `/healthz` and `/readyz` are never gated. See
-  `paperhanger.example.yaml` and the config reference above.
+  failureReason text, and repo definitions can carry setup scripts, so these
+  routes demand a bearer token (`Authorization: Bearer <token>` or
+  `X-Api-Token: <token>`, constant-time compared) whenever `server.apiToken`
+  is set, and return 401 with an explanatory body when it is *not* set --
+  there is no unauthenticated fallback. The dashboard's static page itself
+  (`GET /` and `GET /dashboard`) is unauthenticated, since it carries no
+  data of its own.
+  `/healthz` and `/readyz` are never gated. See `paperhanger.example.yaml`
+  and the config reference above.
 - **The fix agent's sandbox (`agent-host`, `local()` from
   `@flue/runtime/node`) has no isolation of its own** -- the agent-host
   container itself is the isolation boundary. Provider API keys

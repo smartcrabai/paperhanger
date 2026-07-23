@@ -42,3 +42,10 @@ coverage/
 *.tmp
 *.temp
 .cache/
+
+# Local config and data (secrets / machine-local state; copy from
+# paperhanger.example.yaml)
+/paperhanger.yaml
+*.db
+*.db-shm
+*.db-wal

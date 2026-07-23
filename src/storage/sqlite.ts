@@ -7,16 +7,22 @@ import { Database } from "bun:sqlite";
 import { TERMINAL_INCIDENT_STATUSES } from "../core/types";
 import type {
 	AgentRun,
+	CreateRepoDefinitionInput,
 	Incident,
 	IncidentEvent,
 	IncidentStatus,
+	RepoDefinition,
+	UpdateRepoDefinitionInput,
 } from "../core/types";
 import {
 	DuplicateOpenIncidentError,
+	DuplicateRepoDefinitionError,
+	RepoDefinitionNotFoundError,
 	type CreateAgentRunInput,
 	type CreateIncidentInput,
 	type IncidentEventRecord,
 	type IncidentStore,
+	type RepoDefinitionStore,
 	type UpdateAgentRunInput,
 	type UpdateIncidentInput,
 } from "./types";
@@ -29,7 +35,7 @@ import {
  * method (and a version check in `init()`) for future schema changes instead
  * of mutating an already-shipped migration in place.
  */
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 /** SQL literal list of terminal statuses, safe to inline: sourced from our own constant, never user input. */
 const TERMINAL_STATUS_LITERALS = TERMINAL_INCIDENT_STATUSES.map(
@@ -47,6 +53,17 @@ function isDuplicateOpenIncidentViolation(err: unknown): boolean {
 		err instanceof Error &&
 		(err as { code?: string }).code === SQLITE_CONSTRAINT_UNIQUE &&
 		err.message.includes("fingerprint")
+	);
+}
+
+/** Name of the unique index backing `DuplicateRepoDefinitionError` (see `migrateV3`). */
+const REPO_DEFINITIONS_UNIQUE_INDEX = "idx_repo_definitions_owner_repo";
+
+function isDuplicateRepoDefinitionViolation(err: unknown): boolean {
+	return (
+		err instanceof Error &&
+		(err as { code?: string }).code === SQLITE_CONSTRAINT_UNIQUE &&
+		err.message.includes(REPO_DEFINITIONS_UNIQUE_INDEX)
 	);
 }
 
@@ -85,6 +102,18 @@ interface AgentRunRow {
 	model: string;
 }
 
+interface RepoDefinitionRow {
+	id: string;
+	owner: string;
+	repo: string;
+	mappings: string;
+	setup_script: string | null;
+	test_command: string | null;
+	enabled: number;
+	created_at: string;
+	updated_at: string;
+}
+
 function rowToIncident(row: IncidentRow): Incident {
 	return {
 		id: row.id,
@@ -101,6 +130,20 @@ function rowToIncident(row: IncidentRow): Incident {
 		prUrl: row.pr_url ?? undefined,
 		diagnosis: row.diagnosis ?? undefined,
 		failureReason: row.failure_reason ?? undefined,
+	};
+}
+
+function rowToRepoDefinition(row: RepoDefinitionRow): RepoDefinition {
+	return {
+		id: row.id,
+		owner: row.owner,
+		repo: row.repo,
+		mappings: JSON.parse(row.mappings) as Array<Record<string, string>>,
+		setupScript: row.setup_script ?? undefined,
+		testCommand: row.test_command ?? undefined,
+		enabled: row.enabled === 1,
+		createdAt: row.created_at,
+		updatedAt: row.updated_at,
 	};
 }
 
@@ -121,7 +164,7 @@ export interface SqliteIncidentStoreOptions {
 	now?: () => Date;
 }
 
-export class SqliteIncidentStore implements IncidentStore {
+export class SqliteIncidentStore implements IncidentStore, RepoDefinitionStore {
 	private readonly db: Database;
 	private readonly now: () => Date;
 
@@ -165,6 +208,11 @@ export class SqliteIncidentStore implements IncidentStore {
 		if (version < 2) {
 			this.migrateV2();
 			version = 2;
+			this.setSchemaVersion(version);
+		}
+		if (version < 3) {
+			this.migrateV3();
+			version = 3;
 			this.setSchemaVersion(version);
 		}
 		if (version !== SCHEMA_VERSION) {
@@ -238,6 +286,32 @@ export class SqliteIncidentStore implements IncidentStore {
 			CREATE UNIQUE INDEX IF NOT EXISTS idx_incidents_open_fingerprint
 			ON incidents (fingerprint)
 			WHERE status NOT IN (${TERMINAL_STATUS_LITERALS});
+		`);
+	}
+
+	/**
+	 * Adds `repo_definitions`, the dashboard-managed target-repository table
+	 * (docs/spec.md). The unique index is keyed on lower(owner)/lower(repo) so
+	 * case-variant duplicates (e.g. "Foo/Bar" vs "foo/bar") are rejected too;
+	 * see `DuplicateRepoDefinitionError` in `./types.ts`.
+	 */
+	private migrateV3(): void {
+		this.db.run(`
+			CREATE TABLE IF NOT EXISTS repo_definitions (
+				id TEXT PRIMARY KEY,
+				owner TEXT NOT NULL,
+				repo TEXT NOT NULL,
+				mappings TEXT NOT NULL,
+				setup_script TEXT,
+				test_command TEXT,
+				enabled INTEGER NOT NULL,
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL
+			);
+		`);
+		this.db.run(`
+			CREATE UNIQUE INDEX IF NOT EXISTS ${REPO_DEFINITIONS_UNIQUE_INDEX}
+			ON repo_definitions (lower(owner), lower(repo));
 		`);
 	}
 
@@ -464,5 +538,135 @@ export class SqliteIncidentStore implements IncidentStore {
 			[next.finishedAt ?? null, next.outcome ?? null, next.costUsd ?? null, id],
 		);
 		return next;
+	}
+
+	async createRepoDefinition(
+		input: CreateRepoDefinitionInput,
+	): Promise<RepoDefinition> {
+		const now = this.now().toISOString();
+		const id = crypto.randomUUID();
+		const mappings = input.mappings ?? [];
+		const enabled = input.enabled ?? true;
+		try {
+			this.db.run(
+				`INSERT INTO repo_definitions
+					(id, owner, repo, mappings, setup_script, test_command, enabled, created_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+				[
+					id,
+					input.owner,
+					input.repo,
+					JSON.stringify(mappings),
+					input.setupScript ?? null,
+					input.testCommand ?? null,
+					enabled ? 1 : 0,
+					now,
+					now,
+				],
+			);
+		} catch (err) {
+			if (isDuplicateRepoDefinitionViolation(err)) {
+				throw new DuplicateRepoDefinitionError(input.owner, input.repo);
+			}
+			throw err;
+		}
+		const definition = await this.getRepoDefinition(id);
+		if (!definition) {
+			throw new Error(`Failed to read back created repo definition ${id}`);
+		}
+		return definition;
+	}
+
+	async getRepoDefinition(id: string): Promise<RepoDefinition | undefined> {
+		const row = this.db
+			.query<RepoDefinitionRow, [string]>(
+				"SELECT * FROM repo_definitions WHERE id = ?;",
+			)
+			.get(id);
+		return row ? rowToRepoDefinition(row) : undefined;
+	}
+
+	async listRepoDefinitions(): Promise<RepoDefinition[]> {
+		const rows = this.db
+			.query<RepoDefinitionRow, []>(
+				"SELECT * FROM repo_definitions ORDER BY owner ASC, repo ASC;",
+			)
+			.all();
+		return rows.map(rowToRepoDefinition);
+	}
+
+	async findRepoDefinitionByRepo(
+		owner: string,
+		repo: string,
+	): Promise<RepoDefinition | undefined> {
+		const row = this.db
+			.query<RepoDefinitionRow, [string, string]>(
+				"SELECT * FROM repo_definitions WHERE lower(owner) = lower(?) AND lower(repo) = lower(?);",
+			)
+			.get(owner, repo);
+		return row ? rowToRepoDefinition(row) : undefined;
+	}
+
+	async updateRepoDefinition(
+		id: string,
+		patch: UpdateRepoDefinitionInput,
+	): Promise<RepoDefinition> {
+		const sets: string[] = ["updated_at = ?"];
+		const values: (string | number | null)[] = [this.now().toISOString()];
+
+		if (patch.owner !== undefined) {
+			sets.push("owner = ?");
+			values.push(patch.owner);
+		}
+		if (patch.repo !== undefined) {
+			sets.push("repo = ?");
+			values.push(patch.repo);
+		}
+		if (patch.mappings !== undefined) {
+			sets.push("mappings = ?");
+			values.push(JSON.stringify(patch.mappings));
+		}
+		if ("setupScript" in patch) {
+			sets.push("setup_script = ?");
+			values.push(patch.setupScript ?? null);
+		}
+		if ("testCommand" in patch) {
+			sets.push("test_command = ?");
+			values.push(patch.testCommand ?? null);
+		}
+		if (patch.enabled !== undefined) {
+			sets.push("enabled = ?");
+			values.push(patch.enabled ? 1 : 0);
+		}
+		values.push(id);
+
+		let row: RepoDefinitionRow | null;
+		try {
+			row = this.db
+				.query<RepoDefinitionRow, (string | number | null)[]>(
+					`UPDATE repo_definitions SET ${sets.join(", ")} WHERE id = ? RETURNING *;`,
+				)
+				.get(...values);
+		} catch (err) {
+			if (isDuplicateRepoDefinitionViolation(err)) {
+				const current = await this.getRepoDefinition(id);
+				throw new DuplicateRepoDefinitionError(
+					patch.owner ?? current?.owner ?? id,
+					patch.repo ?? current?.repo ?? id,
+				);
+			}
+			throw err;
+		}
+		if (!row) {
+			throw new RepoDefinitionNotFoundError(id);
+		}
+		return rowToRepoDefinition(row);
+	}
+
+	async deleteRepoDefinition(id: string): Promise<boolean> {
+		const result = this.db.run("DELETE FROM repo_definitions WHERE id = ?;", [
+			id,
+		]);
+		return result.changes > 0;
 	}
 }

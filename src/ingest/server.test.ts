@@ -8,10 +8,16 @@ import {
 	SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 import type { IncidentManager } from "../core/incident-manager";
-import type { Incident, IncidentEvent } from "../core/types";
+import type { Incident, IncidentEvent, RepoDefinition } from "../core/types";
 import { createLogger } from "../observability/logger";
 import type { Logger } from "../observability/logger";
-import type { IncidentStore } from "../storage/types";
+import {
+	DuplicateRepoDefinitionError,
+	RepoDefinitionNotFoundError,
+	type IncidentEventRecord,
+	type IncidentStore,
+	type RepoDefinitionStore,
+} from "../storage/types";
 import type { SourceAdapter } from "./adapters/types";
 import { createServer, parseListLimit } from "./server";
 
@@ -65,18 +71,21 @@ function makeIncident(overrides: Partial<Incident> = {}): Incident {
 
 type IncidentsStoreSlice = Pick<
 	IncidentStore,
-	"ping" | "getIncident" | "listIncidents"
+	"ping" | "getIncident" | "listIncidents" | "listEvents"
 >;
 
 function fakeStore(
 	ready: boolean,
 	incidents: Incident[] = [],
+	eventsByIncidentId: Record<string, IncidentEventRecord[]> = {},
 ): IncidentsStoreSlice {
 	return {
 		ping: async () => ready,
 		getIncident: async (id: string) =>
 			incidents.find((incident) => incident.id === id),
 		listIncidents: async (limit = 100) => incidents.slice(0, limit),
+		listEvents: async (incidentId: string) =>
+			eventsByIncidentId[incidentId] ?? [],
 	};
 }
 
@@ -88,6 +97,7 @@ function rejectingPingStore(): IncidentsStoreSlice {
 		},
 		getIncident: async () => undefined,
 		listIncidents: async () => [],
+		listEvents: async () => [],
 	};
 }
 
@@ -99,6 +109,180 @@ function recordingLimitStore(receivedLimits: number[]): IncidentsStoreSlice {
 		listIncidents: async (limit = 100) => {
 			receivedLimits.push(limit);
 			return [];
+		},
+		listEvents: async () => [],
+	};
+}
+
+function makeEventRecord(
+	overrides: Partial<IncidentEventRecord> = {},
+): IncidentEventRecord {
+	return {
+		id: "event-1",
+		incidentId: "incident-1",
+		receivedAt: new Date().toISOString(),
+		event: {
+			fingerprint: "fp-1",
+			source: "grafana",
+			status: "firing",
+			severity: "critical",
+			title: "High error rate",
+			labels: {},
+			annotations: {},
+			startsAt: new Date().toISOString(),
+			raw: {},
+		},
+		rawPayload: {},
+		...overrides,
+	};
+}
+
+function makeRepoDefinition(
+	overrides: Partial<RepoDefinition> = {},
+): RepoDefinition {
+	return {
+		id: "repo-def-1",
+		owner: "acme",
+		repo: "widgets",
+		mappings: [],
+		enabled: true,
+		createdAt: new Date().toISOString(),
+		updatedAt: new Date().toISOString(),
+		...overrides,
+	};
+}
+
+/**
+ * In-memory `RepoDefinitionStore` stub good enough to exercise the HTTP
+ * routes end-to-end, mirroring `SqliteIncidentStore`'s semantics (duplicate
+ * (owner, repo) rejection, not-found on update) without touching a real DB.
+ */
+function fakeRepoDefinitionStore(
+	seed: RepoDefinition[] = [],
+): RepoDefinitionStore {
+	const rows = [...seed];
+	let nextId = seed.length + 1;
+
+	function findIndexByOwnerRepo(
+		owner: string,
+		repo: string,
+		excludeId?: string,
+	): number {
+		return rows.findIndex(
+			(row) =>
+				row.id !== excludeId &&
+				row.owner.toLowerCase() === owner.toLowerCase() &&
+				row.repo.toLowerCase() === repo.toLowerCase(),
+		);
+	}
+
+	return {
+		async createRepoDefinition(input) {
+			if (findIndexByOwnerRepo(input.owner, input.repo) !== -1) {
+				throw new DuplicateRepoDefinitionError(input.owner, input.repo);
+			}
+			const now = new Date().toISOString();
+			const created: RepoDefinition = {
+				id: `repo-def-${nextId++}`,
+				owner: input.owner,
+				repo: input.repo,
+				mappings: input.mappings ?? [],
+				setupScript: input.setupScript,
+				testCommand: input.testCommand,
+				enabled: input.enabled ?? true,
+				createdAt: now,
+				updatedAt: now,
+			};
+			rows.push(created);
+			return created;
+		},
+		async getRepoDefinition(id) {
+			return rows.find((row) => row.id === id);
+		},
+		async listRepoDefinitions() {
+			return [...rows].sort((a, b) =>
+				a.owner === b.owner
+					? a.repo.localeCompare(b.repo)
+					: a.owner.localeCompare(b.owner),
+			);
+		},
+		async findRepoDefinitionByRepo(owner, repo) {
+			const index = findIndexByOwnerRepo(owner, repo);
+			return index === -1 ? undefined : rows[index];
+		},
+		async updateRepoDefinition(id, patch) {
+			const index = rows.findIndex((row) => row.id === id);
+			if (index === -1) {
+				throw new RepoDefinitionNotFoundError(id);
+			}
+			const current = rows[index] as RepoDefinition;
+			const nextOwner = patch.owner ?? current.owner;
+			const nextRepo = patch.repo ?? current.repo;
+			if (
+				(patch.owner !== undefined || patch.repo !== undefined) &&
+				findIndexByOwnerRepo(nextOwner, nextRepo, id) !== -1
+			) {
+				throw new DuplicateRepoDefinitionError(nextOwner, nextRepo);
+			}
+			const updated: RepoDefinition = {
+				...current,
+				owner: nextOwner,
+				repo: nextRepo,
+				mappings: patch.mappings ?? current.mappings,
+				setupScript:
+					"setupScript" in patch
+						? (patch.setupScript ?? undefined)
+						: current.setupScript,
+				testCommand:
+					"testCommand" in patch
+						? (patch.testCommand ?? undefined)
+						: current.testCommand,
+				enabled: patch.enabled ?? current.enabled,
+				updatedAt: new Date().toISOString(),
+			};
+			rows[index] = updated;
+			return updated;
+		},
+		async deleteRepoDefinition(id) {
+			const index = rows.findIndex((row) => row.id === id);
+			if (index === -1) {
+				return false;
+			}
+			rows.splice(index, 1);
+			return true;
+		},
+	};
+}
+
+/**
+ * A `RepoDefinitionStore` stub for the concurrent-delete race in
+ * `handleUpdateRepoDefinition`: the definition is present for reads, but
+ * `updateRepoDefinition` always throws `RepoDefinitionNotFoundError`, exactly
+ * as `SqliteIncidentStore`/`PostgresIncidentStore`'s atomic `UPDATE ...
+ * RETURNING` do when another request deletes the row after this request read
+ * it but before its update lands.
+ */
+function racyDeleteRepoDefinitionStore(
+	existing: RepoDefinition,
+): RepoDefinitionStore {
+	return {
+		async createRepoDefinition() {
+			throw new Error("not used in this test");
+		},
+		async getRepoDefinition(id) {
+			return id === existing.id ? existing : undefined;
+		},
+		async listRepoDefinitions() {
+			return [existing];
+		},
+		async findRepoDefinitionByRepo() {
+			return undefined;
+		},
+		async updateRepoDefinition(id) {
+			throw new RepoDefinitionNotFoundError(id);
+		},
+		async deleteRepoDefinition() {
+			return true;
 		},
 	};
 }
@@ -119,6 +303,7 @@ describe("ingest server", () => {
 		/** Omit `server.apiToken` entirely, to exercise the secure-by-default 401. */
 		noApiToken?: boolean;
 		store?: IncidentsStoreSlice;
+		repoDefinitions?: RepoDefinitionStore;
 		tracer?: Tracer;
 		manager?: IncidentManager;
 		logger?: Logger;
@@ -140,6 +325,7 @@ describe("ingest server", () => {
 			store:
 				options?.store ??
 				fakeStore(options?.ready ?? true, options?.incidents ?? []),
+			repoDefinitions: options?.repoDefinitions ?? fakeRepoDefinitionStore(),
 			tracer: options?.tracer,
 		});
 		baseUrl = `http://localhost:${server.port}`;
@@ -438,6 +624,545 @@ describe("ingest server", () => {
 		});
 	});
 
+	describe("GET /incidents/:id/events", () => {
+		test("returns 401 when no token is provided", async () => {
+			const res = await fetch(`${baseUrl}/incidents/incident-1/events`);
+			expect(res.status).toBe(401);
+		});
+
+		test("returns 401 when the wrong token is provided", async () => {
+			const res = await fetch(`${baseUrl}/incidents/incident-1/events`, {
+				headers: bearerHeaders("wrong-token"),
+			});
+			expect(res.status).toBe(401);
+		});
+
+		test("returns 404 when the incident does not exist", async () => {
+			const res = await fetch(`${baseUrl}/incidents/does-not-exist/events`, {
+				headers: bearerHeaders(API_TOKEN),
+			});
+			expect(res.status).toBe(404);
+		});
+
+		test("returns the incident's events when it exists", async () => {
+			const incident = makeIncident({ id: "incident-1" });
+			const event = makeEventRecord({
+				id: "event-1",
+				incidentId: "incident-1",
+			});
+			server.stop(true);
+			startServer({
+				store: fakeStore(true, [incident], { "incident-1": [event] }),
+			});
+
+			const res = await fetch(`${baseUrl}/incidents/incident-1/events`, {
+				headers: bearerHeaders(API_TOKEN),
+			});
+			expect(res.status).toBe(200);
+			expect(await res.json()).toEqual({ events: [event] });
+		});
+
+		test("returns an empty events array when the incident has none", async () => {
+			const incident = makeIncident({ id: "incident-1" });
+			server.stop(true);
+			startServer({ store: fakeStore(true, [incident]) });
+
+			const res = await fetch(`${baseUrl}/incidents/incident-1/events`, {
+				headers: bearerHeaders(API_TOKEN),
+			});
+			expect(res.status).toBe(200);
+			expect(await res.json()).toEqual({ events: [] });
+		});
+	});
+
+	describe("GET /repo-definitions", () => {
+		test("returns 401 when server.apiToken is not configured", async () => {
+			server.stop(true);
+			startServer({ noApiToken: true });
+
+			const res = await fetch(`${baseUrl}/repo-definitions`, {
+				headers: bearerHeaders(API_TOKEN),
+			});
+			expect(res.status).toBe(401);
+		});
+
+		test("returns 401 when the wrong token is provided", async () => {
+			const res = await fetch(`${baseUrl}/repo-definitions`, {
+				headers: bearerHeaders("wrong-token"),
+			});
+			expect(res.status).toBe(401);
+		});
+
+		test("returns an empty list when no repo definitions exist", async () => {
+			const res = await fetch(`${baseUrl}/repo-definitions`, {
+				headers: bearerHeaders(API_TOKEN),
+			});
+			expect(res.status).toBe(200);
+			expect(await res.json()).toEqual({ repoDefinitions: [] });
+		});
+
+		test("returns the store's repo definitions", async () => {
+			const definition = makeRepoDefinition({ id: "repo-def-1" });
+			server.stop(true);
+			startServer({ repoDefinitions: fakeRepoDefinitionStore([definition]) });
+
+			const res = await fetch(`${baseUrl}/repo-definitions`, {
+				headers: bearerHeaders(API_TOKEN),
+			});
+			expect(res.status).toBe(200);
+			expect(await res.json()).toEqual({ repoDefinitions: [definition] });
+		});
+	});
+
+	describe("POST /repo-definitions", () => {
+		test("returns 401 when no token is provided", async () => {
+			const res = await fetch(`${baseUrl}/repo-definitions`, {
+				method: "POST",
+				body: JSON.stringify({ owner: "acme", repo: "widgets" }),
+			});
+			expect(res.status).toBe(401);
+		});
+
+		test("returns 400 when owner is missing", async () => {
+			const res = await fetch(`${baseUrl}/repo-definitions`, {
+				method: "POST",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({ repo: "widgets" }),
+			});
+			expect(res.status).toBe(400);
+			expect(await res.text()).toContain("owner");
+		});
+
+		test("returns 400 when owner contains characters outside the GitHub-safe pattern", async () => {
+			const res = await fetch(`${baseUrl}/repo-definitions`, {
+				method: "POST",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({ owner: "acme/evil", repo: "widgets" }),
+			});
+			expect(res.status).toBe(400);
+		});
+
+		test("returns 400 when a mapping entry is an empty match object", async () => {
+			const res = await fetch(`${baseUrl}/repo-definitions`, {
+				method: "POST",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({
+					owner: "acme",
+					repo: "widgets",
+					mappings: [{}],
+				}),
+			});
+			expect(res.status).toBe(400);
+		});
+
+		test("returns 400 when testCommand spans multiple lines", async () => {
+			const res = await fetch(`${baseUrl}/repo-definitions`, {
+				method: "POST",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({
+					owner: "acme",
+					repo: "widgets",
+					testCommand: "line one\nline two",
+				}),
+			});
+			expect(res.status).toBe(400);
+		});
+
+		test("returns 400 when testCommand is whitespace-only", async () => {
+			const res = await fetch(`${baseUrl}/repo-definitions`, {
+				method: "POST",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({
+					owner: "acme",
+					repo: "widgets",
+					testCommand: "   ",
+				}),
+			});
+			expect(res.status).toBe(400);
+		});
+
+		describe("boundary values", () => {
+			test("accepts owner at exactly 100 characters", async () => {
+				const res = await fetch(`${baseUrl}/repo-definitions`, {
+					method: "POST",
+					headers: bearerHeaders(API_TOKEN),
+					body: JSON.stringify({ owner: "a".repeat(100), repo: "widgets" }),
+				});
+				expect(res.status).toBe(201);
+			});
+
+			test("rejects owner at 101 characters", async () => {
+				const res = await fetch(`${baseUrl}/repo-definitions`, {
+					method: "POST",
+					headers: bearerHeaders(API_TOKEN),
+					body: JSON.stringify({ owner: "a".repeat(101), repo: "widgets" }),
+				});
+				expect(res.status).toBe(400);
+			});
+
+			test("accepts setupScript at exactly 100,000 characters", async () => {
+				const res = await fetch(`${baseUrl}/repo-definitions`, {
+					method: "POST",
+					headers: bearerHeaders(API_TOKEN),
+					body: JSON.stringify({
+						owner: "acme",
+						repo: "widgets",
+						setupScript: "a".repeat(100_000),
+					}),
+				});
+				expect(res.status).toBe(201);
+			});
+
+			test("rejects setupScript at 100,001 characters", async () => {
+				const res = await fetch(`${baseUrl}/repo-definitions`, {
+					method: "POST",
+					headers: bearerHeaders(API_TOKEN),
+					body: JSON.stringify({
+						owner: "acme",
+						repo: "widgets",
+						setupScript: "a".repeat(100_001),
+					}),
+				});
+				expect(res.status).toBe(400);
+			});
+
+			test("accepts testCommand at exactly 1,000 characters", async () => {
+				const res = await fetch(`${baseUrl}/repo-definitions`, {
+					method: "POST",
+					headers: bearerHeaders(API_TOKEN),
+					body: JSON.stringify({
+						owner: "acme",
+						repo: "widgets",
+						testCommand: "a".repeat(1_000),
+					}),
+				});
+				expect(res.status).toBe(201);
+			});
+
+			test("rejects testCommand at 1,001 characters", async () => {
+				const res = await fetch(`${baseUrl}/repo-definitions`, {
+					method: "POST",
+					headers: bearerHeaders(API_TOKEN),
+					body: JSON.stringify({
+						owner: "acme",
+						repo: "widgets",
+						testCommand: "a".repeat(1_001),
+					}),
+				});
+				expect(res.status).toBe(400);
+			});
+
+			test("rejects a mapping entry with an empty-string value", async () => {
+				const res = await fetch(`${baseUrl}/repo-definitions`, {
+					method: "POST",
+					headers: bearerHeaders(API_TOKEN),
+					body: JSON.stringify({
+						owner: "acme",
+						repo: "widgets",
+						mappings: [{ service: "" }],
+					}),
+				});
+				expect(res.status).toBe(400);
+			});
+
+			test("rejects a mapping entry with an empty-string key", async () => {
+				const res = await fetch(`${baseUrl}/repo-definitions`, {
+					method: "POST",
+					headers: bearerHeaders(API_TOKEN),
+					body: JSON.stringify({
+						owner: "acme",
+						repo: "widgets",
+						mappings: [{ "": "prod" }],
+					}),
+				});
+				expect(res.status).toBe(400);
+			});
+
+			test("rejects a mapping entry with more than 50 key/value pairs", async () => {
+				const oversizedEntry: Record<string, string> = {};
+				for (let i = 0; i < 51; i++) {
+					oversizedEntry[`key${i}`] = "value";
+				}
+
+				const res = await fetch(`${baseUrl}/repo-definitions`, {
+					method: "POST",
+					headers: bearerHeaders(API_TOKEN),
+					body: JSON.stringify({
+						owner: "acme",
+						repo: "widgets",
+						mappings: [oversizedEntry],
+					}),
+				});
+				expect(res.status).toBe(400);
+			});
+		});
+
+		test("returns 400 when the body has an unknown key (strict schema)", async () => {
+			const res = await fetch(`${baseUrl}/repo-definitions`, {
+				method: "POST",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({
+					owner: "acme",
+					repo: "widgets",
+					unknownField: "nope",
+				}),
+			});
+			expect(res.status).toBe(400);
+		});
+
+		test("returns 400 on unparseable JSON", async () => {
+			const res = await fetch(`${baseUrl}/repo-definitions`, {
+				method: "POST",
+				headers: bearerHeaders(API_TOKEN),
+				body: "not json",
+			});
+			expect(res.status).toBe(400);
+		});
+
+		test("creates a repo definition with default mappings/enabled and returns 201", async () => {
+			const res = await fetch(`${baseUrl}/repo-definitions`, {
+				method: "POST",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({ owner: "acme", repo: "widgets" }),
+			});
+			expect(res.status).toBe(201);
+			const body = (await res.json()) as {
+				owner: string;
+				repo: string;
+				mappings: unknown[];
+				enabled: boolean;
+			};
+			expect(body.owner).toBe("acme");
+			expect(body.repo).toBe("widgets");
+			expect(body.mappings).toEqual([]);
+			expect(body.enabled).toBe(true);
+		});
+
+		test("creates a repo definition with mappings, setupScript, and testCommand", async () => {
+			const res = await fetch(`${baseUrl}/repo-definitions`, {
+				method: "POST",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({
+					owner: "acme",
+					repo: "widgets",
+					mappings: [{ service: "widgets" }],
+					setupScript: "npm ci",
+					testCommand: "npm test",
+					enabled: false,
+				}),
+			});
+			expect(res.status).toBe(201);
+			const body = (await res.json()) as Record<string, unknown>;
+			expect(body.mappings).toEqual([{ service: "widgets" }]);
+			expect(body.setupScript).toBe("npm ci");
+			expect(body.testCommand).toBe("npm test");
+			expect(body.enabled).toBe(false);
+		});
+
+		test("returns 409 when (owner, repo) already has a definition, case-insensitively", async () => {
+			server.stop(true);
+			startServer({
+				repoDefinitions: fakeRepoDefinitionStore([
+					makeRepoDefinition({ owner: "Acme", repo: "Widgets" }),
+				]),
+			});
+
+			const res = await fetch(`${baseUrl}/repo-definitions`, {
+				method: "POST",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({ owner: "acme", repo: "widgets" }),
+			});
+			expect(res.status).toBe(409);
+		});
+	});
+
+	describe("GET /repo-definitions/:id", () => {
+		test("returns 401 when no token is provided", async () => {
+			const res = await fetch(`${baseUrl}/repo-definitions/repo-def-1`);
+			expect(res.status).toBe(401);
+		});
+
+		test("returns 404 for an unknown id", async () => {
+			const res = await fetch(`${baseUrl}/repo-definitions/does-not-exist`, {
+				headers: bearerHeaders(API_TOKEN),
+			});
+			expect(res.status).toBe(404);
+		});
+
+		test("returns the definition when it exists", async () => {
+			const definition = makeRepoDefinition({ id: "repo-def-1" });
+			server.stop(true);
+			startServer({ repoDefinitions: fakeRepoDefinitionStore([definition]) });
+
+			const res = await fetch(`${baseUrl}/repo-definitions/repo-def-1`, {
+				headers: bearerHeaders(API_TOKEN),
+			});
+			expect(res.status).toBe(200);
+			expect(await res.json()).toEqual(definition);
+		});
+	});
+
+	describe("PUT /repo-definitions/:id", () => {
+		test("returns 401 when no token is provided", async () => {
+			const res = await fetch(`${baseUrl}/repo-definitions/repo-def-1`, {
+				method: "PUT",
+				body: JSON.stringify({ enabled: false }),
+			});
+			expect(res.status).toBe(401);
+		});
+
+		test("returns 400 for an invalid body", async () => {
+			server.stop(true);
+			startServer({
+				repoDefinitions: fakeRepoDefinitionStore([
+					makeRepoDefinition({ id: "repo-def-1" }),
+				]),
+			});
+
+			const res = await fetch(`${baseUrl}/repo-definitions/repo-def-1`, {
+				method: "PUT",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({ mappings: [{}] }),
+			});
+			expect(res.status).toBe(400);
+		});
+
+		test("returns 404 for an unknown id", async () => {
+			const res = await fetch(`${baseUrl}/repo-definitions/does-not-exist`, {
+				method: "PUT",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({ enabled: false }),
+			});
+			expect(res.status).toBe(404);
+		});
+
+		test("applies a partial patch and returns 200", async () => {
+			server.stop(true);
+			startServer({
+				repoDefinitions: fakeRepoDefinitionStore([
+					makeRepoDefinition({
+						id: "repo-def-1",
+						enabled: true,
+						setupScript: "npm ci",
+					}),
+				]),
+			});
+
+			const res = await fetch(`${baseUrl}/repo-definitions/repo-def-1`, {
+				method: "PUT",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({ enabled: false }),
+			});
+			expect(res.status).toBe(200);
+			const body = (await res.json()) as Record<string, unknown>;
+			expect(body.enabled).toBe(false);
+			// Untouched field survives the partial patch unchanged.
+			expect(body.setupScript).toBe("npm ci");
+		});
+
+		test("clears setupScript and testCommand when the patch sets them to null", async () => {
+			server.stop(true);
+			startServer({
+				repoDefinitions: fakeRepoDefinitionStore([
+					makeRepoDefinition({
+						id: "repo-def-1",
+						setupScript: "npm ci",
+						testCommand: "npm test",
+					}),
+				]),
+			});
+
+			const res = await fetch(`${baseUrl}/repo-definitions/repo-def-1`, {
+				method: "PUT",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({ setupScript: null, testCommand: null }),
+			});
+			expect(res.status).toBe(200);
+			const body = (await res.json()) as Record<string, unknown>;
+			expect(body.setupScript).toBeUndefined();
+			expect(body.testCommand).toBeUndefined();
+		});
+
+		test("returns 409 when the patch collides with another definition's (owner, repo)", async () => {
+			server.stop(true);
+			startServer({
+				repoDefinitions: fakeRepoDefinitionStore([
+					makeRepoDefinition({
+						id: "repo-def-1",
+						owner: "acme",
+						repo: "widgets",
+					}),
+					makeRepoDefinition({
+						id: "repo-def-2",
+						owner: "acme",
+						repo: "gadgets",
+					}),
+				]),
+			});
+
+			const res = await fetch(`${baseUrl}/repo-definitions/repo-def-2`, {
+				method: "PUT",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({ repo: "Widgets" }),
+			});
+			expect(res.status).toBe(409);
+		});
+
+		test("returns 404 (not 500) when the row is deleted concurrently before the update lands", async () => {
+			server.stop(true);
+			startServer({
+				repoDefinitions: racyDeleteRepoDefinitionStore(
+					makeRepoDefinition({ id: "repo-def-1" }),
+				),
+			});
+
+			const res = await fetch(`${baseUrl}/repo-definitions/repo-def-1`, {
+				method: "PUT",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({ enabled: false }),
+			});
+			expect(res.status).toBe(404);
+			expect(await res.text()).toBe("repo definition not found");
+		});
+	});
+
+	describe("DELETE /repo-definitions/:id", () => {
+		test("returns 401 when no token is provided", async () => {
+			const res = await fetch(`${baseUrl}/repo-definitions/repo-def-1`, {
+				method: "DELETE",
+			});
+			expect(res.status).toBe(401);
+		});
+
+		test("returns 404 for an unknown id", async () => {
+			const res = await fetch(`${baseUrl}/repo-definitions/does-not-exist`, {
+				method: "DELETE",
+				headers: bearerHeaders(API_TOKEN),
+			});
+			expect(res.status).toBe(404);
+		});
+
+		test("deletes an existing definition and returns 204", async () => {
+			server.stop(true);
+			startServer({
+				repoDefinitions: fakeRepoDefinitionStore([
+					makeRepoDefinition({ id: "repo-def-1" }),
+				]),
+			});
+
+			const res = await fetch(`${baseUrl}/repo-definitions/repo-def-1`, {
+				method: "DELETE",
+				headers: bearerHeaders(API_TOKEN),
+			});
+			expect(res.status).toBe(204);
+
+			const getRes = await fetch(`${baseUrl}/repo-definitions/repo-def-1`, {
+				headers: bearerHeaders(API_TOKEN),
+			});
+			expect(getRes.status).toBe(404);
+		});
+	});
+
 	describe("tracing (design doc section 5/6, hermetic pattern from section 10)", () => {
 		let exporter: InMemorySpanExporter;
 		let provider: BasicTracerProvider;
@@ -481,6 +1206,38 @@ describe("ingest server", () => {
 			const spans = exporter.getFinishedSpans();
 			expect(spans[0]?.name).toBe("GET unmatched");
 			expect(spans[0]?.attributes["http.route"]).toBe("unmatched");
+		});
+
+		test("derives the '/repo-definitions' and '/repo-definitions/:id' route templates", async () => {
+			server.stop(true);
+			startServer({ tracer: provider.getTracer("test") });
+
+			const listRes = await fetch(`${baseUrl}/repo-definitions`, {
+				headers: bearerHeaders(API_TOKEN),
+			});
+			expect(listRes.status).toBe(200);
+
+			const getRes = await fetch(`${baseUrl}/repo-definitions/repo-def-1`, {
+				headers: bearerHeaders(API_TOKEN),
+			});
+			expect(getRes.status).toBe(404);
+
+			const spans = exporter.getFinishedSpans();
+			expect(spans[0]?.attributes["http.route"]).toBe("/repo-definitions");
+			expect(spans[1]?.attributes["http.route"]).toBe("/repo-definitions/:id");
+		});
+
+		test("derives the '/incidents/:id/events' route template", async () => {
+			server.stop(true);
+			startServer({ tracer: provider.getTracer("test") });
+
+			const res = await fetch(`${baseUrl}/incidents/incident-1/events`, {
+				headers: bearerHeaders(API_TOKEN),
+			});
+			expect(res.status).toBe(404);
+
+			const spans = exporter.getFinishedSpans();
+			expect(spans[0]?.attributes["http.route"]).toBe("/incidents/:id/events");
 		});
 
 		test("derives the '/webhooks/:source' route template and enriches the span with ingest attributes", async () => {
@@ -682,6 +1439,7 @@ describe("ingest server", () => {
 				listIncidents: async () => {
 					throw new Error("store exploded");
 				},
+				listEvents: async () => [],
 			};
 			startServer({
 				tracer: provider.getTracer("test"),
@@ -718,6 +1476,7 @@ describe("ingest server", () => {
 					return undefined;
 				},
 				listIncidents: async () => [],
+				listEvents: async () => [],
 			};
 			startServer({
 				tracer: provider.getTracer("test"),
@@ -744,6 +1503,7 @@ describe("ingest server", () => {
 				listIncidents: async () => {
 					throw new Error("store exploded");
 				},
+				listEvents: async () => [],
 			};
 			startServer({
 				tracer: provider.getTracer("test"),

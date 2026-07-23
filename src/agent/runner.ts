@@ -32,7 +32,7 @@ import type {
 	CreatePullRequestResult,
 } from "../repo/github";
 import type { ResolvedRepo } from "../repo/resolver";
-import type { IncidentStore } from "../storage/types";
+import type { IncidentStore, RepoDefinitionStore } from "../storage/types";
 import { renderContextMarkdown } from "../telemetry/context-builder";
 import type { IncidentContext } from "../telemetry/types";
 import {
@@ -110,6 +110,8 @@ export interface FixAgentRunnerDeps {
 	flue: FlueClientProvider;
 	github: FixAgentGitHubClient;
 	store: IncidentStore;
+	/** Used to look up a matching, enabled RepoDefinition for setupScript/testCommand overrides. */
+	repoDefinitions: Pick<RepoDefinitionStore, "findRepoDefinitionByRepo">;
 	config: FixAgentRunnerConfig;
 	logger: Logger;
 	/** Injectable for tests; defaults to `@flue/sdk`'s `createFlueClient`. Only used for the `{ baseUrl }` `FlueClientProvider` form. */
@@ -225,6 +227,11 @@ export class FixAgentRunner {
 				repo.owner,
 				repo.repo,
 			);
+			const repoOverrides = await this.resolveRepoOverrides(
+				repo.owner,
+				repo.repo,
+				incident.id,
+			);
 
 			const workflowInput: FixAgentWorkflowInput = {
 				incidentId: incident.id,
@@ -243,6 +250,7 @@ export class FixAgentRunner {
 					cloneUrl,
 					defaultBranch,
 					branchName,
+					...repoOverrides,
 				},
 				limits: {
 					timeoutMinutes: config.agent.timeoutMinutes,
@@ -318,6 +326,42 @@ export class FixAgentRunner {
 				status: "failed",
 				failureReason: message,
 			});
+		}
+	}
+
+	/**
+	 * Looks up a `RepoDefinition` matching the resolved owner/repo and, when
+	 * one exists and is enabled, returns its setupScript/testCommand to merge
+	 * into `workflowInput.repo`. A lookup failure (store error) is logged and
+	 * treated the same as "no definition found" -- a broken lookup must not
+	 * block a fix run.
+	 */
+	private async resolveRepoOverrides(
+		owner: string,
+		repo: string,
+		incidentId: string,
+	): Promise<
+		Pick<FixAgentWorkflowInput["repo"], "setupScript" | "testCommand">
+	> {
+		try {
+			const definition =
+				await this.deps.repoDefinitions.findRepoDefinitionByRepo(owner, repo);
+			if (!definition || !definition.enabled) {
+				return {};
+			}
+			return {
+				setupScript: definition.setupScript,
+				testCommand: definition.testCommand,
+			};
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			this.logger.warn("fix_agent.repo_definition_lookup_failed", {
+				incidentId,
+				owner,
+				repo,
+				error: message,
+			});
+			return {};
 		}
 	}
 

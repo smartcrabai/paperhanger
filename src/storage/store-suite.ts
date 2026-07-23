@@ -16,9 +16,17 @@
  */
 
 import { beforeEach, describe, expect, test } from "bun:test";
-import type { IncidentEvent } from "../core/types";
-import { DuplicateOpenIncidentError } from "./types";
-import type { CreateIncidentInput, IncidentStore } from "./types";
+import type { CreateRepoDefinitionInput, IncidentEvent } from "../core/types";
+import {
+	DuplicateOpenIncidentError,
+	DuplicateRepoDefinitionError,
+	RepoDefinitionNotFoundError,
+} from "./types";
+import type {
+	CreateIncidentInput,
+	IncidentStore,
+	RepoDefinitionStore,
+} from "./types";
 
 /**
  * What a `makeStore` factory hands back to the suite: an initialized store,
@@ -423,6 +431,268 @@ export function runIncidentStoreSuite(
 			await expect(
 				store.updateAgentRun("missing", { outcome: "failed" }),
 			).rejects.toThrow();
+		});
+	});
+}
+
+/**
+ * What a `makeStore` factory hands back to `runRepoDefinitionStoreSuite`: an
+ * initialized store, plus a way to advance that store's injected clock. See
+ * `IncidentStoreHarness` above for why the clock is advanced explicitly
+ * rather than by sleeping on the real wall clock.
+ */
+export interface RepoDefinitionStoreHarness {
+	store: RepoDefinitionStore;
+	/** Advances the store's injected clock by `ms` milliseconds. */
+	advance(ms: number): void;
+}
+
+function makeRepoDefinitionInput(
+	overrides: Partial<CreateRepoDefinitionInput> = {},
+): CreateRepoDefinitionInput {
+	return {
+		owner: "acme",
+		repo: "widgets",
+		...overrides,
+	};
+}
+
+/**
+ * Registers the shared `RepoDefinitionStore` behavioral suite under a
+ * `describe` block named `label`. `makeStore` is called before each test and
+ * must return a harness wrapping a store that is initialized and empty (or
+ * reset to empty).
+ */
+export function runRepoDefinitionStoreSuite(
+	label: string,
+	makeStore: () => Promise<RepoDefinitionStoreHarness>,
+): void {
+	describe(label, () => {
+		let harness: RepoDefinitionStoreHarness;
+		let store: RepoDefinitionStore;
+
+		beforeEach(async () => {
+			harness = await makeStore();
+			store = harness.store;
+		});
+
+		test("createRepoDefinition applies defaults: enabled=true, mappings=[]", async () => {
+			const created = await store.createRepoDefinition(
+				makeRepoDefinitionInput({ owner: "acme", repo: "defaults" }),
+			);
+
+			expect(created.enabled).toBe(true);
+			expect(created.mappings).toEqual([]);
+			expect(created.id).toBeTruthy();
+			expect(created.createdAt).toBe(created.updatedAt);
+		});
+
+		test("createRepoDefinition then getRepoDefinition round-trips all fields", async () => {
+			const created = await store.createRepoDefinition(
+				makeRepoDefinitionInput({
+					owner: "acme",
+					repo: "roundtrip",
+					mappings: [{ service: "api" }],
+					setupScript: "npm ci",
+					testCommand: "npm test",
+					enabled: false,
+				}),
+			);
+
+			const fetched = await store.getRepoDefinition(created.id);
+			expect(fetched).toEqual(created);
+		});
+
+		test("getRepoDefinition returns undefined for unknown id", async () => {
+			expect(await store.getRepoDefinition("does-not-exist")).toBeUndefined();
+		});
+
+		test("listRepoDefinitions returns all rows, including disabled, ordered by owner then repo", async () => {
+			await store.createRepoDefinition(
+				makeRepoDefinitionInput({ owner: "zeta", repo: "z-repo" }),
+			);
+			await store.createRepoDefinition(
+				makeRepoDefinitionInput({ owner: "acme", repo: "b-repo" }),
+			);
+			await store.createRepoDefinition(
+				makeRepoDefinitionInput({
+					owner: "acme",
+					repo: "a-repo",
+					enabled: false,
+				}),
+			);
+
+			const listed = await store.listRepoDefinitions();
+			expect(
+				listed.map((definition) => `${definition.owner}/${definition.repo}`),
+			).toEqual(["acme/a-repo", "acme/b-repo", "zeta/z-repo"]);
+		});
+
+		test("findRepoDefinitionByRepo matches case-insensitively", async () => {
+			const created = await store.createRepoDefinition(
+				makeRepoDefinitionInput({ owner: "Acme", repo: "Widgets" }),
+			);
+
+			const found = await store.findRepoDefinitionByRepo("acme", "widgets");
+			expect(found?.id).toBe(created.id);
+		});
+
+		test("findRepoDefinitionByRepo returns undefined when no definition matches", async () => {
+			expect(
+				await store.findRepoDefinitionByRepo("nope", "nothing"),
+			).toBeUndefined();
+		});
+
+		test("findRepoDefinitionByRepo also returns a disabled definition (the store does not filter on enabled)", async () => {
+			const created = await store.createRepoDefinition(
+				makeRepoDefinitionInput({
+					owner: "acme",
+					repo: "disabled-lookup",
+					enabled: false,
+				}),
+			);
+
+			const found = await store.findRepoDefinitionByRepo(
+				"acme",
+				"disabled-lookup",
+			);
+			expect(found?.id).toBe(created.id);
+			expect(found?.enabled).toBe(false);
+		});
+
+		test("createRepoDefinition throws DuplicateRepoDefinitionError for a duplicate (owner, repo) pair", async () => {
+			await store.createRepoDefinition(
+				makeRepoDefinitionInput({ owner: "acme", repo: "dup" }),
+			);
+
+			await expect(
+				store.createRepoDefinition(
+					makeRepoDefinitionInput({ owner: "acme", repo: "dup" }),
+				),
+			).rejects.toThrow(DuplicateRepoDefinitionError);
+		});
+
+		test("two concurrent createRepoDefinition calls for the same (owner, repo) leave exactly one fulfilled and one rejected with DuplicateRepoDefinitionError", async () => {
+			const results = await Promise.allSettled([
+				store.createRepoDefinition(
+					makeRepoDefinitionInput({ owner: "acme", repo: "race" }),
+				),
+				store.createRepoDefinition(
+					makeRepoDefinitionInput({ owner: "acme", repo: "race" }),
+				),
+			]);
+
+			const fulfilled = results.filter(
+				(result) => result.status === "fulfilled",
+			);
+			const rejected = results.filter((result) => result.status === "rejected");
+			expect(fulfilled.length).toBe(1);
+			expect(rejected.length).toBe(1);
+			expect((rejected[0] as PromiseRejectedResult).reason).toBeInstanceOf(
+				DuplicateRepoDefinitionError,
+			);
+		});
+
+		test("createRepoDefinition throws DuplicateRepoDefinitionError for a case-variant duplicate", async () => {
+			await store.createRepoDefinition(
+				makeRepoDefinitionInput({ owner: "Acme", repo: "Dup" }),
+			);
+
+			await expect(
+				store.createRepoDefinition(
+					makeRepoDefinitionInput({ owner: "acme", repo: "dup" }),
+				),
+			).rejects.toThrow(DuplicateRepoDefinitionError);
+		});
+
+		test("updateRepoDefinition applies a partial patch and strictly advances updatedAt", async () => {
+			const created = await store.createRepoDefinition(
+				makeRepoDefinitionInput({ owner: "acme", repo: "update-me" }),
+			);
+			const beforeUpdate = created.updatedAt;
+
+			harness.advance(2);
+			const updated = await store.updateRepoDefinition(created.id, {
+				enabled: false,
+				mappings: [{ service: "api" }],
+			});
+
+			expect(updated.enabled).toBe(false);
+			expect(updated.mappings).toEqual([{ service: "api" }]);
+			expect(new Date(updated.updatedAt).getTime()).toBeGreaterThan(
+				new Date(beforeUpdate).getTime(),
+			);
+			// Fields not in the patch are preserved.
+			expect(updated.owner).toBe(created.owner);
+			expect(updated.repo).toBe(created.repo);
+		});
+
+		test("updateRepoDefinition clears setupScript and testCommand when patched with null", async () => {
+			const created = await store.createRepoDefinition(
+				makeRepoDefinitionInput({
+					owner: "acme",
+					repo: "clear-me",
+					setupScript: "npm ci",
+					testCommand: "npm test",
+				}),
+			);
+
+			const updated = await store.updateRepoDefinition(created.id, {
+				setupScript: null,
+				testCommand: null,
+			});
+
+			expect(updated.setupScript).toBeUndefined();
+			expect(updated.testCommand).toBeUndefined();
+		});
+
+		test("updateRepoDefinition throws RepoDefinitionNotFoundError for unknown id", async () => {
+			await expect(
+				store.updateRepoDefinition("missing", { enabled: false }),
+			).rejects.toThrow(RepoDefinitionNotFoundError);
+		});
+
+		test("updateRepoDefinition throws DuplicateRepoDefinitionError when the patched (owner, repo) collides with another definition", async () => {
+			await store.createRepoDefinition(
+				makeRepoDefinitionInput({ owner: "acme", repo: "taken" }),
+			);
+			const created = await store.createRepoDefinition(
+				makeRepoDefinitionInput({ owner: "acme", repo: "free" }),
+			);
+
+			await expect(
+				store.updateRepoDefinition(created.id, { repo: "taken" }),
+			).rejects.toThrow(DuplicateRepoDefinitionError);
+		});
+
+		test("deleteRepoDefinition returns true and removes the row", async () => {
+			const created = await store.createRepoDefinition(
+				makeRepoDefinitionInput({ owner: "acme", repo: "delete-me" }),
+			);
+
+			expect(await store.deleteRepoDefinition(created.id)).toBe(true);
+			expect(await store.getRepoDefinition(created.id)).toBeUndefined();
+		});
+
+		test("deleteRepoDefinition returns false for an unknown id", async () => {
+			expect(await store.deleteRepoDefinition("does-not-exist")).toBe(false);
+		});
+
+		test("mappings round-trip nested unicode and multiple matcher entries", async () => {
+			const mappings: Array<Record<string, string>> = [
+				{ service: "日本語サービス", env: "prod" },
+				{ service: "widgets", note: 'emoji 🎉 and "quotes"' },
+			];
+			const created = await store.createRepoDefinition(
+				makeRepoDefinitionInput({
+					owner: "acme",
+					repo: "unicode-mappings",
+					mappings,
+				}),
+			);
+
+			const fetched = await store.getRepoDefinition(created.id);
+			expect(fetched?.mappings).toEqual(mappings);
 		});
 	});
 }

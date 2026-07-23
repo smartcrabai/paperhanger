@@ -1,0 +1,803 @@
+@import "./fonts/fonts.css";
+@import "./tokens.css";
+
+/* Paperhanger dashboard: SmartCrab design system (see docs/architecture.md
+   and tokens.css). This file defines a small semantic layer on top of the
+   generated --brand-* tokens, then styles every component using ONLY that
+   semantic layer (plus a few explicitly-allowed raw --brand-* references for
+   typography/spacing/motion/radius base and control borders -- see below).
+   Configuration + observation only -- no styling here should ever imply a
+   destructive/approval action beyond delete (docs/spec.md section 3.8). */
+
+:root {
+	/* Canvas / surface / hairline -- posture rule overrides the generated
+	   antd-ish neutrals: canvas stays pure white, cards get a cool
+	   blue-tinted surface, hairlines are a soft cool grey (see DESIGN.md). */
+	--canvas: #ffffff;
+	--surface: #f1f6f9;
+	--hairline: #e2eaee;
+	/* Stronger line for form controls, per the mapping notes. */
+	--control-border: var(--brand-color-border);
+	--row-hover: var(--brand-color-fill-quaternary);
+
+	/* Radius scale (posture rule): 8px controls/buttons, 16px cards/table
+	   container/panels, 24px the modal -- no other radii. */
+	--radius-sm: var(--brand-border-radius);
+	--radius-md: 16px;
+	--radius-lg: 24px;
+
+	/* Text */
+	--text: var(--brand-color-text);
+	--text-muted: var(--brand-color-text-secondary);
+	--text-meta: var(--brand-color-text-tertiary);
+
+	/* Brand accent */
+	--primary: var(--brand-color-primary);
+	--primary-hover: var(--brand-color-primary-hover);
+	--primary-active: var(--brand-color-primary-active);
+	--primary-bg: var(--brand-color-primary-bg);
+	--primary-border: var(--brand-color-primary-border);
+	--primary-border-hover: var(--brand-color-primary-border-hover);
+	--primary-text-on-solid: #ffffff;
+	--link: var(--brand-color-link);
+	--link-hover: var(--brand-color-link-hover);
+
+	/* Destructive (Delete) */
+	--danger: var(--brand-color-error);
+	--danger-hover: var(--brand-color-error-hover);
+	--danger-bg: var(--brand-color-error-bg);
+	--danger-border: var(--brand-color-error-border);
+
+	/* Focus ring: primary-border-hover outline + a subtle primary-bg wash. */
+	--focus-ring: var(--brand-color-primary-border-hover);
+	--focus-wash: var(--brand-color-primary-bg);
+
+	/* Shared hover/focus transition (posture rule: motion-duration-mid + ease-out). */
+	--transition-fast:
+		border-color var(--brand-motion-duration-mid) var(--brand-motion-ease-out),
+		background-color var(--brand-motion-duration-mid)
+		var(--brand-motion-ease-out),
+		color var(--brand-motion-duration-mid) var(--brand-motion-ease-out);
+
+	/* Status badges: wash (bg) + border + text, per incident status (see
+	   status-badge.tsx and docs/spec.md's incident state machine). Text tones
+	   are the darkest preset step needed to clear >=4.5:1 against their wash
+	   (measured: green-8 5.4:1, red-7 5.1:1, gold-9 6.6:1, text-secondary
+	   6.2:1; the "-active" family tones fall short at ~2.8-4.2:1). */
+	--badge-green-bg: var(--brand-color-success-bg);
+	--badge-green-border: var(--brand-color-success-border);
+	--badge-green-text: var(--brand-presets-green-8);
+	--badge-red-bg: var(--brand-color-error-bg);
+	--badge-red-border: var(--brand-color-error-border);
+	--badge-red-text: var(--brand-presets-red-7);
+	--badge-amber-bg: var(--brand-color-warning-bg);
+	--badge-amber-border: var(--brand-color-warning-border);
+	--badge-amber-text: var(--brand-presets-gold-9);
+	--badge-purple-bg: var(--brand-presets-purple-1);
+	--badge-purple-border: var(--brand-presets-purple-3);
+	--badge-purple-text: var(--brand-presets-purple-7);
+	--badge-gray-bg: var(--brand-color-fill-secondary);
+	--badge-gray-border: var(--brand-color-border-secondary);
+	--badge-gray-text: var(--brand-color-text-secondary);
+	/* Sky wash -- posture rule: at most one sky wash per screen; the
+	   in-progress badge (diagnosing/fixing) is that one use. Do not use blue
+	   anywhere else in this file. */
+	--badge-blue-bg: var(--brand-presets-blue-1);
+	--badge-blue-border: var(--brand-presets-blue-3);
+	--badge-blue-text: var(--brand-presets-blue-7);
+}
+
+@media (prefers-color-scheme: dark) {
+	:root {
+		/* Only overrides that are NOT plain aliases to an already dark-aware
+		   --brand-* token need restating here -- every --brand-color-*
+		   reference above resolves against tokens.css's own dark block
+		   automatically. Dark neutrals are the generated set, as-is. */
+		--canvas: var(--brand-color-bg-container);
+		--surface: var(--brand-color-bg-elevated);
+		--hairline: var(--brand-color-border);
+		--row-hover: var(--brand-color-fill-tertiary);
+
+		/* The light badge text tones above are theme-invariant presets, and
+		   the generated dark "-active" tones fall short of the >=4.5:1 badge
+		   contrast requirement against their "-bg" wash (measured
+		   ~3.3-4.5:1). The "-hover" tones sit on the same hue but are light
+		   enough to clear >=4.5:1 comfortably (~7-9:1). Gray resolves through
+		   the dark-aware text-secondary token by itself; purple and blue
+		   already pass. */
+		--badge-green-text: var(--brand-color-success-hover);
+		--badge-red-text: var(--brand-color-error-hover);
+		--badge-amber-text: var(--brand-color-warning-hover);
+	}
+}
+
+* {
+	box-sizing: border-box;
+}
+
+body {
+	margin: 0;
+	font-family: var(--brand-font-family);
+	font-size: var(--brand-font-size);
+	line-height: var(--brand-line-height);
+	background: var(--canvas);
+	color: var(--text);
+}
+
+h1,
+h2,
+h3 {
+	font-weight: var(--brand-font-weight-strong);
+	margin: 0;
+}
+
+h1 {
+	font-size: var(--brand-font-size-heading-4);
+	line-height: var(--brand-line-height-heading);
+}
+
+h2 {
+	font-size: var(--brand-font-size-heading-5);
+	line-height: var(--brand-line-height-heading);
+}
+
+p {
+	margin: 0;
+}
+
+button {
+	font-family: inherit;
+	font-size: var(--brand-font-size);
+	cursor: pointer;
+}
+
+input,
+textarea,
+button {
+	font-family: inherit;
+}
+
+.mono {
+	font-family: var(--brand-font-family-code);
+	font-size: var(--brand-font-size);
+}
+
+.muted {
+	color: var(--text-muted);
+}
+
+/* Token gate */
+
+.token-gate {
+	min-height: 100vh;
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	padding: var(--brand-size-lg);
+}
+
+.token-form {
+	background: var(--surface);
+	border: var(--brand-line-width) solid var(--hairline);
+	border-radius: var(--radius-md);
+	padding: var(--brand-size-xl);
+	width: 100%;
+	max-width: 360px;
+	display: flex;
+	flex-direction: column;
+	gap: var(--brand-size);
+}
+
+.token-form-hint {
+	color: var(--text-muted);
+	font-size: var(--brand-font-size-sm);
+}
+
+.token-form input[type="password"] {
+	height: var(--brand-control-height);
+	background: var(--canvas);
+	border: var(--brand-line-width) solid var(--control-border);
+	border-radius: var(--radius-sm);
+	padding: var(--brand-size-xs);
+	color: var(--text);
+	font-size: var(--brand-font-size);
+	transition: var(--transition-fast);
+}
+
+.token-form input[type="password"]:focus {
+	border-color: var(--primary-border-hover);
+	box-shadow: 0 0 0 3px var(--focus-wash);
+}
+
+/* App shell */
+
+.app {
+	min-height: 100vh;
+	display: flex;
+	flex-direction: column;
+}
+
+.app-header {
+	display: flex;
+	align-items: center;
+	gap: var(--brand-size-lg);
+	padding: var(--brand-size-sm) var(--brand-size-lg);
+	border-bottom: var(--brand-line-width) solid var(--hairline);
+	background: var(--canvas);
+}
+
+.app-header h1 {
+	font-size: var(--brand-font-size-heading-5);
+	font-weight: var(--brand-font-weight-strong);
+}
+
+.tabs {
+	display: flex;
+	gap: var(--brand-size-xxs);
+	margin-right: auto;
+}
+
+.tab {
+	background: transparent;
+	border: var(--brand-line-width) solid transparent;
+	border-radius: var(--radius-sm);
+	padding: var(--brand-size-xs) var(--brand-size);
+	color: var(--text-muted);
+	transition: var(--transition-fast);
+}
+
+.tab:hover {
+	background: var(--surface);
+}
+
+.tab.active {
+	background: var(--primary-bg);
+	color: var(--primary);
+	font-weight: var(--brand-font-weight-strong);
+}
+
+main {
+	flex: 1;
+	padding: var(--brand-size-lg);
+	max-width: 1200px;
+	width: 100%;
+	margin: 0 auto;
+}
+
+.view-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	margin-bottom: var(--brand-size);
+}
+
+/* Buttons */
+
+button[type="submit"],
+.view-header > button,
+.token-form > button {
+	height: var(--brand-control-height);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	background: var(--primary);
+	color: var(--primary-text-on-solid);
+	border: none;
+	border-radius: var(--radius-sm);
+	padding: 0 var(--brand-size);
+	font-weight: var(--brand-font-weight-strong);
+	transition: var(--transition-fast);
+}
+
+button[type="submit"]:hover:not(:disabled),
+.view-header > button:hover,
+.token-form > button:hover:not(:disabled) {
+	background: var(--primary-hover);
+}
+
+button[type="submit"]:active:not(:disabled),
+.view-header > button:active,
+.token-form > button:active:not(:disabled) {
+	background: var(--primary-active);
+}
+
+button[type="submit"]:disabled,
+.token-form > button:disabled {
+	opacity: 0.5;
+	cursor: not-allowed;
+}
+
+button.secondary {
+	height: var(--brand-control-height);
+	display: inline-flex;
+	align-items: center;
+	justify-content: center;
+	background: var(--canvas);
+	border: var(--brand-line-width) solid var(--hairline);
+	border-radius: var(--radius-sm);
+	padding: 0 var(--brand-size);
+	color: var(--text);
+	transition: var(--transition-fast);
+}
+
+button.secondary:hover {
+	border-color: var(--primary-border);
+}
+
+button.link-button {
+	background: none;
+	border: none;
+	color: var(--link);
+	padding: 0;
+	font-size: var(--brand-font-size-sm);
+	text-decoration: underline;
+	transition: var(--transition-fast);
+}
+
+button.link-button:hover {
+	color: var(--link-hover);
+}
+
+button.link-button.danger {
+	color: var(--danger);
+}
+
+button.link-button.danger:hover {
+	color: var(--danger-hover);
+}
+
+*:focus-visible {
+	outline: 2px solid var(--focus-ring);
+	outline-offset: 2px;
+}
+
+/* Tables */
+
+.table-wrap {
+	background: var(--canvas);
+	border: var(--brand-line-width) solid var(--hairline);
+	border-radius: var(--radius-md);
+	overflow-x: auto;
+}
+
+table {
+	width: 100%;
+	border-collapse: collapse;
+	font-size: var(--brand-font-size);
+}
+
+th,
+td {
+	text-align: left;
+	padding: var(--brand-size-xs) var(--brand-size);
+	border-bottom: var(--brand-line-width) solid var(--hairline);
+	white-space: nowrap;
+}
+
+th {
+	background: var(--surface);
+	color: var(--text-meta);
+	font-weight: var(--brand-font-weight-strong);
+	font-size: var(--brand-font-size-sm);
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+}
+
+tbody tr {
+	transition: var(--transition-fast);
+}
+
+tbody tr:hover {
+	background: var(--row-hover);
+}
+
+tbody tr:last-child td {
+	border-bottom: none;
+}
+
+.table-actions {
+	display: flex;
+	gap: var(--brand-size-sm);
+}
+
+/* Badges */
+
+.badge {
+	display: inline-block;
+	padding: var(--brand-size-xxs) var(--brand-size-xs);
+	border: var(--brand-line-width) solid transparent;
+	border-radius: 999px;
+	font-size: var(--brand-font-size-sm);
+	font-weight: var(--brand-font-weight-strong);
+	white-space: nowrap;
+}
+
+.badge-green {
+	background: var(--badge-green-bg);
+	border-color: var(--badge-green-border);
+	color: var(--badge-green-text);
+}
+.badge-red {
+	background: var(--badge-red-bg);
+	border-color: var(--badge-red-border);
+	color: var(--badge-red-text);
+}
+.badge-purple {
+	background: var(--badge-purple-bg);
+	border-color: var(--badge-purple-border);
+	color: var(--badge-purple-text);
+}
+.badge-gray {
+	background: var(--badge-gray-bg);
+	border-color: var(--badge-gray-border);
+	color: var(--badge-gray-text);
+}
+.badge-amber {
+	background: var(--badge-amber-bg);
+	border-color: var(--badge-amber-border);
+	color: var(--badge-amber-text);
+}
+.badge-blue {
+	background: var(--badge-blue-bg);
+	border-color: var(--badge-blue-border);
+	color: var(--badge-blue-text);
+}
+
+/* Modal (repo definition form) */
+
+.modal-backdrop {
+	position: fixed;
+	inset: 0;
+	background: #00000066;
+	display: flex;
+	align-items: flex-start;
+	justify-content: center;
+	padding: var(--brand-size-xxl) var(--brand-size);
+	overflow-y: auto;
+}
+
+.modal {
+	background: var(--surface);
+	border: var(--brand-line-width) solid var(--hairline);
+	border-radius: var(--radius-lg);
+	padding: var(--brand-size-lg);
+	width: 100%;
+	max-width: 560px;
+	max-height: 85vh;
+	display: flex;
+	flex-direction: column;
+	/* Softness comes from radius + cool neutrals; this is the one permitted
+	   subtle elevation shadow (posture rule). */
+	box-shadow: 0 8px 24px -8px #00000026;
+}
+
+/* Repo definition form */
+
+.repo-form {
+	display: flex;
+	flex-direction: column;
+	gap: var(--brand-size);
+	flex: 1;
+	min-height: 0;
+}
+
+/* Scrolls independently of the heading above and the action row below, so
+   Save/Cancel stay reachable even when mapping groups push the form taller
+   than the modal's max-height. */
+.modal-body {
+	display: flex;
+	flex-direction: column;
+	gap: var(--brand-size);
+	overflow-y: auto;
+	min-height: 0;
+}
+
+.repo-form label {
+	display: flex;
+	flex-direction: column;
+	gap: var(--brand-size-xxs);
+	font-size: var(--brand-font-size-sm);
+	color: var(--text-muted);
+}
+
+.repo-form .checkbox-row {
+	flex-direction: row;
+	align-items: center;
+	gap: var(--brand-size-xs);
+}
+
+/* Native checkbox defaults to the browser's blue; the brand accent keeps
+   blue reserved for the single in-progress badge sky wash (posture rule). */
+.repo-form input[type="checkbox"] {
+	accent-color: var(--primary);
+}
+
+.repo-form input[type="text"],
+.repo-form input[type="password"],
+.repo-form textarea {
+	background: var(--canvas);
+	border: var(--brand-line-width) solid var(--control-border);
+	border-radius: var(--radius-sm);
+	padding: var(--brand-size-xs);
+	color: var(--text);
+	font-size: var(--brand-font-size);
+	transition: var(--transition-fast);
+}
+
+.repo-form input[type="text"],
+.repo-form input[type="password"] {
+	height: var(--brand-control-height);
+}
+
+.repo-form input[type="text"]:focus,
+.repo-form input[type="password"]:focus,
+.repo-form textarea:focus {
+	border-color: var(--primary-border-hover);
+	box-shadow: 0 0 0 3px var(--focus-wash);
+}
+
+.form-row {
+	display: flex;
+	gap: var(--brand-size);
+}
+
+.form-row > label {
+	flex: 1;
+}
+
+fieldset {
+	border: var(--brand-line-width) solid var(--hairline);
+	border-radius: var(--radius-sm);
+	padding: var(--brand-size-sm);
+	display: flex;
+	flex-direction: column;
+	gap: var(--brand-size-xs);
+}
+
+legend {
+	color: var(--text-meta);
+	font-size: var(--brand-font-size-sm);
+	font-weight: var(--brand-font-weight-strong);
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	padding: 0 var(--brand-size-xxs);
+}
+
+.form-actions {
+	display: flex;
+	gap: var(--brand-size-sm);
+	margin-top: var(--brand-size-xxs);
+}
+
+.form-error {
+	color: var(--danger);
+	font-size: var(--brand-font-size-sm);
+}
+
+/* Mappings editor */
+
+.mappings-editor {
+	display: flex;
+	flex-direction: column;
+	gap: var(--brand-size-sm);
+}
+
+.mappings-empty-hint {
+	color: var(--text-muted);
+	font-size: var(--brand-font-size-sm);
+}
+
+.mapping-group {
+	border: var(--brand-line-width) dashed var(--hairline);
+	border-radius: var(--radius-sm);
+	padding: var(--brand-size-xs);
+	display: flex;
+	flex-direction: column;
+	gap: var(--brand-size-xs);
+}
+
+.mapping-group-header {
+	display: flex;
+	justify-content: space-between;
+	font-size: var(--brand-font-size-sm);
+	color: var(--text-meta);
+}
+
+.mapping-pair {
+	display: flex;
+	align-items: center;
+	gap: var(--brand-size-xs);
+}
+
+.mapping-pair input {
+	flex: 1;
+	background: var(--canvas);
+	border: var(--brand-line-width) solid var(--control-border);
+	border-radius: var(--radius-sm);
+	padding: var(--brand-size-xxs) var(--brand-size-xs);
+	color: var(--text);
+	font-size: var(--brand-font-size-sm);
+	transition: var(--transition-fast);
+}
+
+.mapping-pair input:focus {
+	border-color: var(--primary-border-hover);
+	box-shadow: 0 0 0 3px var(--focus-wash);
+}
+
+.mapping-pair-eq {
+	color: var(--text-muted);
+}
+
+.mapping-pair input.input-error {
+	border-color: var(--danger);
+}
+
+/* Incidents view */
+
+.incidents-view {
+	display: grid;
+	grid-template-columns: minmax(280px, 360px) 1fr;
+	gap: var(--brand-size-lg);
+	align-items: start;
+}
+
+@media (max-width: 860px) {
+	.incidents-view {
+		grid-template-columns: 1fr;
+	}
+}
+
+.incident-rows {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: var(--brand-size-xs);
+	max-height: calc(100vh - 12rem);
+	overflow-y: auto;
+}
+
+.incident-row {
+	display: flex;
+	width: 100%;
+	text-align: left;
+	background: var(--surface);
+	border: var(--brand-line-width) solid var(--hairline);
+	border-radius: var(--radius-md);
+	padding: var(--brand-size-xs) var(--brand-size-sm);
+	color: var(--text);
+	flex-direction: column;
+	gap: var(--brand-size-xxs);
+	transition: var(--transition-fast);
+}
+
+.incident-row:hover {
+	border-color: var(--primary-border);
+}
+
+.incident-row.selected {
+	border-color: var(--primary);
+	background: var(--primary-bg);
+}
+
+.incident-row-top {
+	display: flex;
+	align-items: center;
+	gap: var(--brand-size-xs);
+}
+
+.incident-severity {
+	font-size: var(--brand-font-size-sm);
+	color: var(--text-muted);
+	text-transform: capitalize;
+}
+
+.incident-title {
+	font-weight: var(--brand-font-weight-strong);
+	font-size: var(--brand-font-size);
+}
+
+.incident-meta {
+	display: flex;
+	gap: var(--brand-size-xs);
+	font-size: var(--brand-font-size-sm);
+	color: var(--text-muted);
+}
+
+.pr-flag {
+	color: var(--badge-green-text);
+	font-weight: var(--brand-font-weight-strong);
+}
+
+.incident-detail-pane {
+	background: var(--surface);
+	border: var(--brand-line-width) solid var(--hairline);
+	border-radius: var(--radius-md);
+	padding: var(--brand-size-md) var(--brand-size-lg);
+	min-height: 200px;
+}
+
+.incident-detail {
+	display: flex;
+	flex-direction: column;
+	gap: var(--brand-size);
+}
+
+.incident-detail-header {
+	display: flex;
+	align-items: center;
+	gap: var(--brand-size-sm);
+}
+
+.incident-fields {
+	display: grid;
+	grid-template-columns: max-content 1fr;
+	gap: var(--brand-size-xxs) var(--brand-size);
+	margin: 0;
+	font-size: var(--brand-font-size-sm);
+}
+
+.incident-fields dt {
+	color: var(--text-muted);
+}
+
+.incident-fields dd {
+	margin: 0;
+	min-width: 0;
+	overflow-wrap: anywhere;
+	word-break: break-all;
+}
+
+/* ID and Fingerprint (spec: "fingerprints, ids" use the code font) are
+   always the first two dt/dd pairs rendered by IncidentDetail -- select by
+   structural position rather than touching the .tsx with a className. */
+.incident-fields dd:nth-of-type(-n + 2) {
+	font-family: var(--brand-font-family-code);
+}
+
+.kv-block h3 {
+	font-size: var(--brand-font-size-sm);
+	text-transform: uppercase;
+	letter-spacing: 0.03em;
+	color: var(--text-meta);
+	margin-bottom: var(--brand-size-xs);
+}
+
+.kv-block pre {
+	background: var(--surface);
+	border: var(--brand-line-width) solid var(--hairline);
+	border-radius: var(--radius-sm);
+	padding: var(--brand-size-sm);
+	margin: 0;
+	white-space: pre-wrap;
+	word-break: break-word;
+	font-family: var(--brand-font-family-code);
+	font-size: var(--brand-font-size-sm);
+	max-height: 320px;
+	overflow-y: auto;
+}
+
+.event-timeline {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: flex;
+	flex-direction: column;
+	gap: var(--brand-size-xs);
+}
+
+.event-timeline li {
+	border-left: 2px solid var(--hairline);
+	padding: 0 0 0 var(--brand-size-sm);
+	font-size: var(--brand-font-size);
+}
+
+.event-timeline-top {
+	display: flex;
+	gap: var(--brand-size-xs);
+	font-size: var(--brand-font-size-sm);
+	color: var(--text-muted);
+	text-transform: capitalize;
+}

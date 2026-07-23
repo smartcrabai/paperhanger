@@ -1,15 +1,18 @@
 /**
  * HTTP ingest server. Routes: POST /webhooks/:source, GET /healthz, GET
- * /readyz, GET /incidents, GET /incidents/:id. See docs/spec.md section 3.1
- * and docs/architecture.md "Webhook authentication".
+ * /readyz, GET /incidents, GET /incidents/:id, GET /incidents/:id/events, plus
+ * the dashboard's repo-definition CRUD routes (GET/POST /repo-definitions,
+ * GET/PUT/DELETE /repo-definitions/:id -- see ./repo-definitions.ts). See
+ * docs/spec.md section 3.1 and docs/architecture.md "Webhook authentication".
  *
- * `GET /incidents` and `GET /incidents/:id` additionally require
- * `server.apiToken` (Authorization: Bearer or X-Api-Token, constant-time
- * compare via `safeCompare`) since incident records can carry sensitive
- * diagnosis/failureReason text. Secure by default: when `server.apiToken`
- * is not configured, both endpoints refuse every request with 401 rather
- * than serving that data with no authentication at all. `/healthz` and
- * `/readyz` are never gated.
+ * `GET /incidents`, `GET /incidents/:id`, `GET /incidents/:id/events`, and
+ * every `/repo-definitions` route additionally require `server.apiToken`
+ * (Authorization: Bearer or X-Api-Token, constant-time compare via
+ * `safeCompare`) since this data can carry sensitive diagnosis/failureReason
+ * text or infrastructure setup scripts. Secure by default: when
+ * `server.apiToken` is not configured, those endpoints refuse every request
+ * with 401 rather than serving that data with no authentication at all.
+ * `/healthz` and `/readyz` are never gated.
  */
 
 import type { Tracer } from "@opentelemetry/api";
@@ -17,11 +20,21 @@ import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
 import type { IncidentManager } from "../core/incident-manager";
 import type { IncidentEvent } from "../core/types";
 import type { Logger } from "../observability/logger";
-import type { IncidentStore } from "../storage/types";
+import type { IncidentStore, RepoDefinitionStore } from "../storage/types";
 import type { SourceAdapter } from "./adapters/types";
+import {
+	handleCreateRepoDefinition,
+	handleDeleteRepoDefinition,
+	handleGetRepoDefinition,
+	handleListRepoDefinitions,
+	handleUpdateRepoDefinition,
+} from "./repo-definitions";
 
 const WEBHOOK_PATH_PREFIX = "/webhooks/";
 const INCIDENTS_PATH_PREFIX = "/incidents/";
+const INCIDENT_EVENTS_SUFFIX = "/events";
+const REPO_DEFINITIONS_PATH = "/repo-definitions";
+const REPO_DEFINITIONS_PATH_PREFIX = "/repo-definitions/";
 /** Cap on `GET /incidents` regardless of what a caller asks for via `?limit=`. */
 const MAX_INCIDENTS_LIST_LIMIT = 500;
 const DEFAULT_INCIDENTS_LIST_LIMIT = 100;
@@ -37,9 +50,29 @@ export interface ServerDeps {
 	manager: IncidentManager;
 	/** Keyed by source name, e.g. "grafana", "generic". */
 	adapters: Record<string, SourceAdapter>;
-	store: Pick<IncidentStore, "ping" | "getIncident" | "listIncidents">;
+	store: Pick<
+		IncidentStore,
+		"ping" | "getIncident" | "listIncidents" | "listEvents"
+	>;
+	/**
+	 * Backs the dashboard's repo-definition CRUD routes (see
+	 * ./repo-definitions.ts). A separate field rather than folded into
+	 * `store`'s Pick above, so that Pick stays an honest, narrow slice of
+	 * `IncidentStore`.
+	 */
+	repoDefinitions: RepoDefinitionStore;
 	/** Falls back to a no-op tracer (no global provider registered) when omitted. See docs/spec.md section 3.9. */
 	tracer?: Tracer;
+	/**
+	 * Bun HTML-bundle routes (e.g. `{ "/dashboard": dashboardHtmlImport }`),
+	 * passed straight through to `Bun.serve`'s `routes` option below -- Bun
+	 * serves these ahead of the `fetch` fallback. Kept as an opaque,
+	 * already-bundled value rather than an `.html` import in this file, so
+	 * this module (and its unit tests) never need a bundler pass; the
+	 * composition root (`src/index.ts`) is the only place that imports
+	 * `.html`.
+	 */
+	htmlRoutes?: Record<string, Bun.HTMLBundle>;
 }
 
 /** `http.route` template values this server ever dispatches to (design section 6). */
@@ -49,7 +82,42 @@ type RouteTemplate =
 	| "/webhooks/:source"
 	| "/incidents"
 	| "/incidents/:id"
+	| "/incidents/:id/events"
+	| "/repo-definitions"
+	| "/repo-definitions/:id"
 	| "unmatched";
+
+/**
+ * Extracts `:id` from a `/incidents/:id/events` path, or `undefined` if
+ * `pathname` isn't that shape. Shared by `route()` and `deriveRouteTemplate()`
+ * so the two never drift.
+ */
+function incidentEventsIdFromPath(pathname: string): string | undefined {
+	if (
+		!pathname.startsWith(INCIDENTS_PATH_PREFIX) ||
+		!pathname.endsWith(INCIDENT_EVENTS_SUFFIX)
+	) {
+		return undefined;
+	}
+	const id = pathname.slice(
+		INCIDENTS_PATH_PREFIX.length,
+		pathname.length - INCIDENT_EVENTS_SUFFIX.length,
+	);
+	return id.length > 0 ? id : undefined;
+}
+
+/**
+ * Extracts `:id` from a `/repo-definitions/:id` path, or `undefined` if
+ * `pathname` isn't that shape. Shared by `route()` and `deriveRouteTemplate()`
+ * so the two never drift.
+ */
+function repoDefinitionIdFromPath(pathname: string): string | undefined {
+	if (!pathname.startsWith(REPO_DEFINITIONS_PATH_PREFIX)) {
+		return undefined;
+	}
+	const id = pathname.slice(REPO_DEFINITIONS_PATH_PREFIX.length);
+	return id.length > 0 ? id : undefined;
+}
 
 /**
  * Derives the `http.route` template for a request's path, mirroring the path
@@ -66,6 +134,15 @@ function deriveRouteTemplate(url: URL): RouteTemplate {
 	}
 	if (url.pathname.startsWith(WEBHOOK_PATH_PREFIX)) {
 		return "/webhooks/:source";
+	}
+	if (url.pathname === REPO_DEFINITIONS_PATH) {
+		return "/repo-definitions";
+	}
+	if (repoDefinitionIdFromPath(url.pathname) !== undefined) {
+		return "/repo-definitions/:id";
+	}
+	if (incidentEventsIdFromPath(url.pathname) !== undefined) {
+		return "/incidents/:id/events";
 	}
 	if (url.pathname === "/incidents") {
 		return "/incidents";
@@ -128,10 +205,11 @@ const UNCONFIGURED_API_TOKEN_MESSAGE =
 	"unauthorized: server.apiToken is not configured; incident data is not served without it. Set server.apiToken (see paperhanger.example.yaml) to enable GET /incidents access.";
 
 /**
- * Guards `GET /incidents` and `GET /incidents/:id`. Returns a 401 `Response`
- * when the request should be rejected, or `undefined` when it may proceed.
- * Secure by default: an unconfigured `server.apiToken` rejects every
- * request rather than serving incident data unauthenticated.
+ * Guards every data route: `GET /incidents`, `GET /incidents/:id`, `GET
+ * /incidents/:id/events`, and the `/repo-definitions` routes. Returns a 401
+ * `Response` when the request should be rejected, or `undefined` when it may
+ * proceed. Secure by default: an unconfigured `server.apiToken` rejects
+ * every request rather than serving that data unauthenticated.
  */
 function checkApiToken(
 	config: ServerConfig,
@@ -149,7 +227,15 @@ function checkApiToken(
 }
 
 export function createServer(deps: ServerDeps): ReturnType<typeof Bun.serve> {
-	const { config, logger, manager, adapters, store } = deps;
+	const {
+		config,
+		logger,
+		manager,
+		adapters,
+		store,
+		repoDefinitions,
+		htmlRoutes,
+	} = deps;
 	const tracer = deps.tracer ?? trace.getTracer("server");
 
 	async function handleWebhook(
@@ -231,6 +317,54 @@ export function createServer(deps: ServerDeps): ReturnType<typeof Bun.serve> {
 			return handleWebhook(req, url, source);
 		}
 
+		if (url.pathname === REPO_DEFINITIONS_PATH) {
+			const authError = checkApiToken(config, req);
+			if (authError) {
+				return authError;
+			}
+			if (req.method === "GET") {
+				return handleListRepoDefinitions(repoDefinitions);
+			}
+			if (req.method === "POST") {
+				return handleCreateRepoDefinition(repoDefinitions, req);
+			}
+		}
+
+		const repoDefinitionId = repoDefinitionIdFromPath(url.pathname);
+		if (repoDefinitionId !== undefined) {
+			const authError = checkApiToken(config, req);
+			if (authError) {
+				return authError;
+			}
+			if (req.method === "GET") {
+				return handleGetRepoDefinition(repoDefinitions, repoDefinitionId);
+			}
+			if (req.method === "PUT") {
+				return handleUpdateRepoDefinition(
+					repoDefinitions,
+					repoDefinitionId,
+					req,
+				);
+			}
+			if (req.method === "DELETE") {
+				return handleDeleteRepoDefinition(repoDefinitions, repoDefinitionId);
+			}
+		}
+
+		const incidentEventsId = incidentEventsIdFromPath(url.pathname);
+		if (req.method === "GET" && incidentEventsId !== undefined) {
+			const authError = checkApiToken(config, req);
+			if (authError) {
+				return authError;
+			}
+			const incident = await store.getIncident(incidentEventsId);
+			if (!incident) {
+				return new Response("incident not found", { status: 404 });
+			}
+			const events = await store.listEvents(incidentEventsId);
+			return Response.json({ events });
+		}
+
 		if (req.method === "GET" && url.pathname === "/incidents") {
 			const authError = checkApiToken(config, req);
 			if (authError) {
@@ -262,6 +396,7 @@ export function createServer(deps: ServerDeps): ReturnType<typeof Bun.serve> {
 
 	return Bun.serve({
 		port: config.server.port,
+		routes: htmlRoutes,
 		async fetch(req) {
 			const start = Date.now();
 			const url = new URL(req.url);

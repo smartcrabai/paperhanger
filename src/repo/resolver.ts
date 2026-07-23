@@ -3,20 +3,32 @@
  * against, following the fallback chain from docs/spec.md section 3.5:
  *
  *   1. attribute  - an annotation/label/resource-attribute already names the repo
- *   2. mapping    - a configured label matcher -> repo table
- *   3. org-search - dynamic GitHub org search by service name (low confidence
+ *   2. definition - a dashboard-managed repo definition's label mappings
+ *   3. mapping    - a configured label matcher -> repo table
+ *   4. org-search - dynamic GitHub org search by service name (low confidence
  *                   unless the match is exact; the caller is expected to fall
  *                   back to `report_only` on low confidence, per spec)
  */
 
 import type { Config } from "../config/schema";
 import type { Logger } from "../observability/logger";
+import type { RepoDefinitionStore } from "../storage/types";
 import type { RepoSearchResult } from "./github";
 
 /** Only the `repos` slice of the app config; keeps this module decoupled from the rest of `Config`. */
 export type RepoResolverConfig = Config["repos"];
 
-export type RepoResolutionMethod = "attribute" | "mapping" | "org-search";
+/** Narrow structural dependency: the resolver only ever needs to list definitions. */
+export type RepoDefinitionSource = Pick<
+	RepoDefinitionStore,
+	"listRepoDefinitions"
+>;
+
+export type RepoResolutionMethod =
+	| "attribute"
+	| "definition"
+	| "mapping"
+	| "org-search";
 export type RepoResolutionConfidence = "high" | "low";
 
 export interface ResolvedRepo {
@@ -98,6 +110,7 @@ export class RepoResolver {
 		private readonly config: RepoResolverConfig,
 		private readonly githubClient: RepoSearchClient,
 		logger: Logger,
+		private readonly repoDefinitions: RepoDefinitionSource,
 	) {
 		this.logger = logger.child({ component: "repo-resolver" });
 	}
@@ -106,6 +119,11 @@ export class RepoResolver {
 		const byAttribute = this.resolveByAttribute(input);
 		if (byAttribute) {
 			return byAttribute;
+		}
+
+		const byDefinition = await this.resolveByDefinition(input.labels);
+		if (byDefinition) {
+			return byDefinition;
 		}
 
 		const byMapping = this.resolveByMapping(input.labels);
@@ -137,7 +155,51 @@ export class RepoResolver {
 		return null;
 	}
 
-	/** Step 2: first mapping whose `match` is fully satisfied (all keys equal) by `labels`. */
+	/**
+	 * Step 2: dashboard-managed repo definitions, fetched live (not cached) so
+	 * a definition created/edited via the dashboard applies to the very next
+	 * resolution. Only `enabled` definitions are considered, in the order the
+	 * store returns them; within a definition, its `mappings` are OR'd and
+	 * matched against `labels` with the same all-keys-equal semantics as
+	 * `resolveByMapping`. A store read failure is logged and treated as "no
+	 * definition matched" so a broken lookup never blocks resolution.
+	 */
+	private async resolveByDefinition(
+		labels: Record<string, string>,
+	): Promise<ResolvedRepo | null> {
+		let definitions: Awaited<
+			ReturnType<RepoDefinitionSource["listRepoDefinitions"]>
+		>;
+		try {
+			definitions = await this.repoDefinitions.listRepoDefinitions();
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.logger.error("repo_resolver.definition.store_error", {
+				error: message,
+			});
+			return null;
+		}
+
+		for (const definition of definitions) {
+			if (!definition.enabled) {
+				continue;
+			}
+			const matches = definition.mappings.some((mapping) =>
+				Object.entries(mapping).every(([key, value]) => labels[key] === value),
+			);
+			if (matches) {
+				return {
+					owner: definition.owner,
+					repo: definition.repo,
+					method: "definition",
+					confidence: "high",
+				};
+			}
+		}
+		return null;
+	}
+
+	/** Step 3: first mapping whose `match` is fully satisfied (all keys equal) by `labels`. */
 	private resolveByMapping(
 		labels: Record<string, string>,
 	): ResolvedRepo | null {
@@ -166,7 +228,7 @@ export class RepoResolver {
 	}
 
 	/**
-	 * Step 3: dynamic org search. Only runs if `orgSearch.enabled`. An exact
+	 * Step 4: dynamic org search. Only runs if `orgSearch.enabled`. An exact
 	 * (case-insensitive) repo-name match is high confidence; a single
 	 * non-exact hit is low confidence; zero or multiple hits resolve to
 	 * `null`. The caller decides what "low confidence" means operationally

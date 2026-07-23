@@ -7,9 +7,12 @@
 import type {
 	AgentRun,
 	AgentRunOutcome,
+	CreateRepoDefinitionInput,
 	Incident,
 	IncidentEvent,
 	IncidentStatus,
+	RepoDefinition,
+	UpdateRepoDefinitionInput,
 } from "../core/types";
 
 export interface CreateIncidentInput {
@@ -117,5 +120,56 @@ export class DuplicateOpenIncidentError extends Error {
 	constructor(public readonly fingerprint: string) {
 		super(`An open incident already exists for fingerprint: ${fingerprint}`);
 		this.name = "DuplicateOpenIncidentError";
+	}
+}
+
+export interface RepoDefinitionStore {
+	createRepoDefinition(
+		input: CreateRepoDefinitionInput,
+	): Promise<RepoDefinition>;
+	getRepoDefinition(id: string): Promise<RepoDefinition | undefined>;
+	/** ALL rows (including disabled ones), ordered by owner, then repo. */
+	listRepoDefinitions(): Promise<RepoDefinition[]>;
+	/** Case-insensitive match on both owner and repo. */
+	findRepoDefinitionByRepo(
+		owner: string,
+		repo: string,
+	): Promise<RepoDefinition | undefined>;
+	updateRepoDefinition(
+		id: string,
+		patch: UpdateRepoDefinitionInput,
+	): Promise<RepoDefinition>;
+	/** Returns true if a row was deleted, false if `id` did not exist. */
+	deleteRepoDefinition(id: string): Promise<boolean>;
+}
+
+/**
+ * Thrown by `createRepoDefinition`/`updateRepoDefinition` when the unique
+ * index on `repo_definitions(lower(owner), lower(repo))` rejects the write
+ * because another definition already claims that owner/repo (case-
+ * insensitively).
+ */
+export class DuplicateRepoDefinitionError extends Error {
+	constructor(
+		public readonly owner: string,
+		public readonly repo: string,
+	) {
+		super(`A repo definition already exists for: ${owner}/${repo}`);
+		this.name = "DuplicateRepoDefinitionError";
+	}
+}
+
+/**
+ * Thrown by `updateRepoDefinition` when `id` does not match any row. This is
+ * the typed counterpart to `updateIncident`'s plain-`Error` not-found
+ * convention: `updateRepoDefinition` is reachable from the HTTP layer (`PUT
+ * /repo-definitions/:id`), which needs to tell this apart from an unexpected
+ * failure and map it to a 404 instead of a 500 -- including the race where
+ * the row is deleted between a caller's existence check and this call.
+ */
+export class RepoDefinitionNotFoundError extends Error {
+	constructor(public readonly id: string) {
+		super(`Repo definition not found: ${id}`);
+		this.name = "RepoDefinitionNotFoundError";
 	}
 }

@@ -19,6 +19,10 @@ import type { Config, NotifierConfig } from "./config/schema";
 import { IncidentManager } from "./core/incident-manager";
 import { IncidentPipeline } from "./core/pipeline";
 import { waitForDrain } from "./core/shutdown";
+// The composition root is the only file allowed to import a `.html` bundle
+// (see src/ingest/server.ts's `ServerDeps.htmlRoutes` doc comment) -- keeps
+// server.ts, and its unit tests, free of a bundler dependency.
+import dashboard from "./dashboard/index.html";
 import { alertmanagerAdapter } from "./ingest/adapters/alertmanager";
 import { genericAdapter } from "./ingest/adapters/generic";
 import { grafanaAdapter } from "./ingest/adapters/grafana";
@@ -34,7 +38,7 @@ import { GitHubAppClient } from "./repo/github";
 import { RepoResolver } from "./repo/resolver";
 import { PostgresIncidentStore } from "./storage/postgres";
 import { SqliteIncidentStore } from "./storage/sqlite";
-import type { IncidentStore } from "./storage/types";
+import type { IncidentStore, RepoDefinitionStore } from "./storage/types";
 import { createTelemetrySource } from "./telemetry/factory";
 import type { TelemetrySource } from "./telemetry/types";
 
@@ -43,7 +47,7 @@ const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 10_000;
 
 const logger = createLogger({ fields: { component: "paperhanger" } });
 
-function buildStore(config: Config): IncidentStore {
+function buildStore(config: Config): IncidentStore & RepoDefinitionStore {
 	if (config.storage.driver === "postgres") {
 		return new PostgresIncidentStore(config.storage.url);
 	}
@@ -100,6 +104,7 @@ async function main(): Promise<void> {
 		config.repos,
 		github,
 		logger.child({ component: "repo-resolver" }),
+		store,
 	);
 
 	// `AgentHostSidecar` handles both modes itself: `start()` spawns the Node
@@ -126,6 +131,7 @@ async function main(): Promise<void> {
 		flue: { baseUrl: sidecar.baseUrl },
 		github,
 		store,
+		repoDefinitions: store,
 		config,
 		logger: logger.child({ component: "fix-agent-runner" }),
 		tracer: tracing.getTracer("fix-agent-runner"),
@@ -175,7 +181,9 @@ async function main(): Promise<void> {
 		manager,
 		adapters,
 		store,
+		repoDefinitions: store,
 		tracer: tracing.getTracer("server"),
+		htmlRoutes: { "/": dashboard, "/dashboard": dashboard },
 	});
 
 	logger.info("startup", {
