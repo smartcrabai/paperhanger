@@ -16,14 +16,20 @@
  */
 
 import { beforeEach, describe, expect, test } from "bun:test";
-import type { CreateRepoDefinitionInput, IncidentEvent } from "../core/types";
+import type {
+	CreateCommonSetupScriptInput,
+	CreateRepoDefinitionInput,
+	IncidentEvent,
+} from "../core/types";
 import {
+	CommonSetupScriptNotFoundError,
 	DuplicateOpenIncidentError,
 	DuplicateRepoDefinitionError,
 	RepoDefinitionNotFoundError,
 } from "./types";
 import type {
 	CreateIncidentInput,
+	CommonSetupScriptStore,
 	IncidentStore,
 	RepoDefinitionStore,
 } from "./types";
@@ -693,6 +699,88 @@ export function runRepoDefinitionStoreSuite(
 
 			const fetched = await store.getRepoDefinition(created.id);
 			expect(fetched?.mappings).toEqual(mappings);
+		});
+	});
+}
+
+export interface CommonSetupScriptStoreHarness {
+	store: CommonSetupScriptStore;
+	advance(ms: number): void;
+}
+
+function makeCommonSetupScriptInput(
+	overrides: Partial<CreateCommonSetupScriptInput> = {},
+): CreateCommonSetupScriptInput {
+	return {
+		triggerFile: "bun.lock",
+		script: "bun install",
+		...overrides,
+	};
+}
+
+/** Shared behavioral contract for SQLite and PostgreSQL common setup scripts. */
+export function runCommonSetupScriptStoreSuite(
+	label: string,
+	makeStore: () => Promise<CommonSetupScriptStoreHarness>,
+): void {
+	describe(label, () => {
+		let harness: CommonSetupScriptStoreHarness;
+		let store: CommonSetupScriptStore;
+
+		beforeEach(async () => {
+			harness = await makeStore();
+			store = harness.store;
+		});
+
+		test("round-trips scripts in creation order", async () => {
+			const first = await store.createCommonSetupScript(
+				makeCommonSetupScriptInput(),
+			);
+			const second = await store.createCommonSetupScript(
+				makeCommonSetupScriptInput({
+					triggerFile: "Cargo.toml",
+					script: "cargo fetch",
+				}),
+			);
+
+			expect(await store.getCommonSetupScript(first.id)).toEqual(first);
+			expect(await store.listCommonSetupScripts()).toEqual([first, second]);
+		});
+
+		test("partially updates without changing execution order", async () => {
+			const first = await store.createCommonSetupScript(
+				makeCommonSetupScriptInput(),
+			);
+			const second = await store.createCommonSetupScript(
+				makeCommonSetupScriptInput({ triggerFile: "Cargo.toml" }),
+			);
+			harness.advance(2);
+
+			const updated = await store.updateCommonSetupScript(first.id, {
+				script: "bun install --frozen-lockfile",
+			});
+
+			expect(updated.triggerFile).toBe("bun.lock");
+			expect(updated.script).toBe("bun install --frozen-lockfile");
+			expect(new Date(updated.updatedAt).getTime()).toBeGreaterThan(
+				new Date(first.updatedAt).getTime(),
+			);
+			expect(
+				(await store.listCommonSetupScripts()).map(({ id }) => id),
+			).toEqual([first.id, second.id]);
+		});
+
+		test("update rejects unknown ids and delete reports persistence", async () => {
+			await expect(
+				store.updateCommonSetupScript("missing", { script: "x" }),
+			).rejects.toThrow(CommonSetupScriptNotFoundError);
+			expect(await store.deleteCommonSetupScript("missing")).toBe(false);
+
+			const created = await store.createCommonSetupScript(
+				makeCommonSetupScriptInput(),
+			);
+			expect(await store.deleteCommonSetupScript(created.id)).toBe(true);
+			expect(await store.getCommonSetupScript(created.id)).toBeUndefined();
 		});
 	});
 }

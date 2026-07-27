@@ -32,7 +32,11 @@ import type {
 	CreatePullRequestResult,
 } from "../repo/github";
 import type { ResolvedRepo } from "../repo/resolver";
-import type { IncidentStore, RepoDefinitionStore } from "../storage/types";
+import type {
+	CommonSetupScriptStore,
+	IncidentStore,
+	RepoDefinitionStore,
+} from "../storage/types";
 import { renderContextMarkdown } from "../telemetry/context-builder";
 import type { IncidentContext } from "../telemetry/types";
 import {
@@ -110,8 +114,10 @@ export interface FixAgentRunnerDeps {
 	flue: FlueClientProvider;
 	github: FixAgentGitHubClient;
 	store: IncidentStore;
-	/** Used to look up a matching, enabled RepoDefinition for setupScript/testCommand overrides. */
+	/** Used to look up a matching, enabled RepoDefinition for per-repository overrides. */
 	repoDefinitions: Pick<RepoDefinitionStore, "findRepoDefinitionByRepo">;
+	/** Supplies conditional setup scripts shared by every repository. */
+	commonSetupScripts?: Pick<CommonSetupScriptStore, "listCommonSetupScripts">;
 	config: FixAgentRunnerConfig;
 	logger: Logger;
 	/** Injectable for tests; defaults to `@flue/sdk`'s `createFlueClient`. Only used for the `{ baseUrl }` `FlueClientProvider` form. */
@@ -232,6 +238,7 @@ export class FixAgentRunner {
 				repo.repo,
 				incident.id,
 			);
+			const setupScripts = await this.resolveCommonSetupScripts(incident.id);
 
 			const workflowInput: FixAgentWorkflowInput = {
 				incidentId: incident.id,
@@ -250,6 +257,7 @@ export class FixAgentRunner {
 					cloneUrl,
 					defaultBranch,
 					branchName,
+					setupScripts,
 					...repoOverrides,
 				},
 				limits: {
@@ -326,6 +334,25 @@ export class FixAgentRunner {
 				status: "failed",
 				failureReason: message,
 			});
+		}
+	}
+
+	private async resolveCommonSetupScripts(
+		incidentId: string,
+	): Promise<FixAgentWorkflowInput["repo"]["setupScripts"]> {
+		try {
+			const scripts =
+				(await this.deps.commonSetupScripts?.listCommonSetupScripts()) ?? [];
+			return scripts.map(({ triggerFile, script }) => ({
+				triggerFile,
+				script,
+			}));
+		} catch (err) {
+			this.logger.warn("fix_agent.common_setup_scripts_lookup_failed", {
+				incidentId,
+				error: err instanceof Error ? err.message : String(err),
+			});
+			return [];
 		}
 	}
 

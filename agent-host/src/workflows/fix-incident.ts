@@ -68,6 +68,7 @@ import {
 	WorkflowOutputSchema,
 } from "../contract.ts";
 import { fixAgent } from "../fix-agent.ts";
+import { runConditionalSetupScripts } from "../lib/common-setup-scripts.ts";
 import { decideFixAttempt } from "../lib/fix-attempt-policy.ts";
 import { collectSecrets, sanitizeOutput } from "../lib/output-sanitizer.ts";
 import { redactSecrets, tokenlessCloneUrl } from "../lib/redaction.ts";
@@ -209,6 +210,7 @@ async function cloneAndPrepareBranch(
 async function runSetupScript(
 	harness: FlueHarness,
 	setupScript: string,
+	label: string,
 	secrets: ReadonlyArray<string | undefined>,
 ): Promise<{ ok: true } | { ok: false; failureReason: string }> {
 	const startedAt = Date.now();
@@ -222,19 +224,15 @@ async function runSetupScript(
 		`${result.stdout}\n${result.stderr}`,
 		secrets,
 	).slice(-MAX_TEST_OUTPUT_CHARS);
-	// Mirrors runOrThrow/runRemoteGitCommandOrThrow: ShellResult carries no
-	// timeout flag, so a killed-at-timeout process is only distinguishable
-	// from a genuine script failure by comparing elapsed wall-clock time
-	// against the timeout we passed in.
 	if (Date.now() - startedAt >= SETUP_SHELL_TIMEOUT_MS) {
 		return {
 			ok: false,
-			failureReason: `setup script timed out after ${SETUP_SHELL_TIMEOUT_MS}ms\n${tail}`,
+			failureReason: `${label} timed out after ${SETUP_SHELL_TIMEOUT_MS}ms\n${tail}`,
 		};
 	}
 	return {
 		ok: false,
-		failureReason: `setup script failed (exit ${result.exitCode})\n${tail}`,
+		failureReason: `${label} failed (exit ${result.exitCode})\n${tail}`,
 	};
 }
 
@@ -431,23 +429,41 @@ async function runFixIncident(
 	const secrets = collectSecrets(input);
 	await cloneAndPrepareBranch(harness, input, secrets);
 
-	// Operator-configured setup (RepoDefinition.setupScript, when a matching,
-	// enabled definition was found by the parent repo's runner). Runs before
-	// any model turn; a failure here terminates the run without ever invoking
-	// the model.
+	// Common scripts are evaluated in dashboard order. Every script whose
+	// repository-relative trigger file exists runs before the per-repository
+	// setup script and before the first model turn.
+	const commonSetup = await runConditionalSetupScripts(
+		harness,
+		input.repo.setupScripts,
+		LOCAL_GIT_SHELL_TIMEOUT_MS,
+		(script, label) => runSetupScript(harness, script, label, secrets),
+	);
+	if (!commonSetup.ok) {
+		return {
+			outcome: "failed",
+			diagnosis:
+				"A configured common setup script failed before diagnosis could begin.",
+			report:
+				"A configured common setup script failed before the fix agent could begin " +
+				`diagnosis.\n\n\`\`\`\n${commonSetup.failureReason}\n\`\`\``,
+			failureReason: commonSetup.failureReason,
+		};
+	}
+
 	if (input.repo.setupScript) {
 		const setup = await runSetupScript(
 			harness,
 			input.repo.setupScript,
+			"repository setup script",
 			secrets,
 		);
 		if (!setup.ok) {
 			return {
 				outcome: "failed",
 				diagnosis:
-					"The configured setup script failed before diagnosis could begin.",
+					"The configured repository setup script failed before diagnosis could begin.",
 				report:
-					"The configured setup script failed before the fix agent could begin " +
+					"The configured repository setup script failed before the fix agent could begin " +
 					`diagnosis.\n\n\`\`\`\n${setup.failureReason}\n\`\`\``,
 				failureReason: setup.failureReason,
 			};

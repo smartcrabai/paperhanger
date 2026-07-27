@@ -10,11 +10,12 @@ import { StrictMode, useCallback, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { IncidentsView } from "./incidents-view";
 import { RepositoriesView } from "./repositories-view";
+import { SetupScriptsView } from "./setup-scripts-view";
 import { TokenPrompt } from "./token-prompt";
 
 const TOKEN_STORAGE_KEY = "paperhanger.apiToken";
 
-type View = "repositories" | "incidents";
+type View = "repositories" | "setup-scripts" | "incidents";
 
 function readStoredToken(): string | null {
 	try {
@@ -87,6 +88,13 @@ function App() {
 					</button>
 					<button
 						type="button"
+						className={view === "setup-scripts" ? "tab active" : "tab"}
+						onClick={() => setView("setup-scripts")}
+					>
+						Setup scripts
+					</button>
+					<button
+						type="button"
 						className={view === "incidents" ? "tab active" : "tab"}
 						onClick={() => setView("incidents")}
 					>
@@ -100,6 +108,8 @@ function App() {
 			<main>
 				{view === "repositories" ? (
 					<RepositoriesView token={token} onUnauthorized={handleUnauthorized} />
+				) : view === "setup-scripts" ? (
+					<SetupScriptsView token={token} onUnauthorized={handleUnauthorized} />
 				) : (
 					<IncidentsView token={token} onUnauthorized={handleUnauthorized} />
 				)}

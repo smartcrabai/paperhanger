@@ -144,3 +144,27 @@ export interface UpdateRepoDefinitionInput {
 	testCommand?: string | null;
 	enabled?: boolean;
 }
+
+/** Dashboard-managed setup script applied to every repository when its trigger file exists. */
+export interface CommonSetupScript {
+	/** Store-generated UUID. */
+	id: string;
+	/** Repository-relative file whose existence enables this script. */
+	triggerFile: string;
+	/** Shell script executed from the cloned repository root. */
+	script: string;
+	/** ISO 8601 timestamp. */
+	createdAt: string;
+	/** ISO 8601 timestamp. */
+	updatedAt: string;
+}
+
+export interface CreateCommonSetupScriptInput {
+	triggerFile: string;
+	script: string;
+}
+
+export interface UpdateCommonSetupScriptInput {
+	triggerFile?: string;
+	script?: string;
+}

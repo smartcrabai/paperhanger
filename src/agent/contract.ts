@@ -30,6 +30,14 @@ export const FixAgentRepoInputSchema = z.object({
 	branchName: z.string().min(1),
 	/** Shell script executed in the cloned repo before diagnosis (from a matching, enabled RepoDefinition). */
 	setupScript: z.string().optional(),
+	setupScripts: z
+		.array(
+			z.object({
+				triggerFile: z.string().min(1),
+				script: z.string().min(1),
+			}),
+		)
+		.default([]),
 	/** Overrides agent-host test auto-detection (from a matching, enabled RepoDefinition). */
 	testCommand: z.string().optional(),
 });

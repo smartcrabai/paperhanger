@@ -996,7 +996,7 @@ describe("FixAgentRunner - agent.invoke_workflow span", () => {
 });
 
 describe("FixAgentRunner - repo definition lookup", () => {
-	test("copies setupScript/testCommand from a matching, enabled repo definition into the workflow input", async () => {
+	test("copies common setup scripts and matching per-repo overrides into the workflow input", async () => {
 		const { store, incident } = await createStoreWithIncident();
 		const context = makeContext(incident, makeAlert());
 		const github = createFakeGithub();
@@ -1011,11 +1011,16 @@ describe("FixAgentRunner - repo definition lookup", () => {
 			setupScript: "bun install",
 			testCommand: "bun test",
 		});
+		await store.createCommonSetupScript({
+			triggerFile: "bun.lock",
+			script: "bun install --frozen-lockfile",
+		});
 		const runner = new FixAgentRunner({
 			flue: flue.client,
 			github: github.client,
 			store,
 			repoDefinitions: store,
+			commonSetupScripts: store,
 			config: makeConfig(),
 			logger: silentLogger(),
 		});
@@ -1024,9 +1029,19 @@ describe("FixAgentRunner - repo definition lookup", () => {
 		expect(result.status).toBe("report_only");
 
 		const input = flue.invokeCalls[0]?.input as {
-			repo: { setupScript?: string; testCommand?: string };
+			repo: {
+				setupScript?: string;
+				setupScripts: Array<{ triggerFile: string; script: string }>;
+				testCommand?: string;
+			};
 		};
 		expect(input.repo.setupScript).toBe("bun install");
+		expect(input.repo.setupScripts).toEqual([
+			{
+				triggerFile: "bun.lock",
+				script: "bun install --frozen-lockfile",
+			},
+		]);
 		expect(input.repo.testCommand).toBe("bun test");
 
 		await store.close();
@@ -1146,6 +1161,49 @@ describe("FixAgentRunner - repo definition lookup", () => {
 		expect(warnEntry?.repo).toBe(testRepo.repo);
 		expect(warnEntry?.error).toBe("repo_definitions table is locked");
 
+		await store.close();
+	});
+
+	test("logs and proceeds with no common scripts when their lookup throws", async () => {
+		const { store, incident } = await createStoreWithIncident();
+		const context = makeContext(incident, makeAlert());
+		const github = createFakeGithub();
+		const flue = createFakeFlue({
+			outcome: "report_only",
+			diagnosis: "d",
+			report: "r",
+		});
+		const { logger, lines } = capturingLogger();
+		const runner = new FixAgentRunner({
+			flue: flue.client,
+			github: github.client,
+			store,
+			repoDefinitions: store,
+			commonSetupScripts: {
+				async listCommonSetupScripts() {
+					throw new Error("common_setup_scripts table is locked");
+				},
+			},
+			config: makeConfig(),
+			logger,
+		});
+
+		expect((await runner.run(incident, context, testRepo)).status).toBe(
+			"report_only",
+		);
+		const input = flue.invokeCalls[0]?.input as {
+			repo: { setupScripts: unknown[] };
+		};
+		expect(input.repo.setupScripts).toEqual([]);
+
+		const entries = lines.map(
+			(line) => JSON.parse(line) as Record<string, unknown>,
+		);
+		const warning = entries.find(
+			(entry) => entry.msg === "fix_agent.common_setup_scripts_lookup_failed",
+		);
+		expect(warning?.incidentId).toBe(incident.id);
+		expect(warning?.error).toBe("common_setup_scripts table is locked");
 		await store.close();
 	});
 

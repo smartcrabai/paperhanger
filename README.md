@@ -206,16 +206,18 @@ curl -H "Authorization: Bearer $PAPERHANGER_API_TOKEN" \
 
 A personal-use, configuration-and-observation UI is served from the same
 process at `GET /` and `GET /dashboard` (Bun HTML import + React -- no
-separate service). It manages **repo definitions**: target GitHub owner/repo, the
-label-match `mappings` the repo resolver checks before falling back to
-`repos.mappings` (spec section 3.5), an optional per-repo `setupScript` run
-in the cloned repo before diagnosis, and an optional `testCommand` override
--- plus a read-only incident list/detail/event-timeline view. It requires
-the same `server.apiToken` as every other data route above; the page itself
-prompts for the token once and keeps it in `localStorage`, sending it back
-as `X-Api-Token` on every request. Like the rest of paperhanger, the
-dashboard has no merge/approve/deploy action of any kind -- see spec
-section 1's non-goals, which apply here unchanged.
+separate service). It manages:
+
+- **repo definitions**: target GitHub owner/repo, label-match `mappings`, an
+  optional per-repo `setupScript`, and an optional `testCommand` override;
+- **common setup scripts**: an ordered list of scripts shared by every
+  repository. Each script runs after clone only when its configured
+  repository-relative trigger file exists;
+- a read-only incident list/detail/event-timeline view.
+
+All data routes require the same `server.apiToken`. The page prompts for it
+once, keeps it in `localStorage`, and sends it as `X-Api-Token` on every
+request. The dashboard has no merge/approve/deploy action of any kind.
 
 ## Config reference
 
@@ -375,16 +377,16 @@ The agent-host (`agent-host/`) is a separate Node-only package with its own
 
 ## Security notes
 
-- **`GET /incidents`, `GET /incidents/:id`, `GET /incidents/:id/events`, and
-  every `/repo-definitions` route require `server.apiToken` by
-  default-refused**: incident records can carry sensitive diagnosis/
-  failureReason text, and repo definitions can carry setup scripts, so these
-  routes demand a bearer token (`Authorization: Bearer <token>` or
-  `X-Api-Token: <token>`, constant-time compared) whenever `server.apiToken`
-  is set, and return 401 with an explanatory body when it is *not* set --
-  there is no unauthenticated fallback. The dashboard's static page itself
-  (`GET /` and `GET /dashboard`) is unauthenticated, since it carries no
-  data of its own.
+- **`GET /incidents`, `GET /incidents/:id`, `GET /incidents/:id/events`,
+  every `/repo-definitions` route, and every `/setup-scripts` route require
+  `server.apiToken` by default-refused**: incident records can carry sensitive
+  diagnosis/failureReason text, while repository definitions and common setup
+  scripts can carry infrastructure commands. These routes demand a bearer
+  token (`Authorization: Bearer <token>` or `X-Api-Token: <token>`,
+  constant-time compared) whenever `server.apiToken` is set, and return 401
+  with an explanatory body when it is *not* set. The dashboard's static page
+  itself (`GET /` and `GET /dashboard`) is unauthenticated, since it carries
+  no data of its own.
   `/healthz` and `/readyz` are never gated. See `paperhanger.example.yaml`
   and the config reference above.
 - **The fix agent's sandbox (`agent-host`, `local()` from
