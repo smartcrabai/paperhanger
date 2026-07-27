@@ -14,17 +14,22 @@ import { SQL } from "bun";
 import { TERMINAL_INCIDENT_STATUSES } from "../core/types";
 import type {
 	AgentRun,
+	CommonSetupScript,
+	CreateCommonSetupScriptInput,
 	CreateRepoDefinitionInput,
 	Incident,
 	IncidentEvent,
 	IncidentStatus,
 	RepoDefinition,
+	UpdateCommonSetupScriptInput,
 	UpdateRepoDefinitionInput,
 } from "../core/types";
 import {
+	CommonSetupScriptNotFoundError,
 	DuplicateOpenIncidentError,
 	DuplicateRepoDefinitionError,
 	RepoDefinitionNotFoundError,
+	type CommonSetupScriptStore,
 	type CreateAgentRunInput,
 	type CreateIncidentInput,
 	type IncidentEventRecord,
@@ -42,7 +47,7 @@ import {
  * method (and a version check in `init()`) for future schema changes instead
  * of mutating an already-shipped migration in place.
  */
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 /** SQL literal list of terminal statuses, safe to inline: sourced from our own constant, never user input. */
 const TERMINAL_STATUS_LITERALS = TERMINAL_INCIDENT_STATUSES.map(
@@ -120,6 +125,14 @@ interface RepoDefinitionRow {
 	setup_script: string | null;
 	test_command: string | null;
 	enabled: boolean;
+	created_at: unknown;
+	updated_at: unknown;
+}
+
+interface CommonSetupScriptRow {
+	id: string;
+	trigger_file: string;
+	script: string;
 	created_at: unknown;
 	updated_at: unknown;
 }
@@ -205,13 +218,25 @@ export function mapRepoDefinitionRow(row: RepoDefinitionRow): RepoDefinition {
 	};
 }
 
+export function mapCommonSetupScriptRow(
+	row: CommonSetupScriptRow,
+): CommonSetupScript {
+	return {
+		id: row.id,
+		triggerFile: row.trigger_file,
+		script: row.script,
+		createdAt: toIso(row.created_at),
+		updatedAt: toIso(row.updated_at),
+	};
+}
+
 export interface PostgresIncidentStoreOptions {
 	/** Injectable clock for `created_at`/`updated_at` stamping. Defaults to the real wall clock; tests use this to pin cooldown-window boundaries deterministically. */
 	now?: () => Date;
 }
 
 export class PostgresIncidentStore
-	implements IncidentStore, RepoDefinitionStore
+	implements IncidentStore, RepoDefinitionStore, CommonSetupScriptStore
 {
 	private readonly sql: SQL;
 	private readonly now: () => Date;
@@ -251,6 +276,11 @@ export class PostgresIncidentStore
 		if (version < 3) {
 			await this.migrateV3();
 			version = 3;
+			await this.setSchemaVersion(version);
+		}
+		if (version < 4) {
+			await this.migrateV4();
+			version = 4;
 			await this.setSchemaVersion(version);
 		}
 		if (version !== SCHEMA_VERSION) {
@@ -349,6 +379,20 @@ export class PostgresIncidentStore
 			CREATE UNIQUE INDEX IF NOT EXISTS ${REPO_DEFINITIONS_UNIQUE_INDEX}
 			ON repo_definitions (lower(owner), lower(repo))
 		`);
+	}
+
+	/** Adds the dashboard-managed, repository-agnostic conditional setup scripts. */
+	private async migrateV4(): Promise<void> {
+		await this.sql`
+			CREATE TABLE IF NOT EXISTS common_setup_scripts (
+				seq BIGSERIAL NOT NULL,
+				id TEXT PRIMARY KEY,
+				trigger_file TEXT NOT NULL,
+				script TEXT NOT NULL,
+				created_at TIMESTAMPTZ NOT NULL,
+				updated_at TIMESTAMPTZ NOT NULL
+			)
+		`;
 	}
 
 	private async setSchemaVersion(version: number): Promise<void> {
@@ -658,6 +702,75 @@ export class PostgresIncidentStore
 			throw new RepoDefinitionNotFoundError(id);
 		}
 		return mapRepoDefinitionRow(row);
+	}
+
+	async createCommonSetupScript(
+		input: CreateCommonSetupScriptInput,
+	): Promise<CommonSetupScript> {
+		const id = crypto.randomUUID();
+		const now = this.now().toISOString();
+		await this.sql`
+			INSERT INTO common_setup_scripts
+				(id, trigger_file, script, created_at, updated_at)
+			VALUES (${id}, ${input.triggerFile}, ${input.script}, ${now}, ${now})
+		`;
+		const setupScript = await this.getCommonSetupScript(id);
+		if (!setupScript) {
+			throw new Error(`Failed to read back common setup script ${id}`);
+		}
+		return setupScript;
+	}
+
+	async getCommonSetupScript(
+		id: string,
+	): Promise<CommonSetupScript | undefined> {
+		const rows = await this.sql<CommonSetupScriptRow[]>`
+			SELECT * FROM common_setup_scripts WHERE id = ${id}
+		`;
+		return rows[0] ? mapCommonSetupScriptRow(rows[0]) : undefined;
+	}
+
+	async listCommonSetupScripts(): Promise<CommonSetupScript[]> {
+		const rows = await this.sql<CommonSetupScriptRow[]>`
+			SELECT * FROM common_setup_scripts ORDER BY seq ASC
+		`;
+		return rows.map(mapCommonSetupScriptRow);
+	}
+
+	async updateCommonSetupScript(
+		id: string,
+		patch: UpdateCommonSetupScriptInput,
+	): Promise<CommonSetupScript> {
+		const columns: Record<string, unknown> = {
+			updated_at: this.now().toISOString(),
+		};
+		const columnNames = ["updated_at"];
+		if (patch.triggerFile !== undefined) {
+			columns.trigger_file = patch.triggerFile;
+			columnNames.push("trigger_file");
+		}
+		if (patch.script !== undefined) {
+			columns.script = patch.script;
+			columnNames.push("script");
+		}
+		const rows = await this.sql<CommonSetupScriptRow[]>`
+			UPDATE common_setup_scripts
+			SET ${this.sql(columns, ...columnNames)}
+			WHERE id = ${id}
+			RETURNING *
+		`;
+		const row = rows[0];
+		if (!row) {
+			throw new CommonSetupScriptNotFoundError(id);
+		}
+		return mapCommonSetupScriptRow(row);
+	}
+
+	async deleteCommonSetupScript(id: string): Promise<boolean> {
+		const rows = await this.sql<{ id: string }[]>`
+			DELETE FROM common_setup_scripts WHERE id = ${id} RETURNING id
+		`;
+		return rows.length > 0;
 	}
 
 	async deleteRepoDefinition(id: string): Promise<boolean> {

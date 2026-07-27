@@ -28,6 +28,15 @@ export const RepoInputSchema = v.object({
 	branchName: v.string(),
 	/** Shell script executed in the cloned repo before diagnosis (from a matching, enabled RepoDefinition). */
 	setupScript: v.optional(v.string()),
+	setupScripts: v.optional(
+		v.array(
+			v.object({
+				triggerFile: v.string(),
+				script: v.string(),
+			}),
+		),
+		[],
+	),
 	/** Overrides agent-host test auto-detection (from a matching, enabled RepoDefinition). */
 	testCommand: v.optional(v.string()),
 });

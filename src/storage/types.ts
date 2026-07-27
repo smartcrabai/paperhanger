@@ -7,11 +7,14 @@
 import type {
 	AgentRun,
 	AgentRunOutcome,
+	CommonSetupScript,
+	CreateCommonSetupScriptInput,
 	CreateRepoDefinitionInput,
 	Incident,
 	IncidentEvent,
 	IncidentStatus,
 	RepoDefinition,
+	UpdateCommonSetupScriptInput,
 	UpdateRepoDefinitionInput,
 } from "../core/types";
 
@@ -141,6 +144,28 @@ export interface RepoDefinitionStore {
 	): Promise<RepoDefinition>;
 	/** Returns true if a row was deleted, false if `id` did not exist. */
 	deleteRepoDefinition(id: string): Promise<boolean>;
+}
+
+export interface CommonSetupScriptStore {
+	createCommonSetupScript(
+		input: CreateCommonSetupScriptInput,
+	): Promise<CommonSetupScript>;
+	getCommonSetupScript(id: string): Promise<CommonSetupScript | undefined>;
+	/** Ordered by creation time so matching scripts execute deterministically. */
+	listCommonSetupScripts(): Promise<CommonSetupScript[]>;
+	updateCommonSetupScript(
+		id: string,
+		patch: UpdateCommonSetupScriptInput,
+	): Promise<CommonSetupScript>;
+	/** Returns true if a row was deleted, false if `id` did not exist. */
+	deleteCommonSetupScript(id: string): Promise<boolean>;
+}
+
+export class CommonSetupScriptNotFoundError extends Error {
+	constructor(public readonly id: string) {
+		super(`Common setup script not found: ${id}`);
+		this.name = "CommonSetupScriptNotFoundError";
+	}
 }
 
 /**

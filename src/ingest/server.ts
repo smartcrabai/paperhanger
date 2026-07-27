@@ -1,17 +1,13 @@
 /**
- * HTTP ingest server. Routes: POST /webhooks/:source, GET /healthz, GET
- * /readyz, GET /incidents, GET /incidents/:id, GET /incidents/:id/events, plus
- * the dashboard's repo-definition CRUD routes (GET/POST /repo-definitions,
- * GET/PUT/DELETE /repo-definitions/:id -- see ./repo-definitions.ts). See
+ * HTTP ingest server. Routes: webhooks, health/readiness, incidents, and the
+ * dashboard's repo-definition and common-setup-script CRUD APIs. See
  * docs/spec.md section 3.1 and docs/architecture.md "Webhook authentication".
  *
- * `GET /incidents`, `GET /incidents/:id`, `GET /incidents/:id/events`, and
- * every `/repo-definitions` route additionally require `server.apiToken`
- * (Authorization: Bearer or X-Api-Token, constant-time compare via
- * `safeCompare`) since this data can carry sensitive diagnosis/failureReason
- * text or infrastructure setup scripts. Secure by default: when
- * `server.apiToken` is not configured, those endpoints refuse every request
- * with 401 rather than serving that data with no authentication at all.
+ * Incident data, repo definitions, and common setup scripts require
+ * `server.apiToken` (Authorization: Bearer or X-Api-Token, constant-time
+ * compare via `safeCompare`). Secure by default: when `server.apiToken` is
+ * not configured, those endpoints refuse every request with 401 rather than
+ * serving data or infrastructure scripts without authentication.
  * `/healthz` and `/readyz` are never gated.
  */
 
@@ -20,8 +16,18 @@ import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
 import type { IncidentManager } from "../core/incident-manager";
 import type { IncidentEvent } from "../core/types";
 import type { Logger } from "../observability/logger";
-import type { IncidentStore, RepoDefinitionStore } from "../storage/types";
+import type {
+	CommonSetupScriptStore,
+	IncidentStore,
+	RepoDefinitionStore,
+} from "../storage/types";
 import type { SourceAdapter } from "./adapters/types";
+import {
+	handleCreateCommonSetupScript,
+	handleDeleteCommonSetupScript,
+	handleListCommonSetupScripts,
+	handleUpdateCommonSetupScript,
+} from "./common-setup-scripts";
 import {
 	handleCreateRepoDefinition,
 	handleDeleteRepoDefinition,
@@ -35,6 +41,8 @@ const INCIDENTS_PATH_PREFIX = "/incidents/";
 const INCIDENT_EVENTS_SUFFIX = "/events";
 const REPO_DEFINITIONS_PATH = "/repo-definitions";
 const REPO_DEFINITIONS_PATH_PREFIX = "/repo-definitions/";
+const COMMON_SETUP_SCRIPTS_PATH = "/setup-scripts";
+const COMMON_SETUP_SCRIPTS_PATH_PREFIX = "/setup-scripts/";
 /** Cap on `GET /incidents` regardless of what a caller asks for via `?limit=`. */
 const MAX_INCIDENTS_LIST_LIMIT = 500;
 const DEFAULT_INCIDENTS_LIST_LIMIT = 100;
@@ -61,6 +69,8 @@ export interface ServerDeps {
 	 * `IncidentStore`.
 	 */
 	repoDefinitions: RepoDefinitionStore;
+	/** Backs dashboard CRUD for setup scripts shared by every repository. */
+	commonSetupScripts: CommonSetupScriptStore;
 	/** Falls back to a no-op tracer (no global provider registered) when omitted. See docs/spec.md section 3.9. */
 	tracer?: Tracer;
 	/**
@@ -85,6 +95,8 @@ type RouteTemplate =
 	| "/incidents/:id/events"
 	| "/repo-definitions"
 	| "/repo-definitions/:id"
+	| "/setup-scripts"
+	| "/setup-scripts/:id"
 	| "unmatched";
 
 /**
@@ -119,6 +131,14 @@ function repoDefinitionIdFromPath(pathname: string): string | undefined {
 	return id.length > 0 ? id : undefined;
 }
 
+function commonSetupScriptIdFromPath(pathname: string): string | undefined {
+	if (!pathname.startsWith(COMMON_SETUP_SCRIPTS_PATH_PREFIX)) {
+		return undefined;
+	}
+	const id = pathname.slice(COMMON_SETUP_SCRIPTS_PATH_PREFIX.length);
+	return id.length > 0 ? id : undefined;
+}
+
 /**
  * Derives the `http.route` template for a request's path, mirroring the path
  * checks in `route()` below (independent of method — a template describes the
@@ -140,6 +160,12 @@ function deriveRouteTemplate(url: URL): RouteTemplate {
 	}
 	if (repoDefinitionIdFromPath(url.pathname) !== undefined) {
 		return "/repo-definitions/:id";
+	}
+	if (url.pathname === COMMON_SETUP_SCRIPTS_PATH) {
+		return "/setup-scripts";
+	}
+	if (commonSetupScriptIdFromPath(url.pathname) !== undefined) {
+		return "/setup-scripts/:id";
 	}
 	if (incidentEventsIdFromPath(url.pathname) !== undefined) {
 		return "/incidents/:id/events";
@@ -234,6 +260,7 @@ export function createServer(deps: ServerDeps): ReturnType<typeof Bun.serve> {
 		adapters,
 		store,
 		repoDefinitions,
+		commonSetupScripts,
 		htmlRoutes,
 	} = deps;
 	const tracer = deps.tracer ?? trace.getTracer("server");
@@ -327,6 +354,40 @@ export function createServer(deps: ServerDeps): ReturnType<typeof Bun.serve> {
 			}
 			if (req.method === "POST") {
 				return handleCreateRepoDefinition(repoDefinitions, req);
+			}
+		}
+
+		if (url.pathname === COMMON_SETUP_SCRIPTS_PATH) {
+			const authError = checkApiToken(config, req);
+			if (authError) {
+				return authError;
+			}
+			if (req.method === "GET") {
+				return handleListCommonSetupScripts(commonSetupScripts);
+			}
+			if (req.method === "POST") {
+				return handleCreateCommonSetupScript(commonSetupScripts, req);
+			}
+		}
+
+		const commonSetupScriptId = commonSetupScriptIdFromPath(url.pathname);
+		if (commonSetupScriptId !== undefined) {
+			const authError = checkApiToken(config, req);
+			if (authError) {
+				return authError;
+			}
+			if (req.method === "PUT") {
+				return handleUpdateCommonSetupScript(
+					commonSetupScripts,
+					commonSetupScriptId,
+					req,
+				);
+			}
+			if (req.method === "DELETE") {
+				return handleDeleteCommonSetupScript(
+					commonSetupScripts,
+					commonSetupScriptId,
+				);
 			}
 		}
 

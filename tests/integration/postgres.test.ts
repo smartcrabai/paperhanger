@@ -13,10 +13,12 @@ import { GenericContainer, Wait } from "testcontainers";
 import type { StartedTestContainer } from "testcontainers";
 import { PostgresIncidentStore } from "../../src/storage/postgres";
 import type {
+	CommonSetupScriptStoreHarness,
 	IncidentStoreHarness,
 	RepoDefinitionStoreHarness,
 } from "../../src/storage/store-suite";
 import {
+	runCommonSetupScriptStoreSuite,
 	runIncidentStoreSuite,
 	runRepoDefinitionStoreSuite,
 } from "../../src/storage/store-suite";
@@ -100,7 +102,7 @@ describe.skipIf(!dockerAvailable)(
 			// Reuse the same container/connection across the whole suite (starting
 			// a fresh container per test would be far too slow); reset table
 			// contents instead so each test sees an empty store.
-			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incidents, repo_definitions RESTART IDENTITY CASCADE`;
+			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incidents, repo_definitions, common_setup_scripts RESTART IDENTITY CASCADE`;
 			currentTime = new Date();
 			return {
 				store: sharedStore,
@@ -111,7 +113,18 @@ describe.skipIf(!dockerAvailable)(
 		}
 
 		async function makeRepoDefinitionStore(): Promise<RepoDefinitionStoreHarness> {
-			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incidents, repo_definitions RESTART IDENTITY CASCADE`;
+			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incidents, repo_definitions, common_setup_scripts RESTART IDENTITY CASCADE`;
+			currentTime = new Date();
+			return {
+				store: sharedStore,
+				advance: (ms) => {
+					currentTime = new Date(currentTime.getTime() + ms);
+				},
+			};
+		}
+
+		async function makeCommonSetupScriptStore(): Promise<CommonSetupScriptStoreHarness> {
+			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incidents, repo_definitions, common_setup_scripts RESTART IDENTITY CASCADE`;
 			currentTime = new Date();
 			return {
 				store: sharedStore,
@@ -125,6 +138,10 @@ describe.skipIf(!dockerAvailable)(
 		runRepoDefinitionStoreSuite(
 			"PostgresIncidentStore (RepoDefinitionStore)",
 			makeRepoDefinitionStore,
+		);
+		runCommonSetupScriptStoreSuite(
+			"PostgresIncidentStore (CommonSetupScriptStore)",
+			makeCommonSetupScriptStore,
 		);
 
 		test("ping returns false once the connection is closed", async () => {

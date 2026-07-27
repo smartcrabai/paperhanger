@@ -7,17 +7,22 @@ import { Database } from "bun:sqlite";
 import { TERMINAL_INCIDENT_STATUSES } from "../core/types";
 import type {
 	AgentRun,
+	CommonSetupScript,
+	CreateCommonSetupScriptInput,
 	CreateRepoDefinitionInput,
 	Incident,
 	IncidentEvent,
 	IncidentStatus,
 	RepoDefinition,
+	UpdateCommonSetupScriptInput,
 	UpdateRepoDefinitionInput,
 } from "../core/types";
 import {
+	CommonSetupScriptNotFoundError,
 	DuplicateOpenIncidentError,
 	DuplicateRepoDefinitionError,
 	RepoDefinitionNotFoundError,
+	type CommonSetupScriptStore,
 	type CreateAgentRunInput,
 	type CreateIncidentInput,
 	type IncidentEventRecord,
@@ -35,7 +40,7 @@ import {
  * method (and a version check in `init()`) for future schema changes instead
  * of mutating an already-shipped migration in place.
  */
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 /** SQL literal list of terminal statuses, safe to inline: sourced from our own constant, never user input. */
 const TERMINAL_STATUS_LITERALS = TERMINAL_INCIDENT_STATUSES.map(
@@ -114,6 +119,14 @@ interface RepoDefinitionRow {
 	updated_at: string;
 }
 
+interface CommonSetupScriptRow {
+	id: string;
+	trigger_file: string;
+	script: string;
+	created_at: string;
+	updated_at: string;
+}
+
 function rowToIncident(row: IncidentRow): Incident {
 	return {
 		id: row.id,
@@ -147,6 +160,16 @@ function rowToRepoDefinition(row: RepoDefinitionRow): RepoDefinition {
 	};
 }
 
+function rowToCommonSetupScript(row: CommonSetupScriptRow): CommonSetupScript {
+	return {
+		id: row.id,
+		triggerFile: row.trigger_file,
+		script: row.script,
+		createdAt: row.created_at,
+		updatedAt: row.updated_at,
+	};
+}
+
 function rowToAgentRun(row: AgentRunRow): AgentRun {
 	return {
 		id: row.id,
@@ -164,7 +187,9 @@ export interface SqliteIncidentStoreOptions {
 	now?: () => Date;
 }
 
-export class SqliteIncidentStore implements IncidentStore, RepoDefinitionStore {
+export class SqliteIncidentStore
+	implements IncidentStore, RepoDefinitionStore, CommonSetupScriptStore
+{
 	private readonly db: Database;
 	private readonly now: () => Date;
 
@@ -213,6 +238,11 @@ export class SqliteIncidentStore implements IncidentStore, RepoDefinitionStore {
 		if (version < 3) {
 			this.migrateV3();
 			version = 3;
+			this.setSchemaVersion(version);
+		}
+		if (version < 4) {
+			this.migrateV4();
+			version = 4;
 			this.setSchemaVersion(version);
 		}
 		if (version !== SCHEMA_VERSION) {
@@ -312,6 +342,20 @@ export class SqliteIncidentStore implements IncidentStore, RepoDefinitionStore {
 		this.db.run(`
 			CREATE UNIQUE INDEX IF NOT EXISTS ${REPO_DEFINITIONS_UNIQUE_INDEX}
 			ON repo_definitions (lower(owner), lower(repo));
+		`);
+	}
+
+	/** Adds the dashboard-managed, repository-agnostic conditional setup scripts. */
+	private migrateV4(): void {
+		this.db.run(`
+			CREATE TABLE IF NOT EXISTS common_setup_scripts (
+				seq INTEGER PRIMARY KEY AUTOINCREMENT,
+				id TEXT UNIQUE NOT NULL,
+				trigger_file TEXT NOT NULL,
+				script TEXT NOT NULL,
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL
+			);
 		`);
 	}
 
@@ -661,6 +705,78 @@ export class SqliteIncidentStore implements IncidentStore, RepoDefinitionStore {
 			throw new RepoDefinitionNotFoundError(id);
 		}
 		return rowToRepoDefinition(row);
+	}
+
+	async createCommonSetupScript(
+		input: CreateCommonSetupScriptInput,
+	): Promise<CommonSetupScript> {
+		const id = crypto.randomUUID();
+		const now = this.now().toISOString();
+		this.db.run(
+			`INSERT INTO common_setup_scripts
+				(id, trigger_file, script, created_at, updated_at)
+			VALUES (?, ?, ?, ?, ?);`,
+			[id, input.triggerFile, input.script, now, now],
+		);
+		const setupScript = await this.getCommonSetupScript(id);
+		if (!setupScript) {
+			throw new Error(`Failed to read back common setup script ${id}`);
+		}
+		return setupScript;
+	}
+
+	async getCommonSetupScript(
+		id: string,
+	): Promise<CommonSetupScript | undefined> {
+		const row = this.db
+			.query<CommonSetupScriptRow, [string]>(
+				"SELECT * FROM common_setup_scripts WHERE id = ?;",
+			)
+			.get(id);
+		return row ? rowToCommonSetupScript(row) : undefined;
+	}
+
+	async listCommonSetupScripts(): Promise<CommonSetupScript[]> {
+		const rows = this.db
+			.query<CommonSetupScriptRow, []>(
+				"SELECT * FROM common_setup_scripts ORDER BY seq ASC;",
+			)
+			.all();
+		return rows.map(rowToCommonSetupScript);
+	}
+
+	async updateCommonSetupScript(
+		id: string,
+		patch: UpdateCommonSetupScriptInput,
+	): Promise<CommonSetupScript> {
+		const sets = ["updated_at = ?"];
+		const values: string[] = [this.now().toISOString()];
+		if (patch.triggerFile !== undefined) {
+			sets.push("trigger_file = ?");
+			values.push(patch.triggerFile);
+		}
+		if (patch.script !== undefined) {
+			sets.push("script = ?");
+			values.push(patch.script);
+		}
+		values.push(id);
+		const row = this.db
+			.query<CommonSetupScriptRow, string[]>(
+				`UPDATE common_setup_scripts SET ${sets.join(", ")} WHERE id = ? RETURNING *;`,
+			)
+			.get(...values);
+		if (!row) {
+			throw new CommonSetupScriptNotFoundError(id);
+		}
+		return rowToCommonSetupScript(row);
+	}
+
+	async deleteCommonSetupScript(id: string): Promise<boolean> {
+		const result = this.db.run(
+			"DELETE FROM common_setup_scripts WHERE id = ?;",
+			[id],
+		);
+		return result.changes > 0;
 	}
 
 	async deleteRepoDefinition(id: string): Promise<boolean> {

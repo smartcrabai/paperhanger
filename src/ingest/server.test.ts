@@ -8,12 +8,19 @@ import {
 	SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 import type { IncidentManager } from "../core/incident-manager";
-import type { Incident, IncidentEvent, RepoDefinition } from "../core/types";
+import type {
+	CommonSetupScript,
+	Incident,
+	IncidentEvent,
+	RepoDefinition,
+} from "../core/types";
 import { createLogger } from "../observability/logger";
 import type { Logger } from "../observability/logger";
 import {
+	CommonSetupScriptNotFoundError,
 	DuplicateRepoDefinitionError,
 	RepoDefinitionNotFoundError,
+	type CommonSetupScriptStore,
 	type IncidentEventRecord,
 	type IncidentStore,
 	type RepoDefinitionStore,
@@ -287,6 +294,46 @@ function racyDeleteRepoDefinitionStore(
 	};
 }
 
+function fakeCommonSetupScriptStore(): CommonSetupScriptStore {
+	const rows: CommonSetupScript[] = [];
+	return {
+		async createCommonSetupScript(input) {
+			const now = new Date().toISOString();
+			const created = {
+				id: `setup-script-${rows.length + 1}`,
+				...input,
+				createdAt: now,
+				updatedAt: now,
+			};
+			rows.push(created);
+			return created;
+		},
+		async getCommonSetupScript(id) {
+			return rows.find((row) => row.id === id);
+		},
+		async listCommonSetupScripts() {
+			return [...rows];
+		},
+		async updateCommonSetupScript(id, patch) {
+			const index = rows.findIndex((row) => row.id === id);
+			if (index === -1) throw new CommonSetupScriptNotFoundError(id);
+			const updated = {
+				...(rows[index] as CommonSetupScript),
+				...patch,
+				updatedAt: new Date().toISOString(),
+			};
+			rows[index] = updated;
+			return updated;
+		},
+		async deleteCommonSetupScript(id) {
+			const index = rows.findIndex((row) => row.id === id);
+			if (index === -1) return false;
+			rows.splice(index, 1);
+			return true;
+		},
+	};
+}
+
 function bearerHeaders(token: string): Record<string, string> {
 	return { authorization: `Bearer ${token}` };
 }
@@ -304,6 +351,7 @@ describe("ingest server", () => {
 		noApiToken?: boolean;
 		store?: IncidentsStoreSlice;
 		repoDefinitions?: RepoDefinitionStore;
+		commonSetupScripts?: CommonSetupScriptStore;
 		tracer?: Tracer;
 		manager?: IncidentManager;
 		logger?: Logger;
@@ -326,6 +374,8 @@ describe("ingest server", () => {
 				options?.store ??
 				fakeStore(options?.ready ?? true, options?.incidents ?? []),
 			repoDefinitions: options?.repoDefinitions ?? fakeRepoDefinitionStore(),
+			commonSetupScripts:
+				options?.commonSetupScripts ?? fakeCommonSetupScriptStore(),
 			tracer: options?.tracer,
 		});
 		baseUrl = `http://localhost:${server.port}`;
@@ -1160,6 +1210,109 @@ describe("ingest server", () => {
 				headers: bearerHeaders(API_TOKEN),
 			});
 			expect(getRes.status).toBe(404);
+		});
+	});
+
+	describe("/setup-scripts", () => {
+		test("creates, lists, updates, and deletes a conditional common setup script", async () => {
+			const createRes = await fetch(`${baseUrl}/setup-scripts`, {
+				method: "POST",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({
+					triggerFile: "bun.lock",
+					script: "bun install --frozen-lockfile",
+				}),
+			});
+			expect(createRes.status).toBe(201);
+			const created = (await createRes.json()) as CommonSetupScript;
+
+			const listRes = await fetch(`${baseUrl}/setup-scripts`, {
+				headers: bearerHeaders(API_TOKEN),
+			});
+			expect(listRes.status).toBe(200);
+			expect(
+				((await listRes.json()) as { setupScripts: CommonSetupScript[] })
+					.setupScripts,
+			).toEqual([created]);
+
+			const updateRes = await fetch(`${baseUrl}/setup-scripts/${created.id}`, {
+				method: "PUT",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({ triggerFile: "package.json" }),
+			});
+			expect(updateRes.status).toBe(200);
+			expect(((await updateRes.json()) as CommonSetupScript).triggerFile).toBe(
+				"package.json",
+			);
+
+			const deleteRes = await fetch(`${baseUrl}/setup-scripts/${created.id}`, {
+				method: "DELETE",
+				headers: bearerHeaders(API_TOKEN),
+			});
+			expect(deleteRes.status).toBe(204);
+
+			const afterDeleteRes = await fetch(`${baseUrl}/setup-scripts`, {
+				headers: bearerHeaders(API_TOKEN),
+			});
+			const afterDeleteBody = (await afterDeleteRes.json()) as {
+				setupScripts: CommonSetupScript[];
+			};
+			expect(afterDeleteBody.setupScripts).toEqual([]);
+		});
+
+		test("rejects unsafe trigger paths and blank scripts", async () => {
+			const invalidInputs = [
+				{ triggerFile: "../package.json", script: "echo x" },
+				{ triggerFile: "/etc/passwd", script: "echo x" },
+				{ triggerFile: "dir\\package.json", script: "echo x" },
+				{ triggerFile: "dir//package.json", script: "echo x" },
+				{ triggerFile: "dir/./package.json", script: "echo x" },
+				{ triggerFile: "dir/../package.json", script: "echo x" },
+				{ triggerFile: "package\0.json", script: "echo x" },
+				{ triggerFile: "package.json", script: "   " },
+			];
+			for (const input of invalidInputs) {
+				const res = await fetch(`${baseUrl}/setup-scripts`, {
+					method: "POST",
+					headers: bearerHeaders(API_TOKEN),
+					body: JSON.stringify(input),
+				});
+				expect(res.status).toBe(400);
+			}
+		});
+
+		test("requires authentication for every mutation route", async () => {
+			const requests: Array<[string, RequestInit]> = [
+				["/setup-scripts", { method: "POST", body: "{}" }],
+				["/setup-scripts/id", { method: "PUT", body: "{}" }],
+				["/setup-scripts/id", { method: "DELETE" }],
+			];
+			for (const [path, init] of requests) {
+				const res = await fetch(`${baseUrl}${path}`, init);
+				expect(res.status).toBe(401);
+			}
+		});
+
+		test("returns 400 for empty updates and 404 for unknown ids", async () => {
+			const emptyUpdateRes = await fetch(`${baseUrl}/setup-scripts/missing`, {
+				method: "PUT",
+				headers: bearerHeaders(API_TOKEN),
+				body: "{}",
+			});
+			expect(emptyUpdateRes.status).toBe(400);
+
+			const missingUpdateRes = await fetch(`${baseUrl}/setup-scripts/missing`, {
+				method: "PUT",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({ script: "echo x" }),
+			});
+			expect(missingUpdateRes.status).toBe(404);
+
+			const missingDeleteRes = await fetch(`${baseUrl}/setup-scripts/missing`, {
+				method: "DELETE",
+				headers: bearerHeaders(API_TOKEN),
+			});
+			expect(missingDeleteRes.status).toBe(404);
 		});
 	});
 

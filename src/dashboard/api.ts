@@ -8,9 +8,12 @@
  */
 
 import type {
+	CommonSetupScript,
+	CreateCommonSetupScriptInput,
 	CreateRepoDefinitionInput,
 	Incident,
 	RepoDefinition,
+	UpdateCommonSetupScriptInput,
 	UpdateRepoDefinitionInput,
 } from "../core/types";
 import type { IncidentEventRecord } from "../storage/types";
@@ -84,6 +87,50 @@ export async function deleteRepoDefinition(
 	id: string,
 ): Promise<void> {
 	await request(`/repo-definitions/${encodeURIComponent(id)}`, token, {
+		method: "DELETE",
+	});
+}
+
+export async function listCommonSetupScripts(
+	token: string,
+): Promise<CommonSetupScript[]> {
+	const res = await request("/setup-scripts", token);
+	const body = (await res.json()) as { setupScripts: CommonSetupScript[] };
+	return body.setupScripts;
+}
+
+export async function createCommonSetupScript(
+	token: string,
+	input: CreateCommonSetupScriptInput,
+	signal?: AbortSignal,
+): Promise<CommonSetupScript> {
+	const res = await request("/setup-scripts", token, {
+		method: "POST",
+		body: JSON.stringify(input),
+		signal,
+	});
+	return (await res.json()) as CommonSetupScript;
+}
+
+export async function updateCommonSetupScript(
+	token: string,
+	id: string,
+	patch: UpdateCommonSetupScriptInput,
+	signal?: AbortSignal,
+): Promise<CommonSetupScript> {
+	const res = await request(`/setup-scripts/${encodeURIComponent(id)}`, token, {
+		method: "PUT",
+		body: JSON.stringify(patch),
+		signal,
+	});
+	return (await res.json()) as CommonSetupScript;
+}
+
+export async function deleteCommonSetupScript(
+	token: string,
+	id: string,
+): Promise<void> {
+	await request(`/setup-scripts/${encodeURIComponent(id)}`, token, {
 		method: "DELETE",
 	});
 }

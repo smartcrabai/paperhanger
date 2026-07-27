@@ -38,7 +38,11 @@ import { GitHubAppClient } from "./repo/github";
 import { RepoResolver } from "./repo/resolver";
 import { PostgresIncidentStore } from "./storage/postgres";
 import { SqliteIncidentStore } from "./storage/sqlite";
-import type { IncidentStore, RepoDefinitionStore } from "./storage/types";
+import type {
+	CommonSetupScriptStore,
+	IncidentStore,
+	RepoDefinitionStore,
+} from "./storage/types";
 import { createTelemetrySource } from "./telemetry/factory";
 import type { TelemetrySource } from "./telemetry/types";
 
@@ -47,7 +51,9 @@ const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 10_000;
 
 const logger = createLogger({ fields: { component: "paperhanger" } });
 
-function buildStore(config: Config): IncidentStore & RepoDefinitionStore {
+function buildStore(
+	config: Config,
+): IncidentStore & RepoDefinitionStore & CommonSetupScriptStore {
 	if (config.storage.driver === "postgres") {
 		return new PostgresIncidentStore(config.storage.url);
 	}
@@ -132,6 +138,7 @@ async function main(): Promise<void> {
 		github,
 		store,
 		repoDefinitions: store,
+		commonSetupScripts: store,
 		config,
 		logger: logger.child({ component: "fix-agent-runner" }),
 		tracer: tracing.getTracer("fix-agent-runner"),
@@ -182,6 +189,7 @@ async function main(): Promise<void> {
 		adapters,
 		store,
 		repoDefinitions: store,
+		commonSetupScripts: store,
 		tracer: tracing.getTracer("server"),
 		htmlRoutes: { "/": dashboard, "/dashboard": dashboard },
 	});

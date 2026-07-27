@@ -98,6 +98,7 @@ interface RepoDefinitionStore {
 ```
 
 - テーブル `repo_definitions`(`id`, `owner`, `repo`, `mappings`: JSON/JSONB 配列, `setup_script`, `test_command`, `enabled`, `created_at`, `updated_at`)。`lower(owner), lower(repo)` のユニークインデックスを持ち、違反時は `DuplicateRepoDefinitionError` を送出する(大文字小文字違いの重複も拒否)。`updatedAt` は更新のたびにストアが設定する
+- テーブル `common_setup_scripts`(`seq`, `id`, `trigger_file`, `script`, `created_at`, `updated_at`)。`seq` の昇順を実行順とし、全リポジトリ共通の条件付きセットアップスクリプトを保持する
 
 ### 3.4 Telemetry Collector(テレメトリ収集・抽象化)
 
@@ -147,6 +148,9 @@ interface TelemetrySource {
   4. コード起因なら修正 → ビルド・テスト実行
   5. ブランチ `paperhanger/incident-{id}` へ push → PR 作成
   6. PR 本文: 診断サマリ / 根拠となるテレメトリ(ログ・トレース抜粋)/ アラートへのリンク / 修正内容の説明
+- **全リポジトリ共通の条件付きセットアップ**(ダッシュボード §3.11 が管理):
+  - clone 直後に `common_setup_scripts` を `seq` 順で評価し、リポジトリルートからの相対パス `triggerFile` が通常ファイルとして存在するスクリプトをすべて実行する
+  - 共通スクリプトは repo definition 固有の `setupScript` より先に実行する。いずれかが非ゼロ終了した時点で後続スクリプトとモデル実行を中止し、インシデントを `failed` とする
 - **repo definition によるセットアップ / テストコマンドの上書き**(ダッシュボード §3.11 が管理する `setupScript` / `testCommand`。両方とも任意で、解決されたリポジトリに一致する有効な定義がある場合のみ `agent-host` へ渡される):
   - `setupScript` が設定されている場合、clone 直後・モデルの最初のターン開始前にそのシェルスクリプトを実行する(タイムアウト 10 分。テスト実行と同じ規律の専用タイムアウトを用意)
   - 終了コードが非ゼロなら、モデルには一切見せず・リトライもさせずにその場でインシデントを `failed` として打ち切る(`failureReason` に exit code とリダクション済みの末尾ログを記録)
@@ -238,9 +242,10 @@ notifiers:
 ### 3.11 ダッシュボード(設定・観覧 UI)
 
 - 個人利用を前提とした、設定と観覧専用の UI。ingest サーバーと同一プロセスから `GET /` および `GET /dashboard`(Bun HTML import; React)で配信する
-- 用途は 2 つのみ:
+- 用途は 3 つのみ:
   1. **対象リポジトリ定義(repo definition)の管理**: GitHub owner/repo、アラート→リポジトリ解決に使うラベルマッチャー(`mappings`。§3.5)、クローン後・診断前に実行する任意の `setupScript`、テストコマンド自動検出を上書きする任意の `testCommand`(§3.6)を CRUD する
-  2. **インシデントの閲覧**: 一覧(新しい順・自動更新)・詳細・イベントタイムライン(読み取り専用)
+  2. **全リポジトリ共通 Setup script の管理**: 「指定したリポジトリ相対ファイルが存在する場合」という条件とシェルスクリプトの組を複数 CRUD する。作成順に評価・実行する
+  3. **インシデントの閲覧**: 一覧(新しい順・自動更新)・詳細・イベントタイムライン(読み取り専用)
 - **§1 の非ゴールはダッシュボードにも適用される**: マージ・承認・デプロイ・インフラ緩和操作は一切存在しない。設定と観覧のみ
 - **認証**: すべてのデータ API は既存の `server.apiToken` ゲートを通る(未設定時は 401、secure by default)。静的ページ自体(`GET /` / `GET /dashboard`)はデータを含まないため無認証。UI はトークンを一度入力すると `localStorage` に保持し、以降のリクエストに `X-Api-Token` ヘッダとして付与する。いずれかのリクエストが 401 になればトークン入力画面へ戻す
 - **HTTP API**(すべて `server.apiToken` 必須。エラー応答は plain text、成功応答は JSON):
@@ -249,8 +254,12 @@ notifiers:
   - `GET    /repo-definitions/:id`    → 200 / 404
   - `PUT    /repo-definitions/:id`    → 200(部分更新後の定義)/ 400 / 404 / 409
   - `DELETE /repo-definitions/:id`    → 204 / 404
+  - `GET    /setup-scripts`            → 200 `{ setupScripts: [...] }`
+  - `POST   /setup-scripts`            → 201 / 400
+  - `PUT    /setup-scripts/:id`        → 200 / 400 / 404
+  - `DELETE /setup-scripts/:id`        → 204 / 404
   - `GET    /incidents/:id/events`    → 200 `{ events: [...] }` / 404(インシデントが存在しない)
-- リクエストボディは zod で検証: `owner`/`repo` は GitHub の命名規則に一致する非空文字列(`/^[A-Za-z0-9_.-]+$/`、100 文字以内)、`mappings` は非空の key/value からなるオブジェクトの配列(空オブジェクトは全件マッチしてしまうため拒否。key は 100 文字以内・value は 1,000 文字以内、1 エントリあたり最大 50 key/value ペア、配列全体で最大 100 エントリ)、`setupScript` は 10 万文字以内、`testCommand` は単一行かつ 1,000 文字以内で空白のみの値は拒否、未知のキーは拒否(`.strict()`)。400 応答の本文には zod の issue 一覧を人間可読な形式で含める
+- リクエストボディは zod で検証: `owner`/`repo` は GitHub の命名規則に一致する非空文字列(`/^[A-Za-z0-9_.-]+$/`、100 文字以内)、`mappings` は非空の key/value からなるオブジェクトの配列(空オブジェクトは全件マッチしてしまうため拒否。key は 100 文字以内・value は 1,000 文字以内、1 エントリあたり最大 50 key/value ペア、配列全体で最大 100 エントリ)、repo definition の `setupScript` と共通 Setup script の `script` は 10 万文字以内、共通 Setup script の `triggerFile` は `/` で始まらず、バックスラッシュ・空/`.`/`..` セグメントを含まない 1,000 文字以内のリポジトリ相対 POSIX パス、`testCommand` は単一行かつ 1,000 文字以内で空白のみの値は拒否、未知のキーは拒否(`.strict()`)。400 応答の本文には zod の issue 一覧を人間可読な形式で含める
 
 ## 4. 技術スタック
 
