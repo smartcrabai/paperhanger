@@ -1,13 +1,9 @@
 /**
- * Zod mirror of the `fix-incident` Flue workflow's input/output contract.
+ * Zod mirror of the `fix-incident` Flue agent's input/output contract.
  *
  * The canonical definition lives in `agent-host/src/contract.ts` as Valibot
- * schemas (agent-host is a separate Node-only package per
- * docs/architecture.md's "Flue agent host (Node sidecar)" section, so it
- * cannot be imported directly from the main Bun process). This file is a
- * hand-maintained structural mirror used by `src/agent/runner.ts` to validate
- * the raw JSON result returned by `client.workflows.invoke(...)` before
- * trusting it. Keep the two schemas in sync when the contract changes.
+ * schemas. This separate Node-only package cannot be imported by the Bun
+ * process, so keep these structural schemas synchronized.
  */
 
 import { z } from "zod";
@@ -66,7 +62,7 @@ export const FixAgentTelemetryConfigSchema = z.discriminatedUnion("source", [
 	FixAgentGreptimeDbTelemetryConfigSchema,
 ]);
 
-export const FixAgentWorkflowInputSchema = z.object({
+export const FixAgentInputSchema = z.object({
 	incidentId: z.string().min(1),
 	contextMarkdown: z.string(),
 	alert: FixAgentAlertSchema,
@@ -85,11 +81,11 @@ export const FixAgentFixSchema = z.object({
 });
 
 /**
- * The workflow's output. `outcome: "fixed"` is required to carry a `fix`
- * block (enforced below via `superRefine`, since Valibot/Zod's plain object
- * schema can't express "field B is required when field A has value X").
+ * The agent's output. `outcome: "fixed"` is required to carry a `fix` block
+ * (enforced below via `superRefine`, since Valibot/Zod's plain object schema
+ * can't express "field B is required when `outcome` has value `fixed`").
  */
-export const FixAgentWorkflowOutputSchema = z
+export const FixAgentOutputSchema = z
 	.object({
 		outcome: z.enum(["fixed", "report_only", "failed"]),
 		diagnosis: z.string(),
@@ -113,11 +109,10 @@ export type FixAgentLimits = z.infer<typeof FixAgentLimitsSchema>;
 export type FixAgentTelemetryConfig = z.infer<
 	typeof FixAgentTelemetryConfigSchema
 >;
-export type FixAgentWorkflowInput = z.infer<typeof FixAgentWorkflowInputSchema>;
+export type FixAgentInput = z.infer<typeof FixAgentInputSchema>;
 export type FixAgentFix = z.infer<typeof FixAgentFixSchema>;
-export type FixAgentWorkflowOutput = z.infer<
-	typeof FixAgentWorkflowOutputSchema
->;
+export type FixAgentOutput = z.infer<typeof FixAgentOutputSchema>;
 
-/** Name of the discovered Flue workflow (`agent-host/src/workflows/fix-incident.ts`). */
-export const FIX_INCIDENT_WORKFLOW_NAME = "fix-incident";
+/** Route and data-part key shared with the Flue 2 agent host. */
+export const FIX_INCIDENT_RESULT_DATA_NAME = "result";
+export const FIX_INCIDENT_AGENT_ROUTE = "/agents/fix-incident";

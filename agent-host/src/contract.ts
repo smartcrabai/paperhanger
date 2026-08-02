@@ -1,11 +1,10 @@
 /**
- * Valibot schemas for the `fix-incident` workflow's input/output contract.
+ * Valibot schemas for the `fix-incident` agent's input/output contract.
  *
  * This is the canonical definition. The Bun-side process cannot import this
- * file directly (agent-host is a separate, Node-only package — see
- * docs/architecture.md "Flue agent host (Node sidecar)" in the parent repo),
- * so `src/agent/contract.ts` in the parent repo hand-maintains a structural
- * Zod mirror of this same shape. Keep both in sync when this contract changes.
+ * file directly (agent-host is a separate, Node-only package), so
+ * `src/agent/contract.ts` in the parent repo hand-maintains a structural Zod
+ * mirror of this same shape. Keep both in sync when this contract changes.
  */
 
 import * as v from "valibot";
@@ -66,7 +65,7 @@ export const TelemetryConfigSchema = v.variant("source", [
 	GreptimeDbTelemetryConfigSchema,
 ]);
 
-export const WorkflowInputSchema = v.object({
+export const FixIncidentInputSchema = v.object({
 	incidentId: v.string(),
 	contextMarkdown: v.string(),
 	alert: AlertSchema,
@@ -84,7 +83,7 @@ export const FixSchema = v.object({
 	testsPassed: v.boolean(),
 });
 
-export const WorkflowOutputSchema = v.object({
+export const FixIncidentOutputSchema = v.object({
 	outcome: v.picklist(["fixed", "report_only", "failed"]),
 	diagnosis: v.string(),
 	report: v.string(),
@@ -96,6 +95,8 @@ export type Alert = v.InferOutput<typeof AlertSchema>;
 export type RepoInput = v.InferOutput<typeof RepoInputSchema>;
 export type Limits = v.InferOutput<typeof LimitsSchema>;
 export type TelemetryConfig = v.InferOutput<typeof TelemetryConfigSchema>;
-export type WorkflowInput = v.InferOutput<typeof WorkflowInputSchema>;
+export type FixIncidentInput = v.InferOutput<typeof FixIncidentInputSchema>;
 export type Fix = v.InferOutput<typeof FixSchema>;
-export type WorkflowOutput = v.InferOutput<typeof WorkflowOutputSchema>;
+export type FixIncidentOutput = v.InferOutput<typeof FixIncidentOutputSchema>;
+
+export const FIX_INCIDENT_RESULT_DATA_NAME = "result";

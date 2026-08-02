@@ -7,8 +7,8 @@
 #     lifecycle, telemetry collection, repo resolution, notifications).
 #   - Node.js (>=22.19) runs the built Flue agent-host as a child process,
 #     spawned by src/agent/sidecar.ts. Flue's generated production server
-#     (`flue build --target node` -> dist/server.mjs) unconditionally imports
-#     `node:sqlite`, which Bun does not implement, so it cannot run under Bun
+#     (`vite build` -> dist/server.mjs) unconditionally imports `node:sqlite`,
+#     which Bun does not implement, so it cannot run under Bun
 #     -- see docs/research/flue.md section 10.
 #
 # It also ships general-purpose tooling for the *target* repositories the fix
@@ -49,21 +49,23 @@ RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \
 	bun install --frozen-lockfile
 
 # ---- Stage 2: agent-host build (Node/Flue app, built under Bun) ------------
-# `flue build --target node` runs fine under Bun (only the *generated server*
-# requires Node at runtime, per docs/research/flue.md section 10), so the
-# build itself stays in a Bun-based stage; only the final runtime copy needs
-# Node.
+# Vite builds the Flue app; only the generated server requires Node at
+# runtime, so the build itself stays in a Bun-based stage.
+#
+# The agent-host build itself stays in a Bun-based stage; only the final
+# runtime copy needs Node.
 FROM oven/bun:1.3 AS agent-host-build
 WORKDIR /agent-host
 COPY agent-host/package.json agent-host/bun.lock ./
 RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \
 	bun install --frozen-lockfile
 COPY agent-host/flue.config.ts ./
+COPY agent-host/vite.config.ts ./
 COPY agent-host/src ./src
 RUN bun run build
-# Re-install production-only dependencies for the runtime image: the build
-# step needs `@flue/cli` (a devDependency pulling in a full bundler toolchain)
-# but the built dist/server.mjs only needs the plain runtime deps to execute
+# Re-install production-only dependencies for the runtime image: the Vite
+# build toolchain is a devDependency, while dist/server.mjs only needs the
+# plain runtime deps to execute.
 # (verified empirically: this shrinks node_modules from ~450MB to ~220MB).
 RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \
 	rm -rf node_modules && bun install --production --frozen-lockfile
