@@ -1,17 +1,15 @@
 /**
- * Custom application entrypoint (docs read guide/routing): mounts Flue's
- * public routes plus a `/healthz` route, since Flue adds no health endpoint
- * by default. The parent repo's `src/agent/sidecar.ts` polls `/healthz` to
- * detect readiness after spawning this server.
+ * Custom application entrypoint. Flue 2 routes are mounted explicitly so the
+ * sidecar exposes only the fix-incident agent and its health check.
  */
 
-import { flue } from "@flue/runtime/routing";
+import { createAgentRouter } from "@flue/runtime/routing";
 import { Hono } from "hono";
+import { FixIncidentAgent } from "./fix-agent.ts";
 
 const app = new Hono();
 
 app.get("/healthz", (c) => c.json({ ok: true }));
-
-app.route("/", flue());
+app.route("/agents/fix-incident", createAgentRouter(FixIncidentAgent));
 
 export default app;

@@ -16,9 +16,24 @@ jobs:
         with:
           bun-version: latest
 
-      - name: Install dependencies
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.19.0
+
+      - name: Install root dependencies
         shell: bash
-        run: bun install
+        run: bun install --frozen-lockfile
+
+      - name: Install agent-host dependencies
+        shell: bash
+        working-directory: agent-host
+        run: bun install --frozen-lockfile
+
+      - name: Build and smoke-test agent-host
+        shell: bash
+        working-directory: agent-host
+        run: bun run build && bun run smoke
 
       - name: Run tests
         shell: bash

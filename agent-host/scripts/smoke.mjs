@@ -1,123 +1,180 @@
 #!/usr/bin/env node
-// Node-run smoke test: validates that the agent-host's workflow input/output
-// contract schemas parse example payloads correctly, and that the discovered
-// `fix-incident` workflow module has a well-formed default export. Does not
-// call a real model or sandbox — see agent-host/README.md for the full
-// `flue build`/boot verification.
-//
-// Run with: node --experimental-strip-types scripts/smoke.mjs
-// (or plain `node scripts/smoke.mjs` on a Node version where type-stripping
-// of erasable TypeScript syntax is enabled by default; see package.json's
-// "smoke" script for the exact invocation used in CI/local verification.)
+// Verifies Flue 2 schemas, agent registration, route admission, and the built
+// Node server without requiring a model/provider credential.
 
+import { once } from "node:events";
+import { spawn } from "node:child_process";
+import { createServer } from "node:net";
 import * as v from "valibot";
-import { WorkflowInputSchema, WorkflowOutputSchema } from "../src/contract.ts";
-import workflow from "../src/workflows/fix-incident.ts";
+import {
+	FixIncidentInputSchema,
+	FixIncidentOutputSchema,
+} from "../src/contract.ts";
+import { FixIncidentAgent } from "../src/fix-agent.ts";
 
 let failures = 0;
-
 function assert(condition, message) {
-	if (condition) {
-		console.log(`OK: ${message}`);
-	} else {
-		console.error(`FAIL: ${message}`);
+	if (condition) console.log(`ok - ${message}`);
+	else {
 		failures++;
+		console.error(`not ok - ${message}`);
 	}
 }
 
 const exampleInput = {
-	incidentId: "incident-123",
+	incidentId: "incident-smoke",
 	contextMarkdown: "# Incident\nSomething broke.",
 	alert: {
 		title: "Checkout API 500s",
 		severity: "critical",
 		source: "grafana",
-		generatorUrl: "https://grafana.example.com/alert/1",
-		labels: { service: "checkout" },
+		labels: {},
 		annotations: {},
 	},
 	repo: {
 		owner: "acme",
 		repo: "widgets",
-		cloneUrl: "https://x-access-token:REDACTED@github.com/acme/widgets.git",
+		cloneUrl: "https://github.com/acme/widgets.git",
 		defaultBranch: "main",
-		branchName: "paperhanger/incident-123",
+		branchName: "paperhanger/incident-smoke",
 	},
 	limits: { timeoutMinutes: 30, maxDiffLines: 500, maxFixAttempts: 3 },
 	forbiddenPaths: [".github/workflows/**"],
-	telemetry: {
-		source: "greptimedb",
-		url: "http://greptimedb:4000",
-		database: "public",
+};
+
+assert(
+	v.safeParse(FixIncidentInputSchema, exampleInput).success,
+	"FixIncidentInputSchema accepts a valid input",
+);
+assert(
+	!v.safeParse(FixIncidentInputSchema, { incidentId: "x" }).success,
+	"FixIncidentInputSchema rejects incomplete input",
+);
+assert(
+	v.safeParse(FixIncidentOutputSchema, {
+		outcome: "fixed",
+		diagnosis: "d",
+		report: "r",
+		fix: {
+			branch: "b",
+			commitMessage: "m",
+			changedFiles: [],
+			testsPassed: true,
+		},
+	}).success,
+	"FixIncidentOutputSchema accepts fixed output",
+);
+assert(
+	v.safeParse(FixIncidentOutputSchema, {
+		outcome: "report_only",
+		diagnosis: "d",
+		report: "r",
+	}).success,
+	"FixIncidentOutputSchema accepts report_only output",
+);
+assert(
+	v.safeParse(FixIncidentOutputSchema, {
+		outcome: "failed",
+		diagnosis: "d",
+		report: "r",
+		failureReason: "f",
+	}).success,
+	"FixIncidentOutputSchema accepts failed output",
+);
+assert(
+	typeof FixIncidentAgent === "function",
+	"FixIncidentAgent is a function",
+);
+assert(
+	FixIncidentAgent.agentName === "fix-incident",
+	"FixIncidentAgent has the fix-incident name",
+);
+assert(
+	FixIncidentAgent.initialData === FixIncidentInputSchema,
+	"FixIncidentAgent uses FixIncidentInputSchema as initialData",
+);
+
+const portServer = createServer();
+portServer.listen(0, "127.0.0.1");
+await once(portServer, "listening");
+const port = portServer.address().port;
+portServer.close();
+const child = spawn(process.execPath, ["dist/server.mjs"], {
+	env: {
+		...process.env,
+		PORT: String(port),
+		FLUE_MODEL: "anthropic/claude-sonnet-4-6",
 	},
-};
-
-assert(
-	v.safeParse(WorkflowInputSchema, exampleInput).success,
-	"WorkflowInputSchema parses a well-formed input payload",
-);
-
-assert(
-	!v.safeParse(WorkflowInputSchema, { incidentId: "x" }).success,
-	"WorkflowInputSchema rejects a malformed/incomplete input payload",
-);
-
-const exampleFixedOutput = {
-	outcome: "fixed",
-	diagnosis: "Root cause: unchecked cache miss in getUser().",
-	report: "## Report\nGuarded the cache-miss branch.",
-	fix: {
-		branch: "paperhanger/incident-123",
-		commitMessage: "fix: guard against cache miss",
-		changedFiles: ["src/index.ts"],
-		testCommand: "bun run test",
-		testsPassed: true,
-	},
-};
-assert(
-	v.safeParse(WorkflowOutputSchema, exampleFixedOutput).success,
-	"WorkflowOutputSchema parses a well-formed 'fixed' output payload",
-);
-
-const exampleReportOnlyOutput = {
-	outcome: "report_only",
-	diagnosis:
-		"Root cause is an under-provisioned DB connection pool (infra, not code).",
-	report: "## Report\nThe connection pool is undersized for current load.",
-};
-assert(
-	v.safeParse(WorkflowOutputSchema, exampleReportOnlyOutput).success,
-	"WorkflowOutputSchema parses a well-formed 'report_only' output payload",
-);
-
-const exampleFailedOutput = {
-	outcome: "failed",
-	diagnosis: "Attempted three fixes; tests kept failing.",
-	report:
-		"## Attempts\nThree fix attempts, all broke the integration test suite.",
-	failureReason: "Tests failed after 3 fix attempts.",
-};
-assert(
-	v.safeParse(WorkflowOutputSchema, exampleFailedOutput).success,
-	"WorkflowOutputSchema parses a well-formed 'failed' output payload",
-);
-
-assert(
-	typeof workflow === "object" && workflow !== null,
-	"fix-incident workflow module has a default export",
-);
-assert(
-	Boolean(workflow && "agent" in workflow),
-	"fix-incident workflow default export has an `agent` field",
-);
-assert(
-	Boolean(workflow && "action" in workflow),
-	"fix-incident workflow default export has an `action` field (defineWorkflow branding)",
-);
-
-if (failures > 0) {
-	console.error(`\nSmoke test FAILED (${failures} failure(s))`);
-	process.exitCode = 1;
-} else {
-	console.log("\nSmoke test PASSED");
+	stdio: ["ignore", "pipe", "pipe"],
+});
+let childOutput = "";
+child.stdout.on("data", (chunk) => {
+	childOutput += chunk;
+});
+child.stderr.on("data", (chunk) => {
+	childOutput += chunk;
+});
+try {
+	let health;
+	for (let attempt = 0; attempt < 50; attempt++) {
+		try {
+			health = await fetch(`http://127.0.0.1:${port}/healthz`);
+			if (health.status === 200) break;
+		} catch {}
+		await new Promise((resolve) => setTimeout(resolve, 50));
+	}
+	assert(health?.status === 200, "built server GET /healthz returns 200");
+	assert(
+		(await health?.json())?.ok === true,
+		"health response is { ok: true }",
+	);
+	const invalid = await fetch(
+		`http://127.0.0.1:${port}/agents/fix-incident/smoke-invalid`,
+		{
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				kind: "signal",
+				type: "paperhanger.smoke",
+				body: "invalid",
+				initialData: { incidentId: "smoke" },
+				uid: null,
+			}),
+		},
+	);
+	const invalidBody = await invalid.json();
+	assert(invalid.status === 400, "invalid initialData is rejected with 400");
+	assert(
+		invalidBody?.error?.type === "invalid_request",
+		"invalid initialData reports invalid_request",
+	);
+	const valid = await fetch(
+		`http://127.0.0.1:${port}/agents/fix-incident/smoke-valid`,
+		{
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				kind: "signal",
+				type: "paperhanger.smoke",
+				body: "valid",
+				initialData: exampleInput,
+				uid: null,
+			}),
+		},
+	);
+	const validBody = await valid.json();
+	assert(valid.status === 202, "valid initialData is admitted with 202");
+	assert(
+		typeof validBody?.submissionId === "string" &&
+			typeof validBody?.streamUrl === "string" &&
+			typeof validBody?.offset === "string",
+		"valid admission returns a readable submission",
+	);
+} finally {
+	if (!child.killed) child.kill("SIGTERM");
+	await once(child, "exit").catch(() => {});
+	if (child.exitCode !== 0 && failures === 0) console.error(childOutput);
 }
+
+if (failures > 0) process.exitCode = 1;
+else console.log("\nSmoke test PASSED");

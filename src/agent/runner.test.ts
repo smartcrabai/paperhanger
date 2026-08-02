@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import type { createFlueClient } from "@flue/sdk";
 import { context, SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
@@ -12,42 +11,28 @@ import { createLogger } from "../observability/logger";
 import type {
 	CompareCommitsResult,
 	CreatePullRequestInput,
-	CreatePullRequestResult,
 } from "../repo/github";
 import type { ResolvedRepo } from "../repo/resolver";
 import { SqliteIncidentStore } from "../storage/sqlite";
-import type { RepoDefinitionStore } from "../storage/types";
 import type { IncidentContext } from "../telemetry/types";
 import {
+	FixAgentRunner,
 	type FixAgentFlueClient,
 	type FixAgentGitHubClient,
-	FixAgentRunner,
 	type FixAgentRunnerConfig,
 } from "./runner";
 
-// Registered once at module scope so the span activated by `context.with(...)`
-// inside `invokeWorkflow` stays active across `await`s (design doc section
-// 10) -- needed for the log/trace correlation test below. A second
-// registration in the same bun process would return `false` and keep this
-// one -- harmless, since it's the same manager class; no other file in
-// `bun test src/agent` registers a context manager.
 context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
 
 function silentLogger() {
 	return createLogger({ sink: () => {} });
 }
-
-/** A logger whose sink captures each emitted JSON line for correlation assertions. */
 function capturingLogger() {
 	const lines: string[] = [];
-	const logger = createLogger({ sink: (line) => lines.push(line) });
-	return { logger, lines };
+	return { logger: createLogger({ sink: (line) => lines.push(line) }), lines };
 }
 
-async function createStoreWithIncident(): Promise<{
-	store: SqliteIncidentStore;
-	incident: Incident;
-}> {
+async function createStoreWithIncident() {
 	const store = new SqliteIncidentStore(":memory:");
 	await store.init();
 	const incident = await store.createIncident({
@@ -61,7 +46,6 @@ async function createStoreWithIncident(): Promise<{
 	});
 	return { store, incident };
 }
-
 function makeAlert(overrides: Partial<IncidentEvent> = {}): IncidentEvent {
 	return {
 		fingerprint: "fp-1",
@@ -77,7 +61,6 @@ function makeAlert(overrides: Partial<IncidentEvent> = {}): IncidentEvent {
 		...overrides,
 	};
 }
-
 function makeContext(
 	incident: Incident,
 	alert: IncidentEvent,
@@ -93,14 +76,12 @@ function makeContext(
 		notes: [],
 	};
 }
-
 const testRepo: ResolvedRepo = {
 	owner: "acme",
 	repo: "widgets",
 	method: "attribute",
 	confidence: "high",
 };
-
 function makeConfig(
 	overrides: Partial<FixAgentRunnerConfig["agent"]> = {},
 ): FixAgentRunnerConfig {
@@ -121,15 +102,11 @@ function makeConfig(
 		},
 	};
 }
-
 interface FakeGithubOptions {
-	defaultBranch?: string;
 	compareResult?: CompareCommitsResult;
-	createPullRequestResult?: CreatePullRequestResult;
 	addLabelsShouldThrow?: boolean;
 	deleteRefShouldThrow?: boolean;
 }
-
 function createFakeGithub(options: FakeGithubOptions = {}) {
 	const calls = {
 		createPullRequest: [] as CreatePullRequestInput[],
@@ -137,7 +114,6 @@ function createFakeGithub(options: FakeGithubOptions = {}) {
 		deleteRef: [] as string[],
 		compareCommits: [] as { base: string; head: string }[],
 	};
-
 	const client: FixAgentGitHubClient = {
 		async getRepoInstallation() {
 			return { id: 42 };
@@ -152,7 +128,7 @@ function createFakeGithub(options: FakeGithubOptions = {}) {
 			return `https://x-access-token:${token}@github.com/${owner}/${repo}.git`;
 		},
 		async getDefaultBranch() {
-			return options.defaultBranch ?? "main";
+			return "main";
 		},
 		async compareCommits(_owner, _repo, base, head) {
 			calls.compareCommits.push({ base, head });
@@ -166,63 +142,93 @@ function createFakeGithub(options: FakeGithubOptions = {}) {
 		},
 		async deleteRef(_owner, _repo, ref) {
 			calls.deleteRef.push(ref);
-			if (options.deleteRefShouldThrow) {
+			if (options.deleteRefShouldThrow)
 				throw new Error("delete ref failed: network error");
-			}
 		},
 		async createPullRequest(_owner, _repo, input) {
 			calls.createPullRequest.push(input);
-			return (
-				options.createPullRequestResult ?? {
-					url: "https://github.com/acme/widgets/pull/9",
-					number: 9,
-				}
-			);
+			return { url: "https://github.com/acme/widgets/pull/9", number: 9 };
 		},
 		async addLabels(_owner, _repo, issueNumber, labels) {
 			calls.addLabels.push({ issueNumber, labels });
-			if (options.addLabelsShouldThrow) {
+			if (options.addLabelsShouldThrow)
 				throw new Error("labels endpoint exploded");
-			}
 		},
 	};
-
 	return { client, calls };
 }
-
-function createFakeFlue(result: unknown): {
-	client: FixAgentFlueClient;
-	invokeCalls: { name: string; input: unknown }[];
-} {
-	const invokeCalls: { name: string; input: unknown }[] = [];
+function createFakeFlue(result: unknown) {
+	const calls: {
+		url?: string;
+		send?: Parameters<FixAgentFlueClient["send"]>[0];
+		read: number;
+		abort: number;
+	} = { read: 0, abort: 0 };
 	const client: FixAgentFlueClient = {
-		workflows: {
-			async invoke(name, options) {
-				invokeCalls.push({ name, input: options.input });
-				return { runId: "run-1", result };
-			},
+		async send(options) {
+			calls.send = options;
+			return {
+				streamUrl:
+					"http://agent-host.internal:9000/api/agents/fix-incident/run-1/events",
+				offset: "-1",
+				submissionId: "sub-1",
+				uid: "uid-1",
+			};
+		},
+		async read() {
+			calls.read++;
+			return {
+				submissionId: "sub-1",
+				data: { result: [result] },
+			};
+		},
+		async abort() {
+			calls.abort++;
+			return { aborted: true };
 		},
 	};
-	return { client, invokeCalls };
+	return { client, calls };
 }
-
-/** A flue client whose invoke() only settles when the caller's AbortSignal fires. */
-function createHangingFlue(): FixAgentFlueClient {
-	return {
-		workflows: {
-			invoke(_name, options) {
-				return new Promise((_resolve, reject) => {
-					options.signal?.addEventListener("abort", () => {
-						const err = new Error("The operation was aborted");
-						err.name = "AbortError";
-						reject(err);
-					});
-				});
-			},
+function createHangingFlue(abortShouldThrow = false, sendShouldHang = false) {
+	const calls = {
+		send: undefined as Parameters<FixAgentFlueClient["send"]>[0] | undefined,
+		read: 0,
+		abort: 0,
+	};
+	const client: FixAgentFlueClient = {
+		async send(options) {
+			calls.send = options;
+			if (sendShouldHang) {
+				const { promise, reject } = Promise.withResolvers<never>();
+				options.signal?.addEventListener("abort", () =>
+					reject(new Error("The operation was aborted")),
+				);
+				return promise;
+			}
+			return {
+				streamUrl:
+					"http://agent-host.internal:9000/api/agents/fix-incident/run-timeout/events",
+				offset: "-1",
+				submissionId: "sub-timeout",
+				uid: "uid-timeout",
+			};
+		},
+		read(_admission, options) {
+			calls.read++;
+			const { promise, reject } = Promise.withResolvers<never>();
+			options?.signal?.addEventListener("abort", () =>
+				reject(new Error("The operation was aborted")),
+			);
+			return promise;
+		},
+		async abort() {
+			calls.abort++;
+			if (abortShouldThrow) throw new Error("abort unavailable");
+			return { aborted: true };
 		},
 	};
+	return { client, calls };
 }
-
 const FIXED_OUTPUT_BASE = {
 	outcome: "fixed" as const,
 	diagnosis: "The null pointer came from an unchecked cache miss.",
@@ -235,12 +241,36 @@ const FIXED_OUTPUT_BASE = {
 		testsPassed: true,
 	},
 };
+function makeRunner(
+	store: SqliteIncidentStore,
+	github: FixAgentGitHubClient,
+	flue: FixAgentFlueClient,
+	config = makeConfig(),
+	createFlueClient?: (options: { url: string }) => FixAgentFlueClient,
+) {
+	return new FixAgentRunner({
+		flue: {
+			baseUrl: "http://agent-host.internal:9000/api?token=discard#fragment",
+		},
+		github,
+		store,
+		repoDefinitions: store,
+		config,
+		logger: silentLogger(),
+		createFlueClient: createFlueClient ?? (() => flue),
+	});
+}
 
-describe("FixAgentRunner - fixed outcome happy path", () => {
-	test("verifies the diff, creates a PR with the expected payload/body, and labels it", async () => {
+describe("FixAgentRunner conversation protocol", () => {
+	test("sends initial data to an encoded conversation URL and handles fixed output", async () => {
 		const { store, incident } = await createStoreWithIncident();
-		const alert = makeAlert();
-		const context = makeContext(incident, alert);
+		let agentRunId = "";
+		const createAgentRun = store.createAgentRun.bind(store);
+		store.createAgentRun = async (input) => {
+			const run = await createAgentRun(input);
+			agentRunId = run.id;
+			return run;
+		};
 		const github = createFakeGithub({
 			compareResult: {
 				files: [
@@ -256,991 +286,257 @@ describe("FixAgentRunner - fixed outcome happy path", () => {
 			},
 		});
 		const flue = createFakeFlue(FIXED_OUTPUT_BASE);
-		const runner = new FixAgentRunner({
-			flue: flue.client,
-			github: github.client,
+		const createdUrls: string[] = [];
+		const runner = makeRunner(
 			store,
-			repoDefinitions: store,
-			config: makeConfig(),
-			logger: silentLogger(),
-		});
-
-		const result = await runner.run(incident, context, testRepo);
-
+			github.client,
+			flue.client,
+			makeConfig(),
+			(options) => {
+				createdUrls.push(options.url);
+				return flue.client;
+			},
+		);
+		const result = await runner.run(
+			incident,
+			makeContext(incident, makeAlert()),
+			testRepo,
+		);
 		expect(result.status).toBe("pr_created");
-		if (result.status !== "pr_created") {
-			throw new Error("expected pr_created");
-		}
-		expect(result.prUrl).toBe("https://github.com/acme/widgets/pull/9");
-		expect(result.diagnosis).toBe(FIXED_OUTPUT_BASE.diagnosis);
-
-		expect(flue.invokeCalls.length).toBe(1);
-		expect(flue.invokeCalls[0]?.name).toBe("fix-incident");
-		const input = flue.invokeCalls[0]?.input as {
-			incidentId: string;
-			repo: { branchName: string; cloneUrl: string; defaultBranch: string };
-			forbiddenPaths: string[];
-			limits: {
-				timeoutMinutes: number;
-				maxDiffLines: number;
-				maxFixAttempts: number;
-			};
-			telemetry?: { source: string; url: string; database: string };
-		};
-		expect(input.incidentId).toBe(incident.id);
-		expect(input.repo.branchName).toBe(`paperhanger/incident-${incident.id}`);
-		expect(input.repo.cloneUrl).toContain("installation-token");
-		expect(input.repo.defaultBranch).toBe("main");
-		expect(input.forbiddenPaths).toEqual([".github/workflows/**"]);
-		expect(input.limits.maxFixAttempts).toBe(3);
-		expect(input.telemetry).toEqual({
-			source: "greptimedb",
-			url: "http://greptimedb:4000",
-			database: "public",
+		expect(createdUrls[0]).toBe(
+			`http://agent-host.internal:9000/api/agents/fix-incident/${encodeURIComponent(agentRunId)}`,
+		);
+		expect(flue.calls.send?.message).toEqual({
+			kind: "signal",
+			type: "paperhanger.fix-incident",
+			body: `Run paperhanger fix incident ${incident.id}.`,
 		});
-
-		expect(github.calls.compareCommits).toEqual([
-			{ base: "main", head: `paperhanger/incident-${incident.id}` },
-		]);
-
-		expect(github.calls.createPullRequest.length).toBe(1);
-		const pr = github.calls.createPullRequest[0];
-		expect(pr?.title).toBe(`fix: ${alert.title} (incident ${incident.id})`);
-		expect(pr?.head).toBe(`paperhanger/incident-${incident.id}`);
-		expect(pr?.base).toBe("main");
-		expect(pr?.draft).toBe(false);
-		expect(pr?.body).toContain(FIXED_OUTPUT_BASE.report);
-		expect(pr?.body).toContain("## Telemetry evidence");
-		expect(pr?.body).toContain(alert.generatorUrl as string);
-		expect(pr?.body?.toLowerCase()).toContain("generated by paperhanger");
-
-		expect(github.calls.addLabels).toEqual([
-			{ issueNumber: 9, labels: ["paperhanger", "automated-fix"] },
-		]);
-		expect(github.calls.deleteRef).toEqual([]);
-
-		// The runner manages diagnosing/fixing but never sets a terminal status
-		// itself; the last transition it made should stick.
-		const stored = await store.getIncident(incident.id);
-		expect(stored?.status).toBe("fixing");
-
+		expect(flue.calls.send?.uid).toBeNull();
+		const send = flue.calls.send;
+		if (!send) throw new Error("expected send call");
+		expect(send.signal).toBeInstanceOf(AbortSignal);
+		expect((send.initialData as { incidentId: string }).incidentId).toBe(
+			incident.id,
+		);
 		await store.close();
 	});
 
-	test("does not fail the run when addLabels fails (best-effort)", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub({ addLabelsShouldThrow: true });
-		const flue = createFakeFlue(FIXED_OUTPUT_BASE);
-		const runner = new FixAgentRunner({
-			flue: flue.client,
-			github: github.client,
-			store,
-			repoDefinitions: store,
-			config: makeConfig(),
-			logger: silentLogger(),
-		});
+	test("returns report_only and failed data parts", async () => {
+		for (const output of [
+			{ outcome: "report_only", diagnosis: "d", report: "r" },
+			{
+				outcome: "failed",
+				diagnosis: "d",
+				report: "r",
+				failureReason: "tests failed",
+			},
+		]) {
+			const { store, incident } = await createStoreWithIncident();
+			const flue = createFakeFlue(output);
+			const result = await makeRunner(
+				store,
+				createFakeGithub().client,
+				flue.client,
+			).run(incident, makeContext(incident, makeAlert()), testRepo);
+			expect(result.status).toBe(output.outcome as "report_only" | "failed");
+			await store.close();
+		}
+	});
 
-		const result = await runner.run(incident, context, testRepo);
-
-		expect(result.status).toBe("pr_created");
-		expect(github.calls.addLabels.length).toBe(1);
-
-		await store.close();
+	test("rejects missing, duplicate, and malformed result data", async () => {
+		for (const data of [
+			{},
+			{ result: [FIXED_OUTPUT_BASE, FIXED_OUTPUT_BASE] },
+			{
+				result: [
+					{
+						outcome: "fixed",
+						diagnosis: "d",
+						report: "r",
+					},
+				],
+			},
+			{ result: [{ nope: true }] },
+		]) {
+			const { store, incident } = await createStoreWithIncident();
+			const flue = createFakeFlue(FIXED_OUTPUT_BASE);
+			flue.client.read = async () => ({
+				submissionId: "sub-1",
+				data: data as Record<string, unknown[]>,
+			});
+			const result = await makeRunner(
+				store,
+				createFakeGithub().client,
+				flue.client,
+			).run(incident, makeContext(incident, makeAlert()), testRepo);
+			if (result.status !== "failed") throw new Error("expected failed result");
+			expect(result.failureReason).toContain("Malformed fix-agent result");
+			await store.close();
+		}
+	});
+	test("converts admission and read failures into failed runs", async () => {
+		for (const phase of ["send", "read"] as const) {
+			const { store, incident } = await createStoreWithIncident();
+			const flue = createFakeFlue(FIXED_OUTPUT_BASE);
+			if (phase === "send") {
+				flue.client.send = async () => {
+					throw new Error("admission failed");
+				};
+			} else {
+				flue.client.read = async () => {
+					throw new Error("stream failed");
+				};
+			}
+			const result = await makeRunner(
+				store,
+				createFakeGithub().client,
+				flue.client,
+			).run(incident, makeContext(incident, makeAlert()), testRepo);
+			if (result.status !== "failed") throw new Error("expected failed result");
+			expect(result.failureReason).toContain(
+				`${phase === "send" ? "admission" : "stream"} failed`,
+			);
+			await store.close();
+		}
 	});
 });
 
-describe("FixAgentRunner - guardrail violations", () => {
-	test("deletes the branch and fails when a changed file matches a forbidden path", async () => {
+describe("FixAgentRunner guardrails and timeout", () => {
+	test("times out while admitting the agent", async () => {
 		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub({
-			compareResult: {
-				files: [
-					{
-						filename: ".github/workflows/ci.yml",
-						status: "modified",
-						additions: 1,
-						deletions: 1,
-					},
-				],
-				totalAdditions: 1,
-				totalDeletions: 1,
-			},
-		});
-		const flue = createFakeFlue(FIXED_OUTPUT_BASE);
+		const flue = createHangingFlue(false, true);
 		const runner = new FixAgentRunner({
-			flue: flue.client,
-			github: github.client,
+			flue: { baseUrl: "http://agent-host:9000" },
+			github: createFakeGithub().client,
 			store,
 			repoDefinitions: store,
-			config: makeConfig(),
-			logger: silentLogger(),
-		});
-
-		const result = await runner.run(incident, context, testRepo);
-
-		expect(result.status).toBe("failed");
-		if (result.status !== "failed") {
-			throw new Error("expected failed");
-		}
-		expect(result.failureReason).toContain("forbidden path");
-		expect(result.failureReason).toContain(".github/workflows/ci.yml");
-
-		expect(github.calls.deleteRef).toEqual([
-			`heads/paperhanger/incident-${incident.id}`,
-		]);
-		expect(github.calls.createPullRequest).toEqual([]);
-
-		await store.close();
-	});
-
-	test("deletes the branch and fails when the diff exceeds maxDiffLines", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub({
-			compareResult: {
-				files: [
-					{
-						filename: "src/index.ts",
-						status: "modified",
-						additions: 400,
-						deletions: 300,
-					},
-				],
-				totalAdditions: 400,
-				totalDeletions: 300,
-			},
-		});
-		const flue = createFakeFlue(FIXED_OUTPUT_BASE);
-		const runner = new FixAgentRunner({
-			flue: flue.client,
-			github: github.client,
-			store,
-			repoDefinitions: store,
-			config: makeConfig({ maxDiffLines: 500 }),
-			logger: silentLogger(),
-		});
-
-		const result = await runner.run(incident, context, testRepo);
-
-		expect(result.status).toBe("failed");
-		if (result.status !== "failed") {
-			throw new Error("expected failed");
-		}
-		expect(result.failureReason).toContain("700 lines");
-		expect(result.failureReason).toContain("500-line limit");
-
-		expect(github.calls.deleteRef).toEqual([
-			`heads/paperhanger/incident-${incident.id}`,
-		]);
-		expect(github.calls.createPullRequest).toEqual([]);
-
-		await store.close();
-	});
-
-	test("keeps the guardrail violation as the primary failure reason and notes the branch left behind when deleteRef throws", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub({
-			compareResult: {
-				files: [
-					{
-						filename: ".github/workflows/ci.yml",
-						status: "modified",
-						additions: 1,
-						deletions: 1,
-					},
-				],
-				totalAdditions: 1,
-				totalDeletions: 1,
-			},
-			deleteRefShouldThrow: true,
-		});
-		const flue = createFakeFlue(FIXED_OUTPUT_BASE);
-		const runner = new FixAgentRunner({
-			flue: flue.client,
-			github: github.client,
-			store,
-			repoDefinitions: store,
-			config: makeConfig(),
-			logger: silentLogger(),
-		});
-
-		const result = await runner.run(incident, context, testRepo);
-
-		expect(result.status).toBe("failed");
-		if (result.status !== "failed") {
-			throw new Error("expected failed");
-		}
-		// The original guardrail violation must still be front-and-center, not
-		// silently replaced by the raw deleteRef error.
-		expect(result.failureReason).toContain(
-			"Guardrail violation: fix touched forbidden path(s)",
-		);
-		expect(result.failureReason).toContain(".github/workflows/ci.yml");
-		expect(result.failureReason).toContain(
-			"cleanup of the rejected branch failed",
-		);
-		expect(result.failureReason).toContain(
-			`paperhanger/incident-${incident.id}`,
-		);
-		expect(result.failureReason).toContain("delete ref failed: network error");
-
-		expect(github.calls.deleteRef).toEqual([
-			`heads/paperhanger/incident-${incident.id}`,
-		]);
-		expect(github.calls.createPullRequest).toEqual([]);
-
-		await store.close();
-	});
-});
-
-describe("FixAgentRunner - maxDiffLines boundary", () => {
-	test("a diff of exactly maxDiffLines (500 of 500) passes and creates a PR", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub({
-			compareResult: {
-				files: [
-					{
-						filename: "src/index.ts",
-						status: "modified",
-						additions: 300,
-						deletions: 200,
-					},
-				],
-				totalAdditions: 300,
-				totalDeletions: 200,
-			},
-		});
-		const flue = createFakeFlue(FIXED_OUTPUT_BASE);
-		const runner = new FixAgentRunner({
-			flue: flue.client,
-			github: github.client,
-			store,
-			repoDefinitions: store,
-			config: makeConfig({ maxDiffLines: 500 }),
-			logger: silentLogger(),
-		});
-
-		const result = await runner.run(incident, context, testRepo);
-
-		expect(result.status).toBe("pr_created");
-		expect(github.calls.deleteRef).toEqual([]);
-
-		await store.close();
-	});
-
-	test("a diff of maxDiffLines + 1 (501 of 500) fails as a guardrail violation", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub({
-			compareResult: {
-				files: [
-					{
-						filename: "src/index.ts",
-						status: "modified",
-						additions: 300,
-						deletions: 201,
-					},
-				],
-				totalAdditions: 300,
-				totalDeletions: 201,
-			},
-		});
-		const flue = createFakeFlue(FIXED_OUTPUT_BASE);
-		const runner = new FixAgentRunner({
-			flue: flue.client,
-			github: github.client,
-			store,
-			repoDefinitions: store,
-			config: makeConfig({ maxDiffLines: 500 }),
-			logger: silentLogger(),
-		});
-
-		const result = await runner.run(incident, context, testRepo);
-
-		expect(result.status).toBe("failed");
-		if (result.status !== "failed") {
-			throw new Error("expected failed");
-		}
-		expect(result.failureReason).toContain("501 lines");
-		expect(result.failureReason).toContain("500-line limit");
-		expect(github.calls.deleteRef).toEqual([
-			`heads/paperhanger/incident-${incident.id}`,
-		]);
-
-		await store.close();
-	});
-});
-
-describe("FixAgentRunner - report_only and failed passthrough", () => {
-	test("passes through a report_only outcome without touching GitHub compare/PR APIs", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub();
-		const flue = createFakeFlue({
-			outcome: "report_only",
-			diagnosis:
-				"Root cause is a saturated connection pool in the DB, not the code.",
-			report:
-				"## Analysis\nThe DB connection pool is undersized for current load.",
-		});
-		const runner = new FixAgentRunner({
-			flue: flue.client,
-			github: github.client,
-			store,
-			repoDefinitions: store,
-			config: makeConfig(),
-			logger: silentLogger(),
-		});
-
-		const result = await runner.run(incident, context, testRepo);
-
-		expect(result).toEqual({
-			status: "report_only",
-			diagnosis:
-				"Root cause is a saturated connection pool in the DB, not the code.",
-			report:
-				"## Analysis\nThe DB connection pool is undersized for current load.",
-		});
-		expect(github.calls.compareCommits).toEqual([]);
-		expect(github.calls.createPullRequest).toEqual([]);
-
-		const stored = await store.getIncident(incident.id);
-		expect(stored?.status).toBe("diagnosing");
-
-		await store.close();
-	});
-
-	test("passes through a failed outcome reported directly by the agent", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub();
-		const flue = createFakeFlue({
-			outcome: "failed",
-			diagnosis: "Attempted three fixes; tests kept failing.",
-			report:
-				"## Attempts\nThree fix attempts, all broke the integration test suite.",
-			failureReason: "Tests failed after 3 fix attempts.",
-		});
-		const runner = new FixAgentRunner({
-			flue: flue.client,
-			github: github.client,
-			store,
-			repoDefinitions: store,
-			config: makeConfig(),
-			logger: silentLogger(),
-		});
-
-		const result = await runner.run(incident, context, testRepo);
-
-		expect(result).toEqual({
-			status: "failed",
-			failureReason: "Tests failed after 3 fix attempts.",
-			diagnosis: "Attempted three fixes; tests kept failing.",
-			report:
-				"## Attempts\nThree fix attempts, all broke the integration test suite.",
-		});
-
-		await store.close();
-	});
-});
-
-describe("FixAgentRunner - malformed workflow result", () => {
-	test("fails when outcome is `fixed` but no `fix` block is present", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub();
-		const flue = createFakeFlue({
-			outcome: "fixed",
-			diagnosis: "diagnosis text",
-			report: "report text",
-		});
-		const runner = new FixAgentRunner({
-			flue: flue.client,
-			github: github.client,
-			store,
-			repoDefinitions: store,
-			config: makeConfig(),
-			logger: silentLogger(),
-		});
-
-		const result = await runner.run(incident, context, testRepo);
-
-		expect(result.status).toBe("failed");
-		if (result.status !== "failed") {
-			throw new Error("expected failed");
-		}
-		expect(result.failureReason).toContain(
-			"Malformed fix-agent workflow result",
-		);
-
-		await store.close();
-	});
-
-	test("fails when the result is missing required fields entirely", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub();
-		const flue = createFakeFlue({ foo: "bar" });
-		const runner = new FixAgentRunner({
-			flue: flue.client,
-			github: github.client,
-			store,
-			repoDefinitions: store,
-			config: makeConfig(),
-			logger: silentLogger(),
-		});
-
-		const result = await runner.run(incident, context, testRepo);
-
-		expect(result.status).toBe("failed");
-		if (result.status !== "failed") {
-			throw new Error("expected failed");
-		}
-		expect(result.failureReason).toContain(
-			"Malformed fix-agent workflow result",
-		);
-
-		await store.close();
-	});
-});
-
-describe("FixAgentRunner - timeout", () => {
-	test("fails with an honest, non-terminal-sounding message when the workflow invocation is aborted on timeout", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub();
-		const flue = createHangingFlue();
-		const runner = new FixAgentRunner({
-			flue,
-			github: github.client,
-			store,
-			repoDefinitions: store,
-			// 0.0005 minutes = 30ms; keeps the test fast without changing the
-			// production default anywhere.
 			config: makeConfig({ timeoutMinutes: 0.0005 }),
 			logger: silentLogger(),
+			createFlueClient: () => flue.client,
 		});
-
-		const result = await runner.run(incident, context, testRepo);
-
+		const result = await runner.run(
+			incident,
+			makeContext(incident, makeAlert()),
+			testRepo,
+		);
+		if (result.status !== "failed") throw new Error("expected failed result");
+		expect(result.failureReason).toContain("admission request aborted");
+		expect(flue.calls.read).toBe(0);
+		expect(flue.calls.abort).toBe(0);
+		await store.close();
+	});
+	test("deletes a forbidden branch and preserves the guardrail failure", async () => {
+		const { store, incident } = await createStoreWithIncident();
+		const github = createFakeGithub({
+			compareResult: {
+				files: [
+					{
+						filename: ".github/workflows/ci.yml",
+						status: "modified",
+						additions: 1,
+						deletions: 1,
+					},
+				],
+				totalAdditions: 1,
+				totalDeletions: 1,
+			},
+		});
+		const flue = createFakeFlue(FIXED_OUTPUT_BASE);
+		const result = await makeRunner(store, github.client, flue.client).run(
+			incident,
+			makeContext(incident, makeAlert()),
+			testRepo,
+		);
 		expect(result.status).toBe("failed");
-		if (result.status !== "failed") {
-			throw new Error("expected failed");
-		}
-		// The message must not claim a clean, contained failure: paperhanger
-		// only gave up on *waiting*, it did not (and per @flue/sdk 1.0.0-beta.9,
-		// could not) cancel the underlying workflow run.
-		expect(result.failureReason).toContain("Timed out after waiting");
-		expect(result.failureReason).toContain(
-			"may still be executing the workflow",
-		);
-		expect(result.failureReason).toContain(
-			"no workflow-level cancellation API",
-		);
-
-		await store.close();
-	});
-});
-
-describe("FixAgentRunner - flue client provider", () => {
-	test("accepts a pre-built client directly (baseUrl form is exercised via the runner's lazy factory)", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub();
-		const flue = createFakeFlue({
-			outcome: "report_only",
-			diagnosis: "d",
-			report: "r",
-		});
-		const runner = new FixAgentRunner({
-			flue: flue.client,
-			github: github.client,
-			store,
-			repoDefinitions: store,
-			config: makeConfig(),
-			logger: silentLogger(),
-		});
-
-		const result = await runner.run(incident, context, testRepo);
-		expect(result.status).toBe("report_only");
-
-		await store.close();
-	});
-
-	test("the { baseUrl } provider form lazily constructs a client via the injected factory with the right base URL", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub();
-		const flue = createFakeFlue({
-			outcome: "report_only",
-			diagnosis: "d",
-			report: "r",
-		});
-		const factoryCalls: { baseUrl: string }[] = [];
-		const fakeCreateFlueClient: typeof createFlueClient = ((options: {
-			baseUrl: string;
-		}) => {
-			factoryCalls.push({ baseUrl: options.baseUrl });
-			return flue.client as unknown as ReturnType<typeof createFlueClient>;
-		}) as typeof createFlueClient;
-
-		const runner = new FixAgentRunner({
-			flue: { baseUrl: "http://agent-host.internal:9000" },
-			github: github.client,
-			store,
-			repoDefinitions: store,
-			config: makeConfig(),
-			logger: silentLogger(),
-			createFlueClient: fakeCreateFlueClient,
-		});
-
-		const result = await runner.run(incident, context, testRepo);
-
-		expect(result.status).toBe("report_only");
-		expect(factoryCalls).toEqual([
-			{ baseUrl: "http://agent-host.internal:9000" },
+		if (result.status !== "failed") throw new Error("expected failed result");
+		expect(result.failureReason).toContain("forbidden path");
+		expect(github.calls.deleteRef).toEqual([
+			`heads/paperhanger/incident-${incident.id}`,
 		]);
-		expect(flue.invokeCalls.length).toBe(1);
+		await store.close();
+	});
 
+	test("aborts once after a local timeout and records the submission id", async () => {
+		const { store, incident } = await createStoreWithIncident();
+		const flue = createHangingFlue();
+		const { logger, lines } = capturingLogger();
+		const runner = new FixAgentRunner({
+			flue: { baseUrl: "http://agent-host:9000" },
+			github: createFakeGithub().client,
+			store,
+			repoDefinitions: store,
+			config: makeConfig({ timeoutMinutes: 0.0005 }),
+			logger,
+			createFlueClient: () => flue.client,
+		});
+		const result = await runner.run(
+			incident,
+			makeContext(incident, makeAlert()),
+			testRepo,
+		);
+		expect(result.status).toBe("failed");
+		if (result.status !== "failed") throw new Error("expected failed result");
+		expect(result.failureReason).toContain("abort requested");
+		expect(flue.calls.abort).toBe(1);
+		expect(
+			lines.some((line) => line.includes('"submissionId":"sub-timeout"')),
+		).toBe(true);
+		await store.close();
+	});
+
+	test("reports that execution may continue when abort fails", async () => {
+		const { store, incident } = await createStoreWithIncident();
+		const flue = createHangingFlue(true);
+		const runner = new FixAgentRunner({
+			flue: { baseUrl: "http://agent-host:9000" },
+			github: createFakeGithub().client,
+			store,
+			repoDefinitions: store,
+			config: makeConfig({ timeoutMinutes: 0.0005 }),
+			logger: silentLogger(),
+			createFlueClient: () => flue.client,
+		});
+		const result = await runner.run(
+			incident,
+			makeContext(incident, makeAlert()),
+			testRepo,
+		);
+		if (result.status !== "failed") throw new Error("expected failed result");
+		expect(result.failureReason).toContain("execution may continue");
 		await store.close();
 	});
 });
 
-describe("FixAgentRunner - agent.invoke_workflow span", () => {
-	function testTracerProvider() {
+describe("FixAgentRunner instrumentation", () => {
+	test("marks the invoke_workflow span ERROR when client creation fails", async () => {
 		const exporter = new InMemorySpanExporter();
 		const provider = new BasicTracerProvider({
 			spanProcessors: [new SimpleSpanProcessor(exporter)],
 		});
-		return { tracer: provider.getTracer("test"), exporter };
-	}
-
-	test("records a CLIENT span with incident/timeout attributes and no ERROR status on a successful invocation", async () => {
 		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub();
-		const flue = createFakeFlue({
-			outcome: "report_only",
-			diagnosis: "d",
-			report: "r",
-		});
-		const { tracer, exporter } = testTracerProvider();
 		const runner = new FixAgentRunner({
-			flue: flue.client,
-			github: github.client,
+			flue: { baseUrl: "invalid-url" },
+			github: createFakeGithub().client,
 			store,
 			repoDefinitions: store,
-			config: makeConfig({ timeoutMinutes: 30 }),
+			config: makeConfig(),
 			logger: silentLogger(),
-			tracer,
+			tracer: provider.getTracer("test"),
+			createFlueClient: () => {
+				throw new Error("Invalid URL");
+			},
 		});
-
-		const result = await runner.run(incident, context, testRepo);
-		expect(result.status).toBe("report_only");
-
-		const spans = exporter
-			.getFinishedSpans()
-			.filter((s) => s.name === "agent.invoke_workflow");
-		expect(spans.length).toBe(1);
-		const span = spans[0];
+		const result = await runner.run(
+			incident,
+			makeContext(incident, makeAlert()),
+			testRepo,
+		);
+		expect(result.status).toBe("failed");
+		const span = exporter.getFinishedSpans()[0];
+		expect(span?.name).toBe("agent.invoke_workflow");
 		expect(span?.kind).toBe(SpanKind.CLIENT);
-		expect(span?.attributes["paperhanger.incident.id"]).toBe(incident.id);
-		expect(span?.attributes["paperhanger.agent.timeout_minutes"]).toBe(30);
-		expect(span?.status.code).not.toBe(SpanStatusCode.ERROR);
-		expect(span?.attributes["paperhanger.agent.ok"]).toBeUndefined();
-
-		await store.close();
-	});
-
-	test("sets ERROR status from the RESOLVED value (not a thrown exception) with failureReason as the message when the workflow wait times out", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub();
-		const flue = createHangingFlue();
-		const { tracer, exporter } = testTracerProvider();
-		const runner = new FixAgentRunner({
-			flue,
-			github: github.client,
-			store,
-			repoDefinitions: store,
-			// 0.0005 minutes = 30ms; keeps the test fast.
-			config: makeConfig({ timeoutMinutes: 0.0005 }),
-			logger: silentLogger(),
-			tracer,
-		});
-
-		const result = await runner.run(incident, context, testRepo);
-		expect(result.status).toBe("failed");
-
-		const spans = exporter
-			.getFinishedSpans()
-			.filter((s) => s.name === "agent.invoke_workflow");
-		expect(spans.length).toBe(1);
-		const span = spans[0];
 		expect(span?.status.code).toBe(SpanStatusCode.ERROR);
-		expect(span?.attributes["paperhanger.agent.ok"]).toBe(false);
-		if (result.status !== "failed") {
-			throw new Error("expected failed");
-		}
-		expect(span?.status.message).toBe(result.failureReason);
-		// invokeWorkflow never throws: no exception event should be recorded,
-		// only a status set from the resolved { ok: false } value.
-		expect(span?.events.some((e) => e.name === "exception")).toBe(false);
-
-		await store.close();
-	});
-
-	test("the fix_agent.workflow_wait_timed_out warn log correlates (traceId/spanId) with the finished agent.invoke_workflow span", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const incidentContext = makeContext(incident, makeAlert());
-		const github = createFakeGithub();
-		const flue = createHangingFlue();
-		const { tracer, exporter } = testTracerProvider();
-		const { logger, lines } = capturingLogger();
-		const runner = new FixAgentRunner({
-			flue,
-			github: github.client,
-			store,
-			repoDefinitions: store,
-			// 0.0005 minutes = 30ms; keeps the test fast.
-			config: makeConfig({ timeoutMinutes: 0.0005 }),
-			logger,
-			tracer,
-		});
-
-		const result = await runner.run(incident, incidentContext, testRepo);
-		expect(result.status).toBe("failed");
-
-		const spans = exporter
-			.getFinishedSpans()
-			.filter((s) => s.name === "agent.invoke_workflow");
-		expect(spans.length).toBe(1);
-		const span = spans[0];
-		const spanContext = span?.spanContext();
-
-		const entries = lines.map(
-			(line) => JSON.parse(line) as Record<string, unknown>,
-		);
-		const warnEntry = entries.find(
-			(entry) => entry.msg === "fix_agent.workflow_wait_timed_out",
-		);
-		expect(warnEntry).toBeDefined();
-		expect(warnEntry?.traceId).toBe(spanContext?.traceId);
-		expect(warnEntry?.spanId).toBe(spanContext?.spanId);
-
-		await store.close();
-	});
-
-	test("a throwing client factory resolves { ok: false, failureReason } (never-throw contract) and the span gets ERROR status instead of ending UNSET", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub();
-		const { tracer, exporter } = testTracerProvider();
-		const throwingCreateFlueClient: typeof createFlueClient = (() => {
-			throw new Error("Invalid URL: 127.0.0.1:8700");
-		}) as typeof createFlueClient;
-		const runner = new FixAgentRunner({
-			flue: { baseUrl: "127.0.0.1:8700" },
-			github: github.client,
-			store,
-			repoDefinitions: store,
-			config: makeConfig(),
-			logger: silentLogger(),
-			tracer,
-			createFlueClient: throwingCreateFlueClient,
-		});
-
-		const result = await runner.run(incident, context, testRepo);
-
-		expect(result.status).toBe("failed");
-		if (result.status !== "failed") {
-			throw new Error("expected failed");
-		}
-		expect(result.failureReason).toContain("Invalid URL: 127.0.0.1:8700");
-
-		const spans = exporter
-			.getFinishedSpans()
-			.filter((s) => s.name === "agent.invoke_workflow");
-		expect(spans.length).toBe(1);
-		const span = spans[0];
-		expect(span?.status.code).toBe(SpanStatusCode.ERROR);
-		expect(span?.status.message).toBe(result.failureReason);
-		expect(span?.attributes["paperhanger.agent.ok"]).toBe(false);
-
-		await store.close();
-	});
-
-	test("falls back to a working no-op tracer when none is injected", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub();
-		const flue = createFakeFlue(FIXED_OUTPUT_BASE);
-		const runner = new FixAgentRunner({
-			flue: flue.client,
-			github: github.client,
-			store,
-			repoDefinitions: store,
-			config: makeConfig(),
-			logger: silentLogger(),
-		});
-
-		const result = await runner.run(incident, context, testRepo);
-		expect(result.status).toBe("pr_created");
-
-		await store.close();
-	});
-});
-
-describe("FixAgentRunner - repo definition lookup", () => {
-	test("copies common setup scripts and matching per-repo overrides into the workflow input", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub();
-		const flue = createFakeFlue({
-			outcome: "report_only",
-			diagnosis: "d",
-			report: "r",
-		});
-		await store.createRepoDefinition({
-			owner: testRepo.owner,
-			repo: testRepo.repo,
-			setupScript: "bun install",
-			testCommand: "bun test",
-		});
-		await store.createCommonSetupScript({
-			triggerFile: "bun.lock",
-			script: "bun install --frozen-lockfile",
-		});
-		const runner = new FixAgentRunner({
-			flue: flue.client,
-			github: github.client,
-			store,
-			repoDefinitions: store,
-			commonSetupScripts: store,
-			config: makeConfig(),
-			logger: silentLogger(),
-		});
-
-		const result = await runner.run(incident, context, testRepo);
-		expect(result.status).toBe("report_only");
-
-		const input = flue.invokeCalls[0]?.input as {
-			repo: {
-				setupScript?: string;
-				setupScripts: Array<{ triggerFile: string; script: string }>;
-				testCommand?: string;
-			};
-		};
-		expect(input.repo.setupScript).toBe("bun install");
-		expect(input.repo.setupScripts).toEqual([
-			{
-				triggerFile: "bun.lock",
-				script: "bun install --frozen-lockfile",
-			},
-		]);
-		expect(input.repo.testCommand).toBe("bun test");
-
-		await store.close();
-	});
-
-	test("ignores a matching but disabled repo definition", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub();
-		const flue = createFakeFlue({
-			outcome: "report_only",
-			diagnosis: "d",
-			report: "r",
-		});
-		await store.createRepoDefinition({
-			owner: testRepo.owner,
-			repo: testRepo.repo,
-			setupScript: "bun install",
-			testCommand: "bun test",
-			enabled: false,
-		});
-		const runner = new FixAgentRunner({
-			flue: flue.client,
-			github: github.client,
-			store,
-			repoDefinitions: store,
-			config: makeConfig(),
-			logger: silentLogger(),
-		});
-
-		const result = await runner.run(incident, context, testRepo);
-		expect(result.status).toBe("report_only");
-
-		const input = flue.invokeCalls[0]?.input as {
-			repo: { setupScript?: string; testCommand?: string };
-		};
-		expect(input.repo.setupScript).toBeUndefined();
-		expect(input.repo.testCommand).toBeUndefined();
-
-		await store.close();
-	});
-
-	test("proceeds without overrides (and without failing the run) when no definition matches", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub();
-		const flue = createFakeFlue({
-			outcome: "report_only",
-			diagnosis: "d",
-			report: "r",
-		});
-		const runner = new FixAgentRunner({
-			flue: flue.client,
-			github: github.client,
-			store,
-			repoDefinitions: store,
-			config: makeConfig(),
-			logger: silentLogger(),
-		});
-
-		const result = await runner.run(incident, context, testRepo);
-		expect(result.status).toBe("report_only");
-
-		const input = flue.invokeCalls[0]?.input as {
-			repo: { setupScript?: string; testCommand?: string };
-		};
-		expect(input.repo.setupScript).toBeUndefined();
-		expect(input.repo.testCommand).toBeUndefined();
-
-		await store.close();
-	});
-
-	test("logs and proceeds without overrides when the repo definition lookup throws", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub();
-		const flue = createFakeFlue({
-			outcome: "report_only",
-			diagnosis: "d",
-			report: "r",
-		});
-		const { logger, lines } = capturingLogger();
-		const brokenRepoDefinitions: Pick<
-			RepoDefinitionStore,
-			"findRepoDefinitionByRepo"
-		> = {
-			async findRepoDefinitionByRepo() {
-				throw new Error("repo_definitions table is locked");
-			},
-		};
-		const runner = new FixAgentRunner({
-			flue: flue.client,
-			github: github.client,
-			store,
-			repoDefinitions: brokenRepoDefinitions,
-			config: makeConfig(),
-			logger,
-		});
-
-		const result = await runner.run(incident, context, testRepo);
-		expect(result.status).toBe("report_only");
-
-		const input = flue.invokeCalls[0]?.input as {
-			repo: { setupScript?: string; testCommand?: string };
-		};
-		expect(input.repo.setupScript).toBeUndefined();
-		expect(input.repo.testCommand).toBeUndefined();
-
-		const entries = lines.map(
-			(line) => JSON.parse(line) as Record<string, unknown>,
-		);
-		const warnEntry = entries.find(
-			(entry) => entry.msg === "fix_agent.repo_definition_lookup_failed",
-		);
-		expect(warnEntry).toBeDefined();
-		expect(warnEntry?.owner).toBe(testRepo.owner);
-		expect(warnEntry?.repo).toBe(testRepo.repo);
-		expect(warnEntry?.error).toBe("repo_definitions table is locked");
-
-		await store.close();
-	});
-
-	test("logs and proceeds with no common scripts when their lookup throws", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub();
-		const flue = createFakeFlue({
-			outcome: "report_only",
-			diagnosis: "d",
-			report: "r",
-		});
-		const { logger, lines } = capturingLogger();
-		const runner = new FixAgentRunner({
-			flue: flue.client,
-			github: github.client,
-			store,
-			repoDefinitions: store,
-			commonSetupScripts: {
-				async listCommonSetupScripts() {
-					throw new Error("common_setup_scripts table is locked");
-				},
-			},
-			config: makeConfig(),
-			logger,
-		});
-
-		expect((await runner.run(incident, context, testRepo)).status).toBe(
-			"report_only",
-		);
-		const input = flue.invokeCalls[0]?.input as {
-			repo: { setupScripts: unknown[] };
-		};
-		expect(input.repo.setupScripts).toEqual([]);
-
-		const entries = lines.map(
-			(line) => JSON.parse(line) as Record<string, unknown>,
-		);
-		const warning = entries.find(
-			(entry) => entry.msg === "fix_agent.common_setup_scripts_lookup_failed",
-		);
-		expect(warning?.incidentId).toBe(incident.id);
-		expect(warning?.error).toBe("common_setup_scripts table is locked");
-		await store.close();
-	});
-
-	test("looks up the definition using the resolved repo's owner/repo", async () => {
-		const { store, incident } = await createStoreWithIncident();
-		const context = makeContext(incident, makeAlert());
-		const github = createFakeGithub();
-		const flue = createFakeFlue({
-			outcome: "report_only",
-			diagnosis: "d",
-			report: "r",
-		});
-		const lookupCalls: { owner: string; repo: string }[] = [];
-		const spyingRepoDefinitions: Pick<
-			RepoDefinitionStore,
-			"findRepoDefinitionByRepo"
-		> = {
-			async findRepoDefinitionByRepo(owner, repo) {
-				lookupCalls.push({ owner, repo });
-				return undefined;
-			},
-		};
-		const runner = new FixAgentRunner({
-			flue: flue.client,
-			github: github.client,
-			store,
-			repoDefinitions: spyingRepoDefinitions,
-			config: makeConfig(),
-			logger: silentLogger(),
-		});
-
-		await runner.run(incident, context, testRepo);
-
-		expect(lookupCalls).toEqual([
-			{ owner: testRepo.owner, repo: testRepo.repo },
-		]);
-
+		await provider.shutdown();
 		await store.close();
 	});
 });

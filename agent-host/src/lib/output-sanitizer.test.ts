@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import type { WorkflowInput, WorkflowOutput } from "../contract.ts";
+import type { FixIncidentInput, FixIncidentOutput } from "../contract.ts";
 import { collectSecrets, sanitizeOutput } from "./output-sanitizer";
 
-function baseInput(overrides: Partial<WorkflowInput> = {}): WorkflowInput {
+function baseInput(
+	overrides: Partial<FixIncidentInput> = {},
+): FixIncidentInput {
 	return {
 		incidentId: "incident-1",
 		contextMarkdown: "# Incident\nSomething broke.",
@@ -70,7 +72,7 @@ describe("sanitizeOutput", () => {
 	const secrets = ["ghs_abc123", "user:pw"];
 
 	test("redacts the clone token from diagnosis and report", () => {
-		const output: WorkflowOutput = {
+		const output: FixIncidentOutput = {
 			outcome: "report_only",
 			diagnosis: "Found token ghs_abc123 in a log line.",
 			report: "Report mentions ghs_abc123 too.",
@@ -82,7 +84,7 @@ describe("sanitizeOutput", () => {
 	});
 
 	test("redacts a configured GreptimeDB auth value from the report", () => {
-		const output: WorkflowOutput = {
+		const output: FixIncidentOutput = {
 			outcome: "report_only",
 			diagnosis: "Root cause analysis.",
 			report: "query_telemetry returned auth user:pw in one row.",
@@ -92,7 +94,7 @@ describe("sanitizeOutput", () => {
 	});
 
 	test("redacts failureReason when present", () => {
-		const output: WorkflowOutput = {
+		const output: FixIncidentOutput = {
 			outcome: "failed",
 			diagnosis: "d",
 			report: "r",
@@ -103,7 +105,7 @@ describe("sanitizeOutput", () => {
 	});
 
 	test("leaves failureReason as undefined when absent", () => {
-		const output: WorkflowOutput = {
+		const output: FixIncidentOutput = {
 			outcome: "report_only",
 			diagnosis: "d",
 			report: "r",
@@ -113,7 +115,7 @@ describe("sanitizeOutput", () => {
 	});
 
 	test("redacts fix.commitMessage when a fix block is present", () => {
-		const output: WorkflowOutput = {
+		const output: FixIncidentOutput = {
 			outcome: "fixed",
 			diagnosis: "d",
 			report: "r",
@@ -130,7 +132,7 @@ describe("sanitizeOutput", () => {
 	});
 
 	test("is a no-op when no secrets are configured", () => {
-		const output: WorkflowOutput = {
+		const output: FixIncidentOutput = {
 			outcome: "report_only",
 			diagnosis: "clean diagnosis",
 			report: "clean report",

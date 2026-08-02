@@ -28,7 +28,7 @@
 		"typescript": "^5.0.0 || ^6.0.0 || ^7.0.0"
 	},
 	"dependencies": {
-		"@flue/sdk": "1.0.0-beta.9",
+		"@flue/sdk": "2.0.1",
 		"@opentelemetry/api": "^1.9.1",
 		"@opentelemetry/context-async-hooks": "^2.9.0",
 		"@opentelemetry/exporter-trace-otlp-proto": "^0.220.0",

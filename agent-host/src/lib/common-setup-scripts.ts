@@ -3,10 +3,10 @@ export interface ConditionalSetupScript {
 	script: string;
 }
 
-interface ShellLike {
-	shell(
+interface SandboxLike {
+	exec(
 		command: string,
-		options: { timeoutMs: number },
+		options: { timeoutMs: number; signal?: AbortSignal },
 	): Promise<{ exitCode: number }>;
 }
 
@@ -18,15 +18,16 @@ function shellQuote(value: string): string {
 
 /** Evaluates trigger files and runs every matching script in list order. */
 export async function runConditionalSetupScripts(
-	harness: ShellLike,
+	harness: SandboxLike,
 	setupScripts: readonly ConditionalSetupScript[],
 	conditionTimeoutMs: number,
 	run: (script: string, label: string) => Promise<SetupResult>,
+	signal?: AbortSignal,
 ): Promise<SetupResult> {
 	for (const setupScript of setupScripts) {
-		const condition = await harness.shell(
+		const condition = await harness.exec(
 			`if test -f ${shellQuote(setupScript.triggerFile)}; then exit 0; else exit 42; fi`,
-			{ timeoutMs: conditionTimeoutMs },
+			{ timeoutMs: conditionTimeoutMs, signal },
 		);
 		if (condition.exitCode === 42) continue;
 		if (condition.exitCode !== 0) {

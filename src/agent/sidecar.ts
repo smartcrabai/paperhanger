@@ -7,8 +7,8 @@
  *
  * - **External**: a URL is configured. `start()`/`stop()` are no-ops; `baseUrl`
  *   just exposes the configured URL. Nothing is spawned.
- * - **Internal** (default): spawns `node <serverPath>` (the `flue build
- *   --target node` output), waits for its `/healthz` route to respond, and
+ * - **Internal** (default): spawns `node <serverPath>` (the Vite-generated
+ *   Node server output), waits for its `/healthz` route to respond, and
  *   restarts it with capped exponential backoff if it exits before `stop()`
  *   is called. `start()` rejects if the *initial* spawn does not become ready
  *   within `readinessTimeoutMs`, but the crash-restart supervision registered
@@ -92,7 +92,7 @@ const defaultCancelScheduleFn: CancelScheduleFn = (handle) =>
 export interface AgentHostSidecarOptions {
 	config: AgentHostSidecarConfig;
 	logger: Logger;
-	/** Path to the built agent-host Node server entrypoint (`flue build --target node` output). */
+	/** Path to the built agent-host Node server entrypoint (`dist/server.mjs`). */
 	serverPath?: string;
 	/**
 	 * Path (or bare name) of the Node binary used to run the server. Defaults
