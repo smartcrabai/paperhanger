@@ -19,6 +19,8 @@ import type {
 	UpdateCommonSetupScriptInput,
 	UpdateRepoDefinitionInput,
 } from "../core/types";
+import type { ResolvedRepo } from "../repo/resolver";
+import type { IncidentContext } from "../telemetry/types";
 import {
 	CommonSetupScriptNotFoundError,
 	DuplicateOpenIncidentError,
@@ -28,9 +30,11 @@ import {
 	type CommonSystemPromptStore,
 	type CreateAgentRunInput,
 	type CreateIncidentInput,
+	type IncidentCheckpoint,
 	type IncidentEventRecord,
 	type IncidentStore,
 	type RepoDefinitionStore,
+	type SaveIncidentCheckpointInput,
 	type UpdateAgentRunInput,
 	type UpdateIncidentInput,
 } from "./types";
@@ -43,7 +47,7 @@ import {
  * method (and a version check in `init()`) for future schema changes instead
  * of mutating an already-shipped migration in place.
  */
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 /** Primary key pinning `common_system_prompt` to a single row (see `migrateV5`). */
 const COMMON_SYSTEM_PROMPT_ID = "default";
@@ -141,6 +145,14 @@ interface CommonSystemPromptRow {
 	updated_at: string;
 }
 
+interface IncidentCheckpointRow {
+	incident_id: string;
+	incident_context_json: string;
+	resolved_repo_json: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
 function rowToIncident(row: IncidentRow): Incident {
 	return {
 		id: row.id,
@@ -190,6 +202,20 @@ function rowToCommonSystemPrompt(
 ): CommonSystemPrompt {
 	return {
 		prompt: row.prompt,
+		createdAt: row.created_at,
+		updatedAt: row.updated_at,
+	};
+}
+
+function rowToIncidentCheckpoint(
+	row: IncidentCheckpointRow,
+): IncidentCheckpoint {
+	return {
+		incidentId: row.incident_id,
+		incidentContext: JSON.parse(row.incident_context_json) as IncidentContext,
+		resolvedRepo: row.resolved_repo_json
+			? (JSON.parse(row.resolved_repo_json) as ResolvedRepo)
+			: undefined,
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
 	};
@@ -282,6 +308,11 @@ export class SqliteIncidentStore
 		if (version < 6) {
 			this.migrateV6();
 			version = 6;
+			this.setSchemaVersion(version);
+		}
+		if (version < 7) {
+			this.migrateV7();
+			version = 7;
 			this.setSchemaVersion(version);
 		}
 		if (version !== SCHEMA_VERSION) {
@@ -418,6 +449,29 @@ export class SqliteIncidentStore
 	private migrateV6(): void {
 		this.db.run(`
 			ALTER TABLE repo_definitions ADD COLUMN system_prompt TEXT;
+		`);
+	}
+
+	/**
+	 * Adds `incident_checkpoints`, one row per incident holding enough state
+	 * (`IncidentPipeline`'s built `IncidentContext` and, once resolved, the
+	 * `ResolvedRepo`) to resume that incident from its last completed stage
+	 * after a crash/restart, instead of re-running telemetry collection and
+	 * repo resolution (docs/spec.md section 3.2, 3.10). `incident_id` is the
+	 * primary key -- exactly one checkpoint per incident, upserted in place --
+	 * rather than a separate surrogate id, mirroring `common_system_prompt`'s
+	 * single-row-per-key shape.
+	 */
+	private migrateV7(): void {
+		this.db.run(`
+			CREATE TABLE IF NOT EXISTS incident_checkpoints (
+				incident_id TEXT PRIMARY KEY,
+				incident_context_json TEXT NOT NULL,
+				resolved_repo_json TEXT,
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL,
+				FOREIGN KEY (incident_id) REFERENCES incidents (id)
+			);
 		`);
 	}
 
@@ -644,6 +698,60 @@ export class SqliteIncidentStore
 			[next.finishedAt ?? null, next.outcome ?? null, next.costUsd ?? null, id],
 		);
 		return next;
+	}
+
+	async saveIncidentCheckpoint(
+		incidentId: string,
+		input: SaveIncidentCheckpointInput,
+	): Promise<IncidentCheckpoint> {
+		const now = this.now().toISOString();
+		// No special-cased error translation on a foreign key violation here,
+		// matching `appendEvent`/`createAgentRun`: the raw `SQLiteError`
+		// propagates as-is (see docs/architecture.md "Errors").
+		const row = this.db
+			.query<
+				IncidentCheckpointRow,
+				[string, string, string | null, string, string]
+			>(
+				`INSERT INTO incident_checkpoints
+					(incident_id, incident_context_json, resolved_repo_json, created_at, updated_at)
+				VALUES (?, ?, ?, ?, ?)
+				ON CONFLICT(incident_id) DO UPDATE SET
+					incident_context_json = excluded.incident_context_json,
+					resolved_repo_json = excluded.resolved_repo_json,
+					updated_at = excluded.updated_at
+				RETURNING *;`,
+			)
+			.get(
+				incidentId,
+				JSON.stringify(input.incidentContext),
+				input.resolvedRepo ? JSON.stringify(input.resolvedRepo) : null,
+				now,
+				now,
+			);
+		if (!row) {
+			throw new Error(
+				`Failed to read back upserted incident checkpoint for ${incidentId}`,
+			);
+		}
+		return rowToIncidentCheckpoint(row);
+	}
+
+	async getIncidentCheckpoint(
+		incidentId: string,
+	): Promise<IncidentCheckpoint | undefined> {
+		const row = this.db
+			.query<IncidentCheckpointRow, [string]>(
+				"SELECT * FROM incident_checkpoints WHERE incident_id = ?;",
+			)
+			.get(incidentId);
+		return row ? rowToIncidentCheckpoint(row) : undefined;
+	}
+
+	async deleteIncidentCheckpoint(incidentId: string): Promise<void> {
+		this.db.run("DELETE FROM incident_checkpoints WHERE incident_id = ?;", [
+			incidentId,
+		]);
 	}
 
 	async createRepoDefinition(

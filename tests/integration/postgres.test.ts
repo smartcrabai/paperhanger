@@ -104,7 +104,7 @@ describe.skipIf(!dockerAvailable)(
 			// Reuse the same container/connection across the whole suite (starting
 			// a fresh container per test would be far too slow); reset table
 			// contents instead so each test sees an empty store.
-			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incidents, repo_definitions, common_setup_scripts, common_system_prompt RESTART IDENTITY CASCADE`;
+			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incident_checkpoints, incidents, repo_definitions, common_setup_scripts, common_system_prompt RESTART IDENTITY CASCADE`;
 			currentTime = new Date();
 			return {
 				store: sharedStore,
@@ -115,7 +115,7 @@ describe.skipIf(!dockerAvailable)(
 		}
 
 		async function makeRepoDefinitionStore(): Promise<RepoDefinitionStoreHarness> {
-			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incidents, repo_definitions, common_setup_scripts, common_system_prompt RESTART IDENTITY CASCADE`;
+			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incident_checkpoints, incidents, repo_definitions, common_setup_scripts, common_system_prompt RESTART IDENTITY CASCADE`;
 			currentTime = new Date();
 			return {
 				store: sharedStore,
@@ -126,7 +126,7 @@ describe.skipIf(!dockerAvailable)(
 		}
 
 		async function makeCommonSetupScriptStore(): Promise<CommonSetupScriptStoreHarness> {
-			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incidents, repo_definitions, common_setup_scripts, common_system_prompt RESTART IDENTITY CASCADE`;
+			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incident_checkpoints, incidents, repo_definitions, common_setup_scripts, common_system_prompt RESTART IDENTITY CASCADE`;
 			currentTime = new Date();
 			return {
 				store: sharedStore,
@@ -137,7 +137,7 @@ describe.skipIf(!dockerAvailable)(
 		}
 
 		async function makeCommonSystemPromptStore(): Promise<CommonSystemPromptStoreHarness> {
-			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incidents, repo_definitions, common_setup_scripts, common_system_prompt RESTART IDENTITY CASCADE`;
+			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incident_checkpoints, incidents, repo_definitions, common_setup_scripts, common_system_prompt RESTART IDENTITY CASCADE`;
 			currentTime = new Date();
 			return {
 				store: sharedStore,

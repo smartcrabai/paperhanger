@@ -19,8 +19,11 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import type {
 	CreateCommonSetupScriptInput,
 	CreateRepoDefinitionInput,
+	Incident,
 	IncidentEvent,
 } from "../core/types";
+import type { ResolvedRepo } from "../repo/resolver";
+import type { IncidentContext } from "../telemetry/types";
 import {
 	CommonSetupScriptNotFoundError,
 	DuplicateOpenIncidentError,
@@ -77,6 +80,33 @@ function makeIncidentEvent(
 		annotations: {},
 		startsAt: new Date().toISOString(),
 		raw: { hello: "world" },
+		...overrides,
+	};
+}
+
+function makeIncidentContext(
+	incident: Incident,
+	overrides: Partial<IncidentContext> = {},
+): IncidentContext {
+	return {
+		incident,
+		alert: makeIncidentEvent({ fingerprint: incident.fingerprint }),
+		window: {
+			from: "2024-01-01T00:00:00.000Z",
+			to: "2024-01-01T01:00:00.000Z",
+		},
+		telemetry: { logs: [], traces: [], metrics: [] },
+		notes: [],
+		...overrides,
+	};
+}
+
+function makeResolvedRepo(overrides: Partial<ResolvedRepo> = {}): ResolvedRepo {
+	return {
+		owner: "acme",
+		repo: "widgets",
+		method: "mapping",
+		confidence: "high",
 		...overrides,
 	};
 }
@@ -443,6 +473,97 @@ export function runIncidentStoreSuite(
 		test("updateAgentRun throws for unknown run id", async () => {
 			await expect(
 				store.updateAgentRun("missing", { outcome: "failed" }),
+			).rejects.toThrow();
+		});
+
+		test("getIncidentCheckpoint returns undefined when no checkpoint has been saved", async () => {
+			const incident = await store.createIncident(
+				makeIncidentInput({ fingerprint: "fp-checkpoint-none" }),
+			);
+			expect(await store.getIncidentCheckpoint(incident.id)).toBeUndefined();
+		});
+
+		test("saveIncidentCheckpoint then getIncidentCheckpoint round-trips the incidentContext without a resolvedRepo", async () => {
+			const incident = await store.createIncident(
+				makeIncidentInput({ fingerprint: "fp-checkpoint-context" }),
+			);
+			const incidentContext = makeIncidentContext(incident);
+
+			const saved = await store.saveIncidentCheckpoint(incident.id, {
+				incidentContext,
+			});
+
+			expect(saved.incidentId).toBe(incident.id);
+			expect(saved.incidentContext).toEqual(incidentContext);
+			expect(saved.resolvedRepo).toBeUndefined();
+			expect(saved.createdAt).toBe(saved.updatedAt);
+
+			const fetched = await store.getIncidentCheckpoint(incident.id);
+			expect(fetched).toEqual(saved);
+		});
+
+		test("saving again adds resolvedRepo, preserves createdAt, and strictly advances updatedAt", async () => {
+			const incident = await store.createIncident(
+				makeIncidentInput({ fingerprint: "fp-checkpoint-upgrade" }),
+			);
+			const incidentContext = makeIncidentContext(incident);
+			const first = await store.saveIncidentCheckpoint(incident.id, {
+				incidentContext,
+			});
+
+			harness.advance(2);
+			const resolvedRepo = makeResolvedRepo();
+			const second = await store.saveIncidentCheckpoint(incident.id, {
+				incidentContext,
+				resolvedRepo,
+			});
+
+			expect(second.resolvedRepo).toEqual(resolvedRepo);
+			expect(second.createdAt).toBe(first.createdAt);
+			expect(new Date(second.updatedAt).getTime()).toBeGreaterThan(
+				new Date(first.updatedAt).getTime(),
+			);
+
+			const fetched = await store.getIncidentCheckpoint(incident.id);
+			expect(fetched).toEqual(second);
+		});
+
+		test("deleteIncidentCheckpoint removes the row; a second call is a harmless no-op", async () => {
+			const incident = await store.createIncident(
+				makeIncidentInput({ fingerprint: "fp-checkpoint-delete" }),
+			);
+			await store.saveIncidentCheckpoint(incident.id, {
+				incidentContext: makeIncidentContext(incident),
+			});
+
+			await store.deleteIncidentCheckpoint(incident.id);
+			expect(await store.getIncidentCheckpoint(incident.id)).toBeUndefined();
+
+			// Deleting a checkpoint that no longer exists (or never existed) is a
+			// no-op, not an error -- callers (e.g. `IncidentPipeline`'s terminal
+			// cleanup) always call this unconditionally.
+			await expect(
+				store.deleteIncidentCheckpoint(incident.id),
+			).resolves.toBeUndefined();
+		});
+
+		test("saveIncidentCheckpoint rejects when the incident does not exist (foreign key enforcement)", async () => {
+			const placeholderIncident: Incident = {
+				id: "does-not-exist",
+				fingerprint: "fp-checkpoint-fk",
+				source: "grafana",
+				status: "collecting",
+				severity: "critical",
+				title: "placeholder",
+				labels: {},
+				annotations: {},
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+			};
+			await expect(
+				store.saveIncidentCheckpoint("does-not-exist", {
+					incidentContext: makeIncidentContext(placeholderIncident),
+				}),
 			).rejects.toThrow();
 		});
 	});
