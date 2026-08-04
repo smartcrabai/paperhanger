@@ -36,15 +36,14 @@ const QueryTelemetryOutputSchema = v.object({
  * in the parent repo's `src/agent/sidecar.ts`). Tool registration in
  * `../src/fix-agent.ts` is skipped entirely when this returns `undefined`.
  *
- * Note: the per-invocation workflow input also carries an optional
- * `telemetry` field (see `contract.ts`) mirroring this same shape. The env
- * var is used here instead of that per-invocation value because Flue's
- * `defineAgent()` initializer (where `tools` is assigned) only receives
- * `{ id, env }` — it has no access to the workflow's `input`, so a tool list
- * cannot be conditioned on a specific invocation's payload. Since the sidecar
- * always spawns one agent-host process per paperhanger deployment with a
- * fixed telemetry backend, env-var presence is an equivalent, always-correct
- * signal for "is telemetry configured for this deployment".
+ * Note: the per-invocation agent input also carries an optional `telemetry`
+ * field (see `contract.ts`) mirroring this same shape. The env var is used
+ * here instead of that per-invocation value: under the beta SDK the agent
+ * initializer had no access to the run input, and while Flue 2's agent
+ * function could read it via `useInitialData()`, the sidecar always spawns
+ * one agent-host process per paperhanger deployment with a fixed telemetry
+ * backend, so env-var presence is an equivalent, always-correct signal for
+ * "is telemetry configured for this deployment".
  */
 function telemetryConfigFromEnv(): TelemetryConfig | undefined {
 	const raw = process.env.PAPERHANGER_TELEMETRY;

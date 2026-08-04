@@ -91,14 +91,13 @@ src/
     fonts/                  # Mazzard font files + fonts.css, copied from the same Open Design project
 agent-host/                # Flue app (Node.js sidecar) — separate package.json
   src/
-    app.ts                 # Custom Hono entrypoint: mounts Flue's routes + a /healthz route
-    contract.ts            # Valibot schemas for the fix-incident workflow's input/output (canonical; mirrored by src/agent/contract.ts)
-    fix-agent.ts           # defineAgent: model/instructions/sandbox/tools, bound to the fix-incident workflow
+    app.ts                 # Custom Hono entrypoint: mounts the fix-incident agent router + a /healthz route
+    contract.ts            # Valibot schemas for the fix-incident agent's input/output (canonical; mirrored by src/agent/contract.ts)
+    fix-agent.ts           # "use agent" agent function: instructions + hooks (model, sandbox, tools, lifecycle)
+    fix-incident.ts        # Deterministic host steps: clone → diagnose → fix → test → push branch (PR creation happens back in the parent Bun process)
     tools.ts               # defineTool: query_telemetry follow-up queries
     telemetry-client.ts    # Minimal GreptimeDB HTTP client used by query_telemetry
-    lib/                   # common-setup-scripts, fix-attempt-policy, output-sanitizer, redaction, sql-guard, system-prompt, tamper-check, test-detection
-    workflows/
-      fix-incident.ts      # defineWorkflow: clone → diagnose → fix → test → push branch (PR creation happens back in the parent Bun process)
+    lib/                   # common-setup-scripts, diagnosis-prompt, fix-attempt-policy, output-sanitizer, redaction, sql-guard, system-prompt, tamper-check, test-detection
 tests/
   integration/             # testcontainers-based suites
 docs/
@@ -109,15 +108,18 @@ docs/
 
 ## Flue agent host (Node sidecar)
 
-Findings from `docs/research/flue.md` (verified against `@flue/*` `1.0.0-beta.9`):
+Findings from `docs/research/flue.md` (researched against `@flue/*` `1.0.0-beta.9`; the
+code has since migrated to `2.0.1` in PR #8):
 
-- Flue's generated production server requires Node.js (>= 22.19; it statically imports
-  `node:sqlite`, which Bun does not implement). The core `define*` APIs do run under Bun,
+- Flue's Node-target server requires Node.js (>= 22.19; it statically imports
+  `node:sqlite`, which Bun does not implement). The core runtime APIs do run under Bun,
   but a served Flue app cannot.
-- Therefore the fix agent lives in `agent-host/`, a self-contained Flue app built with the
-  Flue CLI and executed with Node. The main Bun process drives it through `@flue/sdk`'s
-  `createFlueClient()` — `client.workflows.invoke(name, { input, wait: 'result' })`, with
-  `client.runs.stream()` available for progress observation.
+- Therefore the fix agent lives in `agent-host/`, a self-contained Flue app built with
+  Vite (`@flue/vite`) and executed with Node. The main Bun process drives it through
+  `@flue/sdk`'s conversation-scoped `createFlueClient()` — `client.send()` with the run
+  input as `initialData`, then `client.read()` for the reply carrying the result data
+  part, and `client.abort()` to request cancellation on timeout (see
+  `src/agent/runner.ts`).
 - By default `src/agent/sidecar.ts` spawns the agent host as a child process so the whole
   service still ships as a single container (the image includes both Bun and Node).
   `agent.hostUrl` in the config can point at an externally deployed agent host instead
@@ -125,24 +127,25 @@ Findings from `docs/research/flue.md` (verified against `@flue/*` `1.0.0-beta.9`
 - Sandbox mode: `local()` inside the agent-host container (container boundary is the
   isolation). Remote providers (Daytona/E2B) can be added later via config.
 - PR creation is NOT Flue's job (`@flue/github` only verifies inbound webhooks). The agent
-  host (`agent-host/src/workflows/fix-incident.ts`) only shells out to git to clone, commit,
+  host (`agent-host/src/fix-incident.ts`) only shells out to git to clone, commit,
   and push a branch; it never calls the GitHub REST API. The parent Bun process's
   `src/agent/runner.ts` (`finalizeFixed`) re-verifies the pushed diff against the guardrails
   via GitHub's compare API and then creates the PR itself through `GitHubAppClient`
   (`src/repo/github.ts`).
-- Flue is pre-1.0 beta: pin exact versions and expect schema resets on upgrades. The agent
-  host's durable-execution store uses the driver-agnostic `@flue/postgres` adapter so it
-  can share paperhanger's PostgreSQL when configured, falling back to its default local
-  persistence otherwise.
-- **Dashboard-managed common system prompt** (`docs/spec.md` §3.11): `1.0.0-beta.9` exposes
-  no per-run system-prompt override — `AgentInitializerContext` (the only place
-  `AgentRuntimeConfig.instructions` can be set) is just `{ id, env }`, with no visibility into
-  the workflow input for the run being initialized, and `OperationOptions`
-  (`PromptOptions`'s base) has no `instructions`/`system` field at all. So the operator text
-  is threaded through the workflow input instead and rendered by
+- Flue is no longer pre-1.0 beta (`2.0.1`, pinned exactly), but keep upgrades deliberate
+  and tested: the beta's persisted schema was reset-only, and at 2.x a persisted database
+  written by an incompatible Flue version refuses to start rather than migrating in place.
+  No `src/db.ts` is configured today, so the agent host runs on Flue's default in-memory
+  persistence; the driver-agnostic `@flue/postgres` adapter remains the documented option
+  for sharing paperhanger's PostgreSQL later (see `agent-host/README.md`).
+- **Dashboard-managed common system prompt** (`docs/spec.md` §3.11): the operator text is
+  threaded through the agent input (`FixIncidentInput.systemPrompt`) and rendered by
   `agent-host/src/lib/system-prompt.ts` as a leading section of the diagnosis prompt (see
-  `buildDiagnosisPrompt` in `agent-host/src/workflows/fix-incident.ts`) — the closest
-  achievable equivalent given the pinned SDK version.
+  `buildDiagnosisPrompt` in `agent-host/src/lib/diagnosis-prompt.ts`). Under the beta SDK
+  no per-run system-prompt override existed; Flue 2's agent function could interpolate the
+  input into its returned instructions (they re-render every turn), but dynamic
+  instructions bust the model cache (per Flue's bundled `docs/guide/building-agents.md`),
+  so prompt-section delivery is kept.
 
 ## Dashboard (repo definitions + incident browser)
 

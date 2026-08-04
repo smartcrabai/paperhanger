@@ -1,5 +1,12 @@
 # Flue Framework — API Reference for paperhanger's Fix Agent
 
+> **Note (2026-08-04): historical snapshot.** Everything below was researched against
+> `@flue/*` `1.0.0-beta.9` (`@flue/github` `1.0.0-beta.1`). The project has since migrated
+> to `@flue/*` `2.0.1` (PR #8) — a breaking redesign of the build, routing, agent,
+> workflow, and SDK APIs — so API specifics here may be stale. For current behavior,
+> consult the documentation bundled with the installed packages
+> (`node_modules/@flue/runtime/docs/`).
+
 Research notes for embedding [Flue](https://flueframework.com/) as the durable "fix agent" runtime
 (`src/agent/fix-agent.ts`, `src/agent/tools.ts`, `src/agent/runner.ts` per `docs/architecture.md`).
 

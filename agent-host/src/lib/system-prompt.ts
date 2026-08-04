@@ -9,12 +9,14 @@
  * `../fix-agent.ts`, which imports `local` from `@flue/runtime/node`, which
  * statically imports `node:sqlite`, a module Bun's test runner cannot import.
  *
- * Flue `1.0.0-beta.9` exposes no per-run system-prompt override
- * (`AgentInitializerContext` is only `{ id, env }`, and `OperationOptions` has
- * no `instructions`/`system` field), so this text cannot be delivered via
- * `AgentRuntimeConfig.instructions`. Delivering it as a prompt section instead
- * is the closest achievable equivalent; see docs/architecture.md's "Flue
- * agent host" section for the full investigation.
+ * Delivery note: under Flue `1.0.0-beta.9` no per-run system-prompt override
+ * existed, so this text was threaded through the run input as a prompt
+ * section. Flue 2's agent function re-renders its returned instructions every
+ * turn and can read the run input via `useInitialData()`, making per-run
+ * instructions technically possible -- but dynamic instructions bust the
+ * model cache (per Flue's bundled docs/guide/building-agents.md), so
+ * prompt-section delivery is kept. See docs/architecture.md's "Flue agent
+ * host" section.
  */
 export function renderCommonSystemPromptSection(
 	systemPrompt: string | undefined,
