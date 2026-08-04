@@ -313,6 +313,102 @@ github:
 		const path = await writeFixture(yaml);
 		await expect(loadConfig(path)).rejects.toThrow(ConfigError);
 	});
+
+	test("leaves observability.logs undefined when the subsection is omitted", async () => {
+		setRequiredEnv();
+		const yaml = `
+storage:
+  driver: sqlite
+  path: /data/paperhanger.db
+sources:
+  grafana:
+    secret: \${GRAFANA_WEBHOOK_SECRET}
+observability:
+  endpoint: http://localhost:4318/v1/traces
+github:
+  appId: \${GITHUB_APP_ID}
+  privateKey: \${GITHUB_APP_PRIVATE_KEY}
+`;
+		const path = await writeFixture(yaml);
+		const config = await loadConfig(path);
+
+		expect(config.observability?.logs).toBeUndefined();
+	});
+
+	test("parses observability.logs with only an endpoint (headers stay unset for runtime inheritance)", async () => {
+		setRequiredEnv();
+		const yaml = `
+storage:
+  driver: sqlite
+  path: /data/paperhanger.db
+sources:
+  grafana:
+    secret: \${GRAFANA_WEBHOOK_SECRET}
+observability:
+  endpoint: http://localhost:4318/v1/traces
+  logs:
+    endpoint: http://localhost:4318/v1/logs
+github:
+  appId: \${GITHUB_APP_ID}
+  privateKey: \${GITHUB_APP_PRIVATE_KEY}
+`;
+		const path = await writeFixture(yaml);
+		const config = await loadConfig(path);
+
+		expect(config.observability?.logs?.endpoint).toBe(
+			"http://localhost:4318/v1/logs",
+		);
+		expect(config.observability?.logs?.headers).toBeUndefined();
+	});
+
+	test("expands ${ENV_VAR} references inside observability.logs.headers values", async () => {
+		setRequiredEnv();
+		process.env.OTEL_LOGS_HEADER_VALUE = "logs-secret-token";
+		const yaml = `
+storage:
+  driver: sqlite
+  path: /data/paperhanger.db
+sources:
+  grafana:
+    secret: \${GRAFANA_WEBHOOK_SECRET}
+observability:
+  endpoint: http://localhost:4318/v1/traces
+  logs:
+    endpoint: http://localhost:4318/v1/logs
+    headers:
+      x-api-key: \${OTEL_LOGS_HEADER_VALUE}
+github:
+  appId: \${GITHUB_APP_ID}
+  privateKey: \${GITHUB_APP_PRIVATE_KEY}
+`;
+		const path = await writeFixture(yaml);
+		const config = await loadConfig(path);
+
+		expect(config.observability?.logs?.headers).toEqual({
+			"x-api-key": "logs-secret-token",
+		});
+	});
+
+	test("rejects an empty observability.logs.endpoint", async () => {
+		setRequiredEnv();
+		const yaml = `
+storage:
+  driver: sqlite
+  path: /data/paperhanger.db
+sources:
+  grafana:
+    secret: \${GRAFANA_WEBHOOK_SECRET}
+observability:
+  endpoint: http://localhost:4318/v1/traces
+  logs:
+    endpoint: ""
+github:
+  appId: \${GITHUB_APP_ID}
+  privateKey: \${GITHUB_APP_PRIVATE_KEY}
+`;
+		const path = await writeFixture(yaml);
+		await expect(loadConfig(path)).rejects.toThrow(ConfigError);
+	});
 });
 
 describe("loadConfig - numeric guardrail validation", () => {

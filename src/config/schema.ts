@@ -141,6 +141,22 @@ const NotifierSchema = z.discriminatedUnion("type", [
 ]);
 
 /**
+ * Self-instrumentation: where paperhanger exports ITS OWN OTLP logs.
+ * Mirroring the parent section's shape, presence of this subsection is the
+ * enable flag (see `src/observability/log-export.ts`).
+ */
+const ObservabilityLogsSchema = z.object({
+	/** OTLP/HTTP logs endpoint, e.g. "http://localhost:4318/v1/logs". */
+	endpoint: z.string().min(1),
+	/**
+	 * Extra headers sent with every OTLP log export request (values may use
+	 * ${ENV_VAR}). When omitted, the parent `observability.headers` apply --
+	 * typical collectors share auth across signals.
+	 */
+	headers: z.record(z.string(), z.string()).optional(),
+});
+
+/**
  * Self-instrumentation: where paperhanger exports ITS OWN OTLP traces.
  * Distinct from `telemetry`, which is where paperhanger READS other
  * services' telemetry from (GreptimeDB).
@@ -152,6 +168,12 @@ const ObservabilitySchema = z.object({
 	serviceName: z.string().default("paperhanger"),
 	/** Extra headers sent with every OTLP export request (values may use ${ENV_VAR}). */
 	headers: z.record(z.string(), z.string()).default({}),
+	/**
+	 * Optional: when present, paperhanger also exports its own logs over
+	 * OTLP/HTTP in addition to the stdout JSON-lines sink (see
+	 * `src/observability/log-export.ts`). Omit to export traces only.
+	 */
+	logs: ObservabilityLogsSchema.optional(),
 });
 
 export const ConfigSchema = z.object({
@@ -208,3 +230,4 @@ export type GreptimeDbTelemetryConfig = z.infer<
 	typeof GreptimeDbTelemetrySchema
 >;
 export type ObservabilityConfig = z.infer<typeof ObservabilitySchema>;
+export type ObservabilityLogsConfig = z.infer<typeof ObservabilityLogsSchema>;

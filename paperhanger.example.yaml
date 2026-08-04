@@ -62,6 +62,12 @@ telemetry:
 #   headers:
 #     x-greptime-db-name: public
 #     Authorization: Bearer ${OTEL_EXPORTER_AUTH_TOKEN}
+#   # Optional: also export paperhanger's own log lines over OTLP/HTTP, in
+#   # addition to the stdout JSON-lines sink (which stays primary). Presence
+#   # of this subsection is the enable flag; `headers` defaults to the
+#   # section-level headers above.
+#   logs:
+#     endpoint: http://localhost:4318/v1/logs
 
 # Telemetry collection window, relative to the alert's startsAt time.
 collect:

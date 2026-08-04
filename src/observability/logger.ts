@@ -26,6 +26,18 @@ function isLogLevel(value: string): value is LogLevel {
 
 export type LogFields = Record<string, unknown>;
 
+/**
+ * One structured log entry as built by `createLogger` before JSON
+ * serialization: `level`/`ts`/`msg` plus correlation fields (`traceId`/
+ * `spanId`, when a span is active) and any merged base/per-call fields.
+ */
+export interface LogEntry {
+	level: LogLevel;
+	ts: string;
+	msg: string;
+	[key: string]: unknown;
+}
+
 export interface Logger {
 	debug(msg: string, fields?: LogFields): void;
 	info(msg: string, fields?: LogFields): void;
@@ -42,6 +54,13 @@ export interface LoggerOptions {
 	fields?: LogFields;
 	/** Where to write each formatted line. Defaults to `console.log`. Mainly for tests. */
 	sink?: (line: string) => void;
+	/**
+	 * Optional secondary sink receiving each structured entry after the
+	 * primary line sink runs. Used to bridge log lines into OTel log export
+	 * (see `src/observability/log-export.ts`). Invoked inside a try/catch: a
+	 * throwing record sink never breaks the primary sink or the caller.
+	 */
+	recordSink?: (entry: LogEntry) => void;
 }
 
 /** Reads the default log level from the `LOG_LEVEL` environment variable, if valid. */
@@ -56,6 +75,7 @@ export function createLogger(options: LoggerOptions = {}): Logger {
 	const level = options.level ?? logLevelFromEnv() ?? "info";
 	const baseFields = options.fields ?? {};
 	const sink = options.sink ?? ((line: string) => console.log(line));
+	const recordSink = options.recordSink;
 
 	function write(msgLevel: LogLevel, msg: string, fields?: LogFields): void {
 		if (LEVEL_ORDER[msgLevel] < LEVEL_ORDER[level]) {
@@ -66,7 +86,7 @@ export function createLogger(options: LoggerOptions = {}): Logger {
 			spanContext !== undefined && isSpanContextValid(spanContext)
 				? { traceId: spanContext.traceId, spanId: spanContext.spanId }
 				: {};
-		const entry = {
+		const entry: LogEntry = {
 			level: msgLevel,
 			ts: new Date().toISOString(),
 			msg,
@@ -75,6 +95,15 @@ export function createLogger(options: LoggerOptions = {}): Logger {
 			...fields,
 		};
 		sink(JSON.stringify(entry));
+		if (recordSink !== undefined) {
+			try {
+				recordSink(entry);
+			} catch {
+				// Fail-soft by contract (see LoggerOptions.recordSink): a throwing
+				// record sink must never break the primary JSON-lines sink or the
+				// caller.
+			}
+		}
 	}
 
 	return {
@@ -83,6 +112,11 @@ export function createLogger(options: LoggerOptions = {}): Logger {
 		warn: (msg, fields) => write("warn", msg, fields),
 		error: (msg, fields) => write("error", msg, fields),
 		child: (fields) =>
-			createLogger({ level, fields: { ...baseFields, ...fields }, sink }),
+			createLogger({
+				level,
+				fields: { ...baseFields, ...fields },
+				sink,
+				recordSink,
+			}),
 	};
 }
