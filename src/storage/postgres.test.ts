@@ -207,6 +207,7 @@ describe("mapRepoDefinitionRow", () => {
 			mappings: [{ service: "widgets" }],
 			setup_script: null,
 			test_command: null,
+			system_prompt: null,
 			enabled: true,
 			created_at: createdAt,
 			updated_at: updatedAt,
@@ -219,13 +220,14 @@ describe("mapRepoDefinitionRow", () => {
 			mappings: [{ service: "widgets" }],
 			setupScript: undefined,
 			testCommand: undefined,
+			systemPrompt: undefined,
 			enabled: true,
 			createdAt: "2026-07-17T10:00:00.000Z",
 			updatedAt: "2026-07-17T10:05:00.000Z",
 		});
 	});
 
-	test("normalizes string timestamps, a stringified mappings JSON column, populated setup_script/test_command, and enabled: false", () => {
+	test("normalizes string timestamps, a stringified mappings JSON column, populated setup_script/test_command/system_prompt, and enabled: false", () => {
 		const definition = mapRepoDefinitionRow({
 			id: "repo-def-2",
 			owner: "acme",
@@ -233,6 +235,7 @@ describe("mapRepoDefinitionRow", () => {
 			mappings: JSON.stringify([{ service: "gadgets", env: "prod" }]),
 			setup_script: "npm ci",
 			test_command: "npm test",
+			system_prompt: "Prefer minimal diffs in this repo.",
 			enabled: false,
 			created_at: "2026-07-17T10:00:00+00:00",
 			updated_at: "2026-07-17T10:05:00+00:00",
@@ -241,6 +244,7 @@ describe("mapRepoDefinitionRow", () => {
 		expect(definition.mappings).toEqual([{ service: "gadgets", env: "prod" }]);
 		expect(definition.setupScript).toBe("npm ci");
 		expect(definition.testCommand).toBe("npm test");
+		expect(definition.systemPrompt).toBe("Prefer minimal diffs in this repo.");
 		expect(definition.enabled).toBe(false);
 		expect(definition.createdAt).toBe("2026-07-17T10:00:00.000Z");
 		expect(definition.updatedAt).toBe("2026-07-17T10:05:00.000Z");

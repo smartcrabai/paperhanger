@@ -43,7 +43,7 @@ import {
  * method (and a version check in `init()`) for future schema changes instead
  * of mutating an already-shipped migration in place.
  */
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 /** Primary key pinning `common_system_prompt` to a single row (see `migrateV5`). */
 const COMMON_SYSTEM_PROMPT_ID = "default";
@@ -120,6 +120,7 @@ interface RepoDefinitionRow {
 	mappings: string;
 	setup_script: string | null;
 	test_command: string | null;
+	system_prompt: string | null;
 	enabled: number;
 	created_at: string;
 	updated_at: string;
@@ -167,6 +168,7 @@ function rowToRepoDefinition(row: RepoDefinitionRow): RepoDefinition {
 		mappings: JSON.parse(row.mappings) as Array<Record<string, string>>,
 		setupScript: row.setup_script ?? undefined,
 		testCommand: row.test_command ?? undefined,
+		systemPrompt: row.system_prompt ?? undefined,
 		enabled: row.enabled === 1,
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
@@ -275,6 +277,11 @@ export class SqliteIncidentStore
 		if (version < 5) {
 			this.migrateV5();
 			version = 5;
+			this.setSchemaVersion(version);
+		}
+		if (version < 6) {
+			this.migrateV6();
+			version = 6;
 			this.setSchemaVersion(version);
 		}
 		if (version !== SCHEMA_VERSION) {
@@ -400,6 +407,17 @@ export class SqliteIncidentStore
 				created_at TEXT NOT NULL,
 				updated_at TEXT NOT NULL
 			);
+		`);
+	}
+
+	/**
+	 * Adds the per-repository system prompt override to `repo_definitions`
+	 * (docs/spec.md section 3.11). Nullable: NULL means "inherit the common
+	 * system prompt", matching the pre-v6 behavior for every existing row.
+	 */
+	private migrateV6(): void {
+		this.db.run(`
+			ALTER TABLE repo_definitions ADD COLUMN system_prompt TEXT;
 		`);
 	}
 
@@ -638,8 +656,8 @@ export class SqliteIncidentStore
 		try {
 			this.db.run(
 				`INSERT INTO repo_definitions
-					(id, owner, repo, mappings, setup_script, test_command, enabled, created_at, updated_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?);`,
+					(id, owner, repo, mappings, setup_script, test_command, system_prompt, enabled, created_at, updated_at)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`,
 				[
 					id,
 					input.owner,
@@ -647,6 +665,7 @@ export class SqliteIncidentStore
 					JSON.stringify(mappings),
 					input.setupScript ?? null,
 					input.testCommand ?? null,
+					input.systemPrompt ?? null,
 					enabled ? 1 : 0,
 					now,
 					now,
@@ -721,6 +740,10 @@ export class SqliteIncidentStore
 		if ("testCommand" in patch) {
 			sets.push("test_command = ?");
 			values.push(patch.testCommand ?? null);
+		}
+		if ("systemPrompt" in patch) {
+			sets.push("system_prompt = ?");
+			values.push(patch.systemPrompt ?? null);
 		}
 		if (patch.enabled !== undefined) {
 			sets.push("enabled = ?");

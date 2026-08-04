@@ -75,6 +75,13 @@ export const FixIncidentInputSchema = v.object({
 	telemetry: v.optional(TelemetryConfigSchema),
 	/** Dashboard-managed operator instructions shared by every repository. */
 	systemPrompt: v.optional(v.string()),
+	/**
+	 * Per-repository operator instructions (from the resolved repo's enabled
+	 * RepoDefinition, or its `repos.systemPrompts` config entry). Takes
+	 * precedence over `systemPrompt` when set: this section is rendered
+	 * instead of the common one.
+	 */
+	repoSystemPrompt: v.optional(v.string()),
 });
 
 export const FixSchema = v.object({

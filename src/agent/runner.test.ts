@@ -760,3 +760,195 @@ describe("FixAgentRunner - common system prompt", () => {
 		await store.close();
 	});
 });
+
+describe("FixAgentRunner - per-repo system prompt", () => {
+	const REPORT_ONLY = { outcome: "report_only", diagnosis: "d", report: "r" };
+
+	async function runWithPrompts(options: {
+		definition?: { systemPrompt?: string; enabled?: boolean };
+		repoDefinitionsThrow?: boolean;
+		commonPrompt?: string;
+		agentSystemPrompt?: string;
+		repoSystemPrompts?: Record<string, string>;
+	}) {
+		const { store, incident } = await createStoreWithIncident();
+		if (options.definition) {
+			await store.createRepoDefinition({
+				owner: "acme",
+				repo: "widgets",
+				systemPrompt: options.definition.systemPrompt,
+				enabled: options.definition.enabled ?? true,
+			});
+		}
+		const flue = createFakeFlue(REPORT_ONLY);
+		const baseConfig = makeConfig();
+		const runner = new FixAgentRunner({
+			flue: { baseUrl: "http://agent-host:9000" },
+			createFlueClient: () => flue.client,
+			github: createFakeGithub().client,
+			store,
+			repoDefinitions: options.repoDefinitionsThrow
+				? {
+						async findRepoDefinitionByRepo() {
+							throw new Error("repo_definitions table is locked");
+						},
+					}
+				: store,
+			commonSystemPrompt: {
+				async getCommonSystemPrompt() {
+					return options.commonPrompt === undefined
+						? undefined
+						: {
+								prompt: options.commonPrompt,
+								createdAt: "2024-01-01T00:00:00.000Z",
+								updatedAt: "2024-01-01T00:00:00.000Z",
+							};
+				},
+			},
+			config: {
+				...baseConfig,
+				agent: {
+					...baseConfig.agent,
+					systemPrompt: options.agentSystemPrompt,
+				},
+				repos: { systemPrompts: options.repoSystemPrompts ?? {} },
+			},
+			logger: silentLogger(),
+		});
+		const result = await runner.run(
+			incident,
+			makeContext(incident, makeAlert()),
+			testRepo,
+		);
+		const input = flue.calls.send?.initialData as {
+			systemPrompt?: string;
+			repoSystemPrompt?: string;
+		};
+		return { result, input, store };
+	}
+
+	test("sends the definition's prompt as repoSystemPrompt alongside the common systemPrompt", async () => {
+		const { result, input, store } = await runWithPrompts({
+			definition: { systemPrompt: "Repo-specific instructions." },
+			commonPrompt: "Common instructions.",
+		});
+
+		expect(result.status).toBe("report_only");
+		expect(input.repoSystemPrompt).toBe("Repo-specific instructions.");
+		expect(input.systemPrompt).toBe("Common instructions.");
+
+		await store.close();
+	});
+
+	test("omits repoSystemPrompt when the definition has none, so the common prompt applies downstream", async () => {
+		const { input, store } = await runWithPrompts({
+			definition: {},
+			commonPrompt: "Common instructions.",
+		});
+
+		expect(input.repoSystemPrompt).toBeUndefined();
+		expect(input.systemPrompt).toBe("Common instructions.");
+
+		await store.close();
+	});
+
+	test("treats a blank definition prompt as unset", async () => {
+		const { input, store } = await runWithPrompts({
+			definition: { systemPrompt: "   \n\t  " },
+			commonPrompt: "Common instructions.",
+		});
+
+		expect(input.repoSystemPrompt).toBeUndefined();
+
+		await store.close();
+	});
+
+	test("trims a stored definition prompt before sending it", async () => {
+		const { input, store } = await runWithPrompts({
+			definition: { systemPrompt: "  Repo-specific instructions.  " },
+		});
+
+		expect(input.repoSystemPrompt).toBe("Repo-specific instructions.");
+
+		await store.close();
+	});
+
+	test("ignores a disabled definition's prompt and falls back to the config-file entry", async () => {
+		const { input, store } = await runWithPrompts({
+			definition: {
+				systemPrompt: "Disabled definition prompt.",
+				enabled: false,
+			},
+			repoSystemPrompts: { "acme/widgets": "Config-file prompt." },
+		});
+
+		expect(input.repoSystemPrompt).toBe("Config-file prompt.");
+
+		await store.close();
+	});
+
+	test("uses the config-file per-repo prompt when no definition exists, matching the key case-insensitively", async () => {
+		const { input, store } = await runWithPrompts({
+			repoSystemPrompts: { "Acme/Widgets": "Config-file prompt." },
+		});
+
+		expect(input.repoSystemPrompt).toBe("Config-file prompt.");
+
+		await store.close();
+	});
+
+	test("prefers the definition's prompt over the config-file entry", async () => {
+		const { input, store } = await runWithPrompts({
+			definition: { systemPrompt: "Dashboard prompt." },
+			repoSystemPrompts: { "acme/widgets": "Config-file prompt." },
+		});
+
+		expect(input.repoSystemPrompt).toBe("Dashboard prompt.");
+
+		await store.close();
+	});
+
+	test("falls back to the config-file per-repo prompt when the definition lookup fails", async () => {
+		const { result, input, store } = await runWithPrompts({
+			repoDefinitionsThrow: true,
+			repoSystemPrompts: { "acme/widgets": "Config-file prompt." },
+		});
+
+		expect(result.status).toBe("report_only");
+		expect(input.repoSystemPrompt).toBe("Config-file prompt.");
+
+		await store.close();
+	});
+
+	test("falls back to the config-file common prompt when the dashboard has none saved", async () => {
+		const { input, store } = await runWithPrompts({
+			agentSystemPrompt: "Config-file common prompt.",
+		});
+
+		expect(input.systemPrompt).toBe("Config-file common prompt.");
+		expect(input.repoSystemPrompt).toBeUndefined();
+
+		await store.close();
+	});
+
+	test("prefers the dashboard common prompt over the config-file one", async () => {
+		const { input, store } = await runWithPrompts({
+			commonPrompt: "Dashboard common prompt.",
+			agentSystemPrompt: "Config-file common prompt.",
+		});
+
+		expect(input.systemPrompt).toBe("Dashboard common prompt.");
+
+		await store.close();
+	});
+
+	test("treats a blank config-file common prompt as unset", async () => {
+		const { input, store } = await runWithPrompts({
+			agentSystemPrompt: "   ",
+		});
+
+		expect(input.systemPrompt).toBeUndefined();
+
+		await store.close();
+	});
+});

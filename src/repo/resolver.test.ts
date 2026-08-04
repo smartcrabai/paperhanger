@@ -29,6 +29,7 @@ function baseConfig(
 		attributeKeys: [],
 		mappings: [],
 		orgSearch: { enabled: false },
+		systemPrompts: {},
 		...overrides,
 	};
 }

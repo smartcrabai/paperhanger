@@ -198,6 +198,7 @@ function fakeRepoDefinitionStore(
 				mappings: input.mappings ?? [],
 				setupScript: input.setupScript,
 				testCommand: input.testCommand,
+				systemPrompt: input.systemPrompt,
 				enabled: input.enabled ?? true,
 				createdAt: now,
 				updatedAt: now,
@@ -246,6 +247,10 @@ function fakeRepoDefinitionStore(
 					"testCommand" in patch
 						? (patch.testCommand ?? undefined)
 						: current.testCommand,
+				systemPrompt:
+					"systemPrompt" in patch
+						? (patch.systemPrompt ?? undefined)
+						: current.systemPrompt,
 				enabled: patch.enabled ?? current.enabled,
 				updatedAt: new Date().toISOString(),
 			};
@@ -928,6 +933,45 @@ describe("ingest server", () => {
 				expect(res.status).toBe(400);
 			});
 
+			test("accepts systemPrompt at exactly 20,000 characters", async () => {
+				const res = await fetch(`${baseUrl}/repo-definitions`, {
+					method: "POST",
+					headers: bearerHeaders(API_TOKEN),
+					body: JSON.stringify({
+						owner: "acme",
+						repo: "widgets",
+						systemPrompt: "a".repeat(20_000),
+					}),
+				});
+				expect(res.status).toBe(201);
+			});
+
+			test("rejects systemPrompt at 20,001 characters", async () => {
+				const res = await fetch(`${baseUrl}/repo-definitions`, {
+					method: "POST",
+					headers: bearerHeaders(API_TOKEN),
+					body: JSON.stringify({
+						owner: "acme",
+						repo: "widgets",
+						systemPrompt: "a".repeat(20_001),
+					}),
+				});
+				expect(res.status).toBe(400);
+			});
+
+			test("accepts a padded systemPrompt whose trimmed length is within the cap", async () => {
+				const res = await fetch(`${baseUrl}/repo-definitions`, {
+					method: "POST",
+					headers: bearerHeaders(API_TOKEN),
+					body: JSON.stringify({
+						owner: "acme",
+						repo: "widgets",
+						systemPrompt: `  ${"a".repeat(20_000)}  `,
+					}),
+				});
+				expect(res.status).toBe(201);
+			});
+
 			test("rejects a mapping entry with an empty-string value", async () => {
 				const res = await fetch(`${baseUrl}/repo-definitions`, {
 					method: "POST",
@@ -1033,6 +1077,21 @@ describe("ingest server", () => {
 			expect(body.setupScript).toBe("npm ci");
 			expect(body.testCommand).toBe("npm test");
 			expect(body.enabled).toBe(false);
+		});
+
+		test("creates a repo definition with a systemPrompt, stored trimmed", async () => {
+			const res = await fetch(`${baseUrl}/repo-definitions`, {
+				method: "POST",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({
+					owner: "acme",
+					repo: "widgets",
+					systemPrompt: "  Repo-specific operator instructions.  ",
+				}),
+			});
+			expect(res.status).toBe(201);
+			const body = (await res.json()) as Record<string, unknown>;
+			expect(body.systemPrompt).toBe("Repo-specific operator instructions.");
 		});
 
 		test("returns 409 when (owner, repo) already has a definition, case-insensitively", async () => {
@@ -1157,6 +1216,49 @@ describe("ingest server", () => {
 			const body = (await res.json()) as Record<string, unknown>;
 			expect(body.setupScript).toBeUndefined();
 			expect(body.testCommand).toBeUndefined();
+		});
+
+		test("sets and clears systemPrompt via partial patches", async () => {
+			server.stop(true);
+			startServer({
+				repoDefinitions: fakeRepoDefinitionStore([
+					makeRepoDefinition({ id: "repo-def-1" }),
+				]),
+			});
+
+			const setRes = await fetch(`${baseUrl}/repo-definitions/repo-def-1`, {
+				method: "PUT",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({ systemPrompt: "Repo-specific instructions." }),
+			});
+			expect(setRes.status).toBe(200);
+			const setBody = (await setRes.json()) as Record<string, unknown>;
+			expect(setBody.systemPrompt).toBe("Repo-specific instructions.");
+
+			const clearRes = await fetch(`${baseUrl}/repo-definitions/repo-def-1`, {
+				method: "PUT",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({ systemPrompt: null }),
+			});
+			expect(clearRes.status).toBe(200);
+			const clearBody = (await clearRes.json()) as Record<string, unknown>;
+			expect(clearBody.systemPrompt).toBeUndefined();
+		});
+
+		test("returns 400 when the patch's systemPrompt exceeds the cap", async () => {
+			server.stop(true);
+			startServer({
+				repoDefinitions: fakeRepoDefinitionStore([
+					makeRepoDefinition({ id: "repo-def-1" }),
+				]),
+			});
+
+			const res = await fetch(`${baseUrl}/repo-definitions/repo-def-1`, {
+				method: "PUT",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({ systemPrompt: "a".repeat(20_001) }),
+			});
+			expect(res.status).toBe(400);
 		});
 
 		test("returns 409 when the patch collides with another definition's (owner, repo)", async () => {

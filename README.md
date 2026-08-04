@@ -211,7 +211,8 @@ process at `GET /` and `GET /dashboard` (Bun HTML import + React -- no
 separate service). It manages:
 
 - **repo definitions**: target GitHub owner/repo, label-match `mappings`, an
-  optional per-repo `setupScript`, and an optional `testCommand` override;
+  optional per-repo `setupScript`, an optional `testCommand` override, and an
+  optional per-repo `systemPrompt`;
 - **common setup scripts**: an ordered list of scripts shared by every
   repository. Each script runs after clone only when its configured
   repository-relative trigger file exists;
@@ -224,6 +225,24 @@ separate service). It manages:
 All data routes require the same `server.apiToken`. The page prompts for it
 once, keeps it in `localStorage`, and sends it as `X-Api-Token` on every
 request. The dashboard has no merge/approve/deploy action of any kind.
+
+### Operator instruction precedence
+
+Two scopes exist, and the per-repository one **replaces** the common one for
+that repository rather than stacking on top of it -- so a repo override must
+restate anything from the common prompt it still wants to apply. Within each
+scope, the dashboard-managed value beats the config-file one, and a blank
+value at any level counts as unset and falls through:
+
+| Scope | Resolution order |
+|---|---|
+| Per-repository | repo definition's `systemPrompt` → `repos.systemPrompts["owner/repo"]` → *(unset: inherit common)* |
+| Common | dashboard `PUT /system-prompt` → `agent.systemPrompt` → *(unset: no section)* |
+
+Every lookup is fail-soft: a storage error is logged and treated as "unset"
+rather than blocking the fix run. Operator instructions never relax the
+forbidden-path, diff-size, or no-commit/no-push guardrails -- see
+"Security notes".
 
 ## Webhook sources
 
@@ -312,7 +331,9 @@ Every key from `paperhanger.example.yaml`, with its default when omitted
 | `repos.mappings` | `[]` | List of `{ match: { label: value, ... }, repo: "owner/repo" }` |
 | `repos.orgSearch.enabled` | `false` | Dynamic GitHub org search fallback |
 | `repos.orgSearch.org` | *(none)* | Required if `orgSearch.enabled` |
+| `repos.systemPrompts` | `{}` | Per-repository operator instructions keyed by `"owner/repo"` (matched case-insensitively). Read live per fix run -- never seeded into the DB. A dashboard-managed repo definition's own `systemPrompt` wins over the entry here; either one *replaces* the common prompt for that repository. Blank values count as unset |
 | `agent.model` | `anthropic/claude-sonnet-4-6` | Flue model identifier |
+| `agent.systemPrompt` | *(none)* | Config-file fallback for the common operator instructions shared by every repository. The dashboard-managed prompt (`PUT /system-prompt`) wins when set; a blank value counts as unset. Unlike the dashboard field there is no length cap here, but the same context-budget consideration applies -- this text is sent to the model on every diagnosis |
 | `agent.concurrency` | `2` | Max simultaneously-processing incidents; excess queues |
 | `agent.timeoutMinutes` | `30` | Per-incident fix-agent timeout |
 | `agent.cooldownHours` | `24` | Suppresses re-processing the same fingerprint after a terminal outcome |

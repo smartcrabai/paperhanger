@@ -139,14 +139,22 @@ code has since migrated to `2.0.1` in PR #8):
   No `src/db.ts` is configured today, so the agent host runs on Flue's default in-memory
   persistence; the driver-agnostic `@flue/postgres` adapter remains the documented option
   for sharing paperhanger's PostgreSQL later (see `agent-host/README.md`).
-- **Dashboard-managed common system prompt** (`docs/spec.md` §3.11): the operator text is
-  threaded through the agent input (`FixIncidentInput.systemPrompt`) and rendered by
+- **Operator system prompts** (`docs/spec.md` §3.6/§3.11): the operator text is
+  threaded through the agent input and rendered by
   `agent-host/src/lib/system-prompt.ts` as a leading section of the diagnosis prompt (see
   `buildDiagnosisPrompt` in `agent-host/src/lib/diagnosis-prompt.ts`). Under the beta SDK
   no per-run system-prompt override existed; Flue 2's agent function could interpolate the
   input into its returned instructions (they re-render every turn), but dynamic
   instructions bust the model cache (per Flue's bundled `docs/guide/building-agents.md`),
   so prompt-section delivery is kept.
+  Two scopes travel through the input verbatim — `systemPrompt` (common) and
+  `repoSystemPrompt` (per-repository) — and which one renders is decided by
+  `renderEffectiveSystemPromptSection` in the agent host, not in the parent process, so
+  the replacement rule lives next to the renderers it chooses between. The parent process
+  resolves each scope's *value* (`FixAgentRunner.resolveCommonSystemPrompt` /
+  `resolveRepoSystemPrompt`): dashboard-managed storage first, config file
+  (`agent.systemPrompt` / `repos.systemPrompts["owner/repo"]`) second, both fail-soft — a
+  lookup error is logged and treated as unset rather than blocking the fix run.
 
 ## Dashboard (repo definitions + incident browser)
 

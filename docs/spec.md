@@ -100,6 +100,7 @@ interface RepoDefinitionStore {
 - テーブル `repo_definitions`(`id`, `owner`, `repo`, `mappings`: JSON/JSONB 配列, `setup_script`, `test_command`, `enabled`, `created_at`, `updated_at`)。`lower(owner), lower(repo)` のユニークインデックスを持ち、違反時は `DuplicateRepoDefinitionError` を送出する(大文字小文字違いの重複も拒否)。`updatedAt` は更新のたびにストアが設定する
 - テーブル `common_setup_scripts`(`seq`, `id`, `trigger_file`, `script`, `created_at`, `updated_at`)。`seq` の昇順を実行順とし、全リポジトリ共通の条件付きセットアップスクリプトを保持する
 - ダッシュボード(§3.11)が管理する全リポジトリ共通のシステムプロンプトは `CommonSystemPromptStore` インターフェースで抽象化する(SCHEMA_VERSION は 4 → 5。新しい `migrateV5()` を各ドライバに追加し、既存の `migrateV1`-`migrateV4` は変更しない)。テーブル `common_system_prompt`(`id`, `prompt`, `created_at`, `updated_at`; 単一行のみ、`id` は `'default'` 固定)を `INSERT ... ON CONFLICT DO UPDATE ... RETURNING *` で upsert し、`createdAt` は更新時も保持する
+- repo definition のリポジトリ個別システムプロンプトは `repo_definitions` テーブルの `system_prompt` 列として保持する(SCHEMA_VERSION は 5 → 6。新しい `migrateV6()` を各ドライバに追加し、既存の `migrateV1`-`migrateV5` は変更しない)。NULL は「未設定」を意味し、更新時に `null` を渡すとクリアされる
 
 ### 3.4 Telemetry Collector(テレメトリ収集・抽象化)
 
@@ -156,6 +157,11 @@ interface TelemetrySource {
   - `setupScript` が設定されている場合、clone 直後・モデルの最初のターン開始前にそのシェルスクリプトを実行する(タイムアウト 10 分。テスト実行と同じ規律の専用タイムアウトを用意)
   - 終了コードが非ゼロなら、モデルには一切見せず・リトライもさせずにその場でインシデントを `failed` として打ち切る(`failureReason` に exit code とリダクション済みの末尾ログを記録)
   - `testCommand` が設定されている場合、テストコマンドの自動検出結果をその値でそのまま上書きする(package.json の `scripts.test` / `go test ./...` / `cargo test` の自動判定より優先)
+- **オペレータ指示(システムプロンプト)の優先順位**: スコープは「リポジトリ個別」と「全リポジトリ共通」の 2 つ。**リポジトリ個別の指示は共通の指示を置き換える**(積み重ねない)ため、共通側の内容を残したい場合は個別側に書き直す必要がある。各スコープ内ではダッシュボード管理の値が設定ファイルの値に優先し、空白のみの値はどの段でも「未設定」として次のフォールバックへ進む
+  - リポジトリ個別: repo definition の `systemPrompt` → 設定ファイルの `repos.systemPrompts["owner/repo"]`(大文字小文字を区別せず照合)→ 未設定なら共通を継承
+  - 全リポジトリ共通: ダッシュボードの `PUT /system-prompt` → 設定ファイルの `agent.systemPrompt` → 未設定ならセクション自体を出力しない
+  - いずれの解決も fail-soft: ストア読み取りに失敗した場合はログを残して「未設定」として扱い、fix 実行自体は止めない
+  - どちらのスコープの指示も、変更禁止パス・差分行数上限・commit/push 禁止といったガードレールを緩めることはできない(agent-host 側のプロンプトで明示)
 - **ガードレール**:
   - 変更可能行数の上限(設定可。push 後に GitHub compare API で実差分を検証し、エージェントの自己申告は信用しない)
   - 変更禁止パス(`.github/workflows/`、secrets、CI 設定等)。違反時はリモートブランチを削除して `failed`
@@ -244,9 +250,9 @@ notifiers:
 
 - 個人利用を前提とした、設定と観覧専用の UI。ingest サーバーと同一プロセスから `GET /` および `GET /dashboard`(Bun HTML import; React)で配信する
 - 用途は 4 つのみ:
-  1. **対象リポジトリ定義(repo definition)の管理**: GitHub owner/repo、アラート→リポジトリ解決に使うラベルマッチャー(`mappings`。§3.5)、クローン後・診断前に実行する任意の `setupScript`、テストコマンド自動検出を上書きする任意の `testCommand`(§3.6)を CRUD する
+  1. **対象リポジトリ定義(repo definition)の管理**: GitHub owner/repo、アラート→リポジトリ解決に使うラベルマッチャー(`mappings`。§3.5)、クローン後・診断前に実行する任意の `setupScript`、テストコマンド自動検出を上書きする任意の `testCommand`、そのリポジトリだけに適用する任意の `systemPrompt`(§3.6)を CRUD する
   2. **全リポジトリ共通 Setup script の管理**: 「指定したリポジトリ相対ファイルが存在する場合」という条件とシェルスクリプトの組を複数 CRUD する。作成順に評価・実行する
-  3. **全リポジトリ共通システムプロンプトの管理**: 全リポジトリに共通で適用するオペレーター指示文(単一のテキスト)を GET/PUT する。空文字は「無効化」を意味する
+  3. **全リポジトリ共通システムプロンプトの管理**: 全リポジトリに共通で適用するオペレーター指示文(単一のテキスト)を GET/PUT する。空文字は「無効化」を意味する。リポジトリ個別の `systemPrompt` が設定されている場合、そのリポジトリではこの共通プロンプトは出力されない(§3.6 の優先順位を参照)
   4. **インシデントの閲覧**: 一覧(新しい順・自動更新)・詳細・イベントタイムライン(読み取り専用)
 - **§1 の非ゴールはダッシュボードにも適用される**: マージ・承認・デプロイ・インフラ緩和操作は一切存在しない。設定と観覧のみ
 - **認証**: すべてのデータ API は既存の `server.apiToken` ゲートを通る(未設定時は 401、secure by default)。静的ページ自体(`GET /` / `GET /dashboard`)はデータを含まないため無認証。UI はトークンを一度入力すると `localStorage` に保持し、以降のリクエストに `X-Api-Token` ヘッダとして付与する。いずれかのリクエストが 401 になればトークン入力画面へ戻す

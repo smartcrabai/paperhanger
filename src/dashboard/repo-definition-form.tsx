@@ -22,6 +22,7 @@ export interface RepoDefinitionDraft {
 	mappings: EditableGroup[];
 	setupScript: string;
 	testCommand: string;
+	systemPrompt: string;
 }
 
 function toEditableGroups(
@@ -47,6 +48,7 @@ export function draftFromDefinition(
 		mappings: toEditableGroups(definition.mappings),
 		setupScript: definition.setupScript ?? "",
 		testCommand: definition.testCommand ?? "",
+		systemPrompt: definition.systemPrompt ?? "",
 	};
 }
 
@@ -58,6 +60,7 @@ export function emptyDraft(): RepoDefinitionDraft {
 		mappings: [],
 		setupScript: "",
 		testCommand: "",
+		systemPrompt: "",
 	};
 }
 
@@ -201,6 +204,18 @@ export function RepoDefinitionForm({
 						value={draft.testCommand}
 						onChange={(event) =>
 							onChange({ ...draft, testCommand: event.target.value })
+						}
+					/>
+				</label>
+				<label>
+					System prompt override
+					<textarea
+						className="mono"
+						rows={6}
+						placeholder="leave blank to inherit the common system prompt"
+						value={draft.systemPrompt}
+						onChange={(event) =>
+							onChange({ ...draft, systemPrompt: event.target.value })
 						}
 					/>
 				</label>

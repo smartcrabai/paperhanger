@@ -72,6 +72,13 @@ export const FixAgentInputSchema = z.object({
 	telemetry: FixAgentTelemetryConfigSchema.optional(),
 	/** Dashboard-managed operator instructions shared by every repository. */
 	systemPrompt: z.string().optional(),
+	/**
+	 * Per-repository operator instructions (from the resolved repo's enabled
+	 * RepoDefinition, or its `repos.systemPrompts` config entry). Takes
+	 * precedence over `systemPrompt` when set: the agent host renders this
+	 * section instead of the common one.
+	 */
+	repoSystemPrompt: z.string().optional(),
 });
 
 export const FixAgentFixSchema = z.object({

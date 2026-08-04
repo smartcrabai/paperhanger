@@ -98,6 +98,22 @@ export interface FixAgentRunnerConfig {
 		maxDiffLines: number;
 		maxFixAttempts: number;
 		draftPr: boolean;
+		/**
+		 * Config-file fallback for the common system prompt
+		 * (`agent.systemPrompt` in paperhanger.yaml). The dashboard-managed
+		 * common prompt takes precedence when set; see
+		 * `resolveCommonSystemPrompt`.
+		 */
+		systemPrompt?: string;
+	};
+	/**
+	 * Optional `repos` slice of the app config; only `systemPrompts` is read.
+	 * Config-file per-repository operator instructions keyed by "owner/repo".
+	 * An enabled RepoDefinition's own `systemPrompt` takes precedence over the
+	 * matching entry here; see `resolveRepoSystemPrompt`.
+	 */
+	repos?: {
+		systemPrompts?: Record<string, string>;
 	};
 	telemetry?: {
 		source: "greptimedb";
@@ -132,6 +148,18 @@ export type FixAgentRunResult =
 	  };
 
 const PR_LABELS = ["paperhanger", "automated-fix"];
+
+/**
+ * Per-repo fields sourced from the resolved repo's enabled RepoDefinition
+ * (see `FixAgentRunner.resolveRepoOverrides`): setup/test overrides plus the
+ * per-repository system prompt, already trimmed to `undefined` when blank.
+ */
+type RepoOverrides = Pick<
+	FixAgentInput["repo"],
+	"setupScript" | "testCommand"
+> & {
+	systemPrompt?: string;
+};
 
 function conversationUrl(baseUrl: string, agentRunId: string): string {
 	const url = new URL(baseUrl);
@@ -218,6 +246,11 @@ export class FixAgentRunner {
 			);
 			const setupScripts = await this.resolveCommonSetupScripts(incident.id);
 			const systemPrompt = await this.resolveCommonSystemPrompt(incident.id);
+			const repoSystemPrompt = this.resolveRepoSystemPrompt(
+				repo.owner,
+				repo.repo,
+				repoOverrides,
+			);
 
 			const input: FixAgentInput = {
 				incidentId: incident.id,
@@ -237,7 +270,8 @@ export class FixAgentRunner {
 					defaultBranch,
 					branchName,
 					setupScripts,
-					...repoOverrides,
+					setupScript: repoOverrides.setupScript,
+					testCommand: repoOverrides.testCommand,
 				},
 				limits: {
 					timeoutMinutes: config.agent.timeoutMinutes,
@@ -247,6 +281,7 @@ export class FixAgentRunner {
 				forbiddenPaths: config.agent.forbiddenPaths,
 				telemetry: config.telemetry,
 				systemPrompt,
+				repoSystemPrompt,
 			};
 			const invocation = await this.invokeAgent(
 				input,
@@ -330,10 +365,11 @@ export class FixAgentRunner {
 
 	/**
 	 * Looks up the dashboard-managed operator instruction text shared by every
-	 * repository. A blank/whitespace-only stored prompt, an unconfigured
-	 * dependency, or a lookup failure are all treated as "no common prompt" --
-	 * mirroring `resolveCommonSetupScripts`'s fail-soft precedent, since a
-	 * broken lookup must not block a fix run.
+	 * repository, falling back to the config-file `agent.systemPrompt` when the
+	 * dashboard has none saved. A blank/whitespace-only value (stored or
+	 * configured), an unconfigured dependency, or a lookup failure all move on
+	 * to the next fallback -- mirroring `resolveCommonSetupScripts`'s fail-soft
+	 * precedent, since a broken lookup must not block a fix run.
 	 */
 	private async resolveCommonSystemPrompt(
 		incidentId: string,
@@ -342,28 +378,58 @@ export class FixAgentRunner {
 			const stored =
 				await this.deps.commonSystemPrompt?.getCommonSystemPrompt();
 			const prompt = stored?.prompt.trim();
-			return prompt ? prompt : undefined;
+			if (prompt) return prompt;
 		} catch (err) {
 			this.logger.warn("fix_agent.common_system_prompt_lookup_failed", {
 				incidentId,
 				error: err instanceof Error ? err.message : String(err),
 			});
-			return undefined;
 		}
+		const configured = this.deps.config.agent.systemPrompt?.trim();
+		return configured ? configured : undefined;
+	}
+
+	/**
+	 * Resolves the per-repository operator instructions for the resolved repo.
+	 * An enabled RepoDefinition's non-blank `systemPrompt` (already looked up
+	 * by `resolveRepoOverrides`, fail-soft) wins; a definition without one --
+	 * or a failed lookup, which lands here as `{}` -- falls through to the
+	 * config-file `repos.systemPrompts` entry for "owner/repo" (matched
+	 * case-insensitively, like `findRepoDefinitionByRepo`). Blank values are
+	 * treated as unset at both levels, so an unset per-repo prompt inherits
+	 * the common one downstream (agent-host renders one section or the other).
+	 */
+	private resolveRepoSystemPrompt(
+		owner: string,
+		repo: string,
+		repoOverrides: RepoOverrides,
+	): string | undefined {
+		if (repoOverrides.systemPrompt) return repoOverrides.systemPrompt;
+		const configured = this.deps.config.repos?.systemPrompts;
+		if (!configured) return undefined;
+		const wanted = `${owner}/${repo}`.toLowerCase();
+		for (const [key, value] of Object.entries(configured)) {
+			if (key.toLowerCase() !== wanted) continue;
+			const prompt = value.trim();
+			if (prompt) return prompt;
+		}
+		return undefined;
 	}
 
 	private async resolveRepoOverrides(
 		owner: string,
 		repo: string,
 		incidentId: string,
-	): Promise<Pick<FixAgentInput["repo"], "setupScript" | "testCommand">> {
+	): Promise<RepoOverrides> {
 		try {
 			const definition =
 				await this.deps.repoDefinitions.findRepoDefinitionByRepo(owner, repo);
 			if (!definition || !definition.enabled) return {};
+			const systemPrompt = definition.systemPrompt?.trim();
 			return {
 				setupScript: definition.setupScript,
 				testCommand: definition.testCommand,
+				systemPrompt: systemPrompt ? systemPrompt : undefined,
 			};
 		} catch (err) {
 			this.logger.warn("fix_agent.repo_definition_lookup_failed", {
