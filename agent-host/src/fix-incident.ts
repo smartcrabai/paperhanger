@@ -265,6 +265,11 @@ export async function detectAndRunTests(
 	if (testCommandOverride && testCommandOverride.trim().length > 0) {
 		command = testCommandOverride;
 	} else {
+		// One root listing backs every marker that isn't a single fixed path
+		// (root-level `*.sln`/`*.csproj` for .NET) plus all of the newer
+		// ecosystems' fixed-path markers -- cheaper than one `exists()`
+		// round-trip each.
+		const rootEntries = await sandbox.readdir(".");
 		const probe: TestSuiteProbe = {
 			packageJsonExists: await sandbox.exists("package.json"),
 			bunLockExists: await sandbox.exists("bun.lock"),
@@ -273,6 +278,27 @@ export async function detectAndRunTests(
 			yarnLockExists: await sandbox.exists("yarn.lock"),
 			goModExists: await sandbox.exists("go.mod"),
 			cargoTomlExists: await sandbox.exists("Cargo.toml"),
+			pytestIniExists: rootEntries.includes("pytest.ini"),
+			toxIniExists: rootEntries.includes("tox.ini"),
+			setupCfgExists: rootEntries.includes("setup.cfg"),
+			gemfileExists: rootEntries.includes("Gemfile"),
+			specDirExists: rootEntries.includes("spec"),
+			testDirExists: rootEntries.includes("test"),
+			pomXmlExists: rootEntries.includes("pom.xml"),
+			mvnwExists: rootEntries.includes("mvnw"),
+			buildGradleExists:
+				rootEntries.includes("build.gradle") ||
+				rootEntries.includes("build.gradle.kts"),
+			gradlewExists: rootEntries.includes("gradlew"),
+			composerJsonExists: rootEntries.includes("composer.json"),
+			phpunitXmlExists:
+				rootEntries.includes("phpunit.xml") ||
+				rootEntries.includes("phpunit.xml.dist"),
+			dotnetProjectExists: rootEntries.some(
+				(entry) => entry.endsWith(".sln") || entry.endsWith(".csproj"),
+			),
+			denoJsonExists:
+				rootEntries.includes("deno.json") || rootEntries.includes("deno.jsonc"),
 		};
 		if (probe.packageJsonExists) {
 			try {
@@ -281,6 +307,27 @@ export async function detectAndRunTests(
 				probe.packageJsonScripts = pkg.scripts;
 			} catch {
 				// Detection continues through the other supported ecosystems.
+			}
+		}
+		if (rootEntries.includes("pyproject.toml")) {
+			try {
+				probe.pyprojectToml = await sandbox.readFile("pyproject.toml");
+			} catch {
+				// Detection continues through the other supported ecosystems.
+			}
+		}
+		if (probe.denoJsonExists) {
+			try {
+				const raw = await sandbox.readFile(
+					rootEntries.includes("deno.json") ? "deno.json" : "deno.jsonc",
+				);
+				const denoJson = JSON.parse(raw) as {
+					tasks?: Record<string, string>;
+				};
+				probe.denoJsonTasks = denoJson.tasks;
+			} catch {
+				// `deno.jsonc` permits comments/trailing commas; an unparseable
+				// file just falls back to the built-in `deno test`.
 			}
 		}
 		command = detectTestCommand(probe, testCommandOverride);

@@ -9,6 +9,20 @@ const NOTHING: TestSuiteProbe = {
 	yarnLockExists: false,
 	goModExists: false,
 	cargoTomlExists: false,
+	pytestIniExists: false,
+	toxIniExists: false,
+	setupCfgExists: false,
+	gemfileExists: false,
+	specDirExists: false,
+	testDirExists: false,
+	pomXmlExists: false,
+	mvnwExists: false,
+	buildGradleExists: false,
+	gradlewExists: false,
+	composerJsonExists: false,
+	phpunitXmlExists: false,
+	dotnetProjectExists: false,
+	denoJsonExists: false,
 };
 
 describe("detectTestCommand", () => {
@@ -113,6 +127,259 @@ describe("detectTestCommand", () => {
 				cargoTomlExists: true,
 			}),
 		).toBe("go test ./...");
+	});
+
+	test("detects pytest from pytest.ini", () => {
+		expect(detectTestCommand({ ...NOTHING, pytestIniExists: true })).toBe(
+			"python -m pytest",
+		);
+	});
+
+	test("detects pytest from tox.ini", () => {
+		expect(detectTestCommand({ ...NOTHING, toxIniExists: true })).toBe(
+			"python -m pytest",
+		);
+	});
+
+	test("detects pytest from setup.cfg", () => {
+		expect(detectTestCommand({ ...NOTHING, setupCfgExists: true })).toBe(
+			"python -m pytest",
+		);
+	});
+
+	test("detects pytest from a pyproject.toml with a [tool.pytest] section", () => {
+		expect(
+			detectTestCommand({
+				...NOTHING,
+				pyprojectToml:
+					'[project]\nname = "app"\n\n[tool.pytest.ini_options]\ntestpaths = ["tests"]\n',
+			}),
+		).toBe("python -m pytest");
+	});
+
+	test("does not detect pytest from a pyproject.toml without a [tool.pytest] section", () => {
+		expect(
+			detectTestCommand({
+				...NOTHING,
+				pyprojectToml: '[project]\nname = "app"\n\n[tool.ruff]\n',
+			}),
+		).toBeUndefined();
+	});
+
+	test("does not mistake an unrelated same-prefix table (e.g. [tool.pytestcov]) for a pytest section", () => {
+		expect(
+			detectTestCommand({
+				...NOTHING,
+				pyprojectToml: '[project]\nname = "app"\n\n[tool.pytestcov]\n',
+			}),
+		).toBeUndefined();
+	});
+
+	test("detects RSpec from a Gemfile with a spec/ directory", () => {
+		expect(
+			detectTestCommand({
+				...NOTHING,
+				gemfileExists: true,
+				specDirExists: true,
+			}),
+		).toBe("bundle exec rspec");
+	});
+
+	test("detects Minitest from a Gemfile with a test/ directory", () => {
+		expect(
+			detectTestCommand({
+				...NOTHING,
+				gemfileExists: true,
+				testDirExists: true,
+			}),
+		).toBe("bundle exec rake test");
+	});
+
+	test("prefers RSpec over Minitest when both spec/ and test/ are present", () => {
+		expect(
+			detectTestCommand({
+				...NOTHING,
+				gemfileExists: true,
+				specDirExists: true,
+				testDirExists: true,
+			}),
+		).toBe("bundle exec rspec");
+	});
+
+	test("does not detect a Ruby test command from a Gemfile alone", () => {
+		expect(
+			detectTestCommand({ ...NOTHING, gemfileExists: true }),
+		).toBeUndefined();
+	});
+
+	test("does not detect a Ruby test command from spec/ or test/ without a Gemfile", () => {
+		expect(
+			detectTestCommand({
+				...NOTHING,
+				specDirExists: true,
+				testDirExists: true,
+			}),
+		).toBeUndefined();
+	});
+
+	test("uses the Maven wrapper for pom.xml when mvnw is checked in", () => {
+		expect(
+			detectTestCommand({ ...NOTHING, pomXmlExists: true, mvnwExists: true }),
+		).toBe("./mvnw test");
+	});
+
+	test("falls back to the global mvn for pom.xml without the wrapper", () => {
+		expect(detectTestCommand({ ...NOTHING, pomXmlExists: true })).toBe(
+			"mvn test",
+		);
+	});
+
+	test("uses the Gradle wrapper for a Gradle build when gradlew is checked in", () => {
+		expect(
+			detectTestCommand({
+				...NOTHING,
+				buildGradleExists: true,
+				gradlewExists: true,
+			}),
+		).toBe("./gradlew test");
+	});
+
+	test("falls back to the global gradle for a Gradle build without the wrapper", () => {
+		expect(detectTestCommand({ ...NOTHING, buildGradleExists: true })).toBe(
+			"gradle test",
+		);
+	});
+
+	test("prefers Maven over Gradle when both build files are present", () => {
+		expect(
+			detectTestCommand({
+				...NOTHING,
+				pomXmlExists: true,
+				buildGradleExists: true,
+				gradlewExists: true,
+			}),
+		).toBe("mvn test");
+	});
+
+	test("detects PHPUnit from composer.json with a phpunit.xml(.dist)", () => {
+		expect(
+			detectTestCommand({
+				...NOTHING,
+				composerJsonExists: true,
+				phpunitXmlExists: true,
+			}),
+		).toBe("vendor/bin/phpunit");
+	});
+
+	test("does not detect PHPUnit from composer.json alone", () => {
+		expect(
+			detectTestCommand({ ...NOTHING, composerJsonExists: true }),
+		).toBeUndefined();
+	});
+
+	test("does not detect PHPUnit from phpunit.xml without composer.json", () => {
+		expect(
+			detectTestCommand({ ...NOTHING, phpunitXmlExists: true }),
+		).toBeUndefined();
+	});
+
+	test("detects .NET from a root-level solution or project file", () => {
+		expect(detectTestCommand({ ...NOTHING, dotnetProjectExists: true })).toBe(
+			"dotnet test",
+		);
+	});
+
+	test("detects the built-in runner from deno.json without a tasks.test", () => {
+		expect(detectTestCommand({ ...NOTHING, denoJsonExists: true })).toBe(
+			"deno test",
+		);
+	});
+
+	test("prefers `deno task test` when deno.json defines a tasks.test", () => {
+		expect(
+			detectTestCommand({
+				...NOTHING,
+				denoJsonExists: true,
+				denoJsonTasks: { test: "deno test --coverage" },
+			}),
+		).toBe("deno task test");
+	});
+
+	test("falls back to `deno test` when tasks exists but has no test entry", () => {
+		expect(
+			detectTestCommand({
+				...NOTHING,
+				denoJsonExists: true,
+				denoJsonTasks: { build: "deno compile main.ts" },
+			}),
+		).toBe("deno test");
+	});
+
+	test("prefers the established ecosystems over the newly detected ones", () => {
+		expect(
+			detectTestCommand({
+				...NOTHING,
+				cargoTomlExists: true,
+				pytestIniExists: true,
+				gemfileExists: true,
+				specDirExists: true,
+				pomXmlExists: true,
+				composerJsonExists: true,
+				phpunitXmlExists: true,
+				dotnetProjectExists: true,
+				denoJsonExists: true,
+			}),
+		).toBe("cargo test");
+	});
+
+	test("orders the newly detected ecosystems Python > Ruby > Java > PHP > .NET > Deno", () => {
+		const rubyAndLater: TestSuiteProbe = {
+			...NOTHING,
+			gemfileExists: true,
+			specDirExists: true,
+			pomXmlExists: true,
+			composerJsonExists: true,
+			phpunitXmlExists: true,
+			dotnetProjectExists: true,
+			denoJsonExists: true,
+		};
+		expect(detectTestCommand(rubyAndLater)).toBe("bundle exec rspec");
+		expect(
+			detectTestCommand({
+				...rubyAndLater,
+				gemfileExists: false,
+				specDirExists: false,
+			}),
+		).toBe("mvn test");
+		expect(
+			detectTestCommand({
+				...rubyAndLater,
+				gemfileExists: false,
+				specDirExists: false,
+				pomXmlExists: false,
+			}),
+		).toBe("vendor/bin/phpunit");
+		expect(
+			detectTestCommand({
+				...rubyAndLater,
+				gemfileExists: false,
+				specDirExists: false,
+				pomXmlExists: false,
+				composerJsonExists: false,
+				phpunitXmlExists: false,
+			}),
+		).toBe("dotnet test");
+		expect(
+			detectTestCommand({
+				...rubyAndLater,
+				gemfileExists: false,
+				specDirExists: false,
+				pomXmlExists: false,
+				composerJsonExists: false,
+				phpunitXmlExists: false,
+				dotnetProjectExists: false,
+			}),
+		).toBe("deno test");
 	});
 
 	test("an explicit override wins over auto-detection", () => {

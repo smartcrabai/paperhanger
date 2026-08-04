@@ -526,17 +526,34 @@ The agent-host (`agent-host/`) is a separate Node-only package with its own
   comment atop `.mise.toml` and `AGENT_HOST_NODE_PATH` in the Dockerfile for
   why. A few things this doesn't cover:
   - **Automatic test-command detection** (`detectTestCommand()` in
-    `agent-host/src/lib/test-detection.ts`) only recognizes Node
-    (npm/yarn/pnpm/bun)/Go/Rust project markers. For any other language the
-    toolchain is available for the model's own shell commands, but
-    paperhanger won't pick a test command for it automatically -- which also
-    means the on-demand install for one of those other languages (e.g.
-    compiling PHP from source, ~13 minutes) happens during the model's own
-    shell commands, bounded only by `agent.timeoutMinutes` for the whole fix
-    attempt, not by the separate 10-minute bound on the deterministic
-    `detectAndRunTests()` step (`TEST_SHELL_TIMEOUT_MS` in
-    `agent-host/src/fix-incident.ts`) that a detected language
-    would go through instead.
+    `agent-host/src/lib/test-detection.ts`) recognizes Node
+    (npm/yarn/pnpm/bun), Go, Rust, Python, Ruby, Java (+Maven/Gradle), PHP,
+    .NET, and Deno project markers, in that precedence order: `package.json`
+    `scripts.test`, `go.mod`, `Cargo.toml`, pytest markers (`pytest.ini`,
+    `tox.ini`, `setup.cfg`, or a `pyproject.toml` with a `[tool.pytest...]`
+    section -- a bare `requirements*.txt` is deliberately *not* one, since a
+    dependency manifest doesn't declare a test suite and detection runs no
+    install step, so `python -m pytest` would fail deterministically), a
+    `Gemfile` with `spec/` (`bundle exec rspec`) or `test/` (`bundle exec
+    rake test`), `pom.xml` or a Gradle build file (preferring a checked-in
+    `mvnw`/`gradlew` wrapper over the global binary), `composer.json` with
+    `phpunit.xml(.dist)` (`vendor/bin/phpunit`), a root-level `*.sln`/
+    `*.csproj` (`dotnet test`), and `deno.json(c)` (a defined `tasks.test`
+    runs as `deno task test`, mirroring how `package.json` `scripts.test`
+    wins over the toolchain default; otherwise the built-in `deno test`).
+    For any other language the toolchain is still available for the model's
+    own shell commands, but paperhanger won't pick a test command for it
+    automatically. One bound nuance to be aware of: a detected language's
+    on-demand install now happens inside the deterministic
+    `detectAndRunTests()` step's separate 10-minute bound
+    (`TEST_SHELL_TIMEOUT_MS` in `agent-host/src/fix-incident.ts`), so a
+    cold-start first detected run for a language that compiles from source
+    (e.g. PHP, ~13 minutes) can hit that bound while the toolchain is still
+    installing and surface as a failed test run even though nothing about
+    the repo's tests actually failed -- the model can still complete the
+    install through its own shell commands, which remain bounded only by
+    `agent.timeoutMinutes` for the whole fix attempt, after which detected
+    runs are fast as long as the same container is still running.
   - **Docker**: CLI + compose plugin only, no `dockerd` -- the fix agent can
     drive a Docker daemon reachable via a bind-mounted host
     `/var/run/docker.sock`, which is an operator/deploy-time setup, not
