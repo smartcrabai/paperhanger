@@ -105,7 +105,12 @@ interface RepoDefinitionStore {
 
 ### 3.4 Telemetry Collector(テレメトリ収集・抽象化)
 
-- `TelemetrySource` インターフェースで抽象化。実装は GreptimeDB 直クエリに加え、Grafana OSS スタック向けの Loki/Tempo/Prometheus(いずれも単一シグナル専用。詳細は後述)、および ClickStack/SigNoz/OpenObserve(いずれも直クエリ。詳細は後述)
+- `TelemetrySource` インターフェースで抽象化。初期実装は GreptimeDB 直クエリのみだったが、
+  現在は Grafana OSS スタック向けの Loki/Tempo/Prometheus(いずれも単一シグナル専用)、
+  ClickStack/SigNoz/OpenObserve(いずれも直クエリ)、および Datadog・New Relic・
+  Grafana(クエリフロントエンドとして)・Zabbix・Mackerel の実装も追加されている
+  (`config.telemetry.source` の discriminated union で切り替え、同時に有効化できる
+  のは 1 系統のみ。詳細は後述)
 
 ```ts
 interface TelemetryQuery {
@@ -130,14 +135,39 @@ interface TelemetrySource {
 - ClickStack 実装(`src/telemetry/clickstack.ts`): HyperDX は 2025 年 3 月に ClickHouse に買収され、同年 5 月に「ClickStack」として OTel Collector + ClickHouse + HyperDX UI の統合スタックへ再編された。HyperDX UI 自体に独立したクエリ API はなく、ClickHouse を直接クエリする構成のため、本実装は ClickHouse の HTTP インターフェース(SQL、`FORMAT JSON`)で ClickStack 付属コレクタが作る OTel スキーマ(`otel_logs`/`otel_traces`、`ResourceAttributes`/`LogAttributes` は `Map(String, String)`)に対して直接クエリする。ClickHouse には GreptimeDB のような PromQL 互換エンドポイントが無いため、**メトリクス収集は未対応**(空配列 + notes への記録のみ)
 - SigNoz 実装(`src/telemetry/signoz.ts`): 統一 `query_range` API(v5、`SIGNOZ-API-KEY` ヘッダ認証)。OTel ネイティブで、ビルダークエリの `filter.expression`(SQL 風 DSL)でラベル/時間窓を絞り込む。メトリクスはメトリック名 + 集約関数を指定するビルダー形式で PromQL 文字列を受け付けないため、こちらも**メトリクス収集は未対応**
 - OpenObserve 実装(`src/telemetry/openobserve.ts`): `_search` API(SQL 風、`Basic` 認証)。logs/traces ともにストリームへの直接 SQL(`SELECT * FROM {stream} WHERE ...`)で取得し、trace_id 単位のスパン列も取得できる(専用の `traces/latest` API はトレース単位の要約のみを返すため使用しない)。メトリクスは Prometheus 互換の `query_range` 相当エンドポイントがあると見込んで実装しているが、公開ドキュメントで読み取り専用パスの記載を確認できておらず未検証(本 PR の "Testing note" 参照)
-- いずれの Loki/Tempo/Prometheus/ClickStack/SigNoz/OpenObserve も Flue の追加クエリ Tool(後述)には未接続。追加クエリ Tool は現時点で GreptimeDB のみ対応
+- Datadog 実装: Logs Search API v2(`POST /api/v2/logs/events/search`)+
+  Spans Search API v2(`POST /api/v2/spans/events/search`)+ 従来(v1)の
+  タイムシリーズ Metrics Query API。認証は `DD-API-KEY` / `DD-APPLICATION-KEY`
+  ヘッダー、接続先サイト(`datadoghq.com` / `datadoghq.eu` 等)は設定可能
+- New Relic 実装: NerdGraph(GraphQL API)経由の NRQL で `Log` / `Span` /
+  `Metric` イベントタイプを問い合わせる。認証は `Api-Key` ヘッダー(User API
+  key)、アカウント ID とリージョン(US / EU)は設定可能
+- Grafana 実装: Grafana 自体はストアではなく**クエリのフロントエンド**なので、
+  裏で provisioning されている Loki / Tempo / Prometheus データソースを UID
+  で指定し `POST /api/ds/query` 経由で問い合わせる(データソースごとの直接 API
+  ではなくこちらを選んだ理由・必要な service account トークンの権限は
+  `src/telemetry/grafana.ts` のコメントと README.md の設定リファレンスを参照)
+- Zabbix / Mackerel 実装: **両者は監視システムであり、ログ・トレースストアでは
+  ない**ため、ベストエフォートのコンテキスト補完として位置付ける。
+  `queryTraces` は常に空配列(両者ともトレース概念自体を持たない)、
+  `queryLogs` は problem/event 履歴(Zabbix)・アラート履歴(Mackerel)を
+  疑似的な「エラーログ」として返す、`queryMetrics` はホスト/サービスの解決と
+  メトリクス名のヒントが両方揃った場合のみ 1 系列を返す。この制約は隠さず
+  README.md の設定リファレンスと各実装のコメントに明記している。Zabbix は
+  API トークンを `Authorization: Bearer` ヘッダーで送る前提(6.4 以降を想定)、
+  Mackerel は `X-Api-Key` ヘッダーで認証する
 - **収集戦略**(自動収集フェーズ):
   1. アラートのラベルから `service.name` 等を特定し、時間窓内のエラーログを取得(特定できない場合は時間窓のみで件数を絞って取得)
   2. エラーログに紐づく `trace_id` から代表トレースを取得。加えてサービスの代表的なスパンもサンプリング取得
   3. **メトリクスはアラートの `annotations` に `promql` または `metric` キーがある場合のみ取得**。無ければ取得自体を行わず、その旨を notes に記録するのみ
   4. 収集結果がトークン予算を超える場合、優先度の低いものから順に削減(メトリクス→トレース→非例外ログ→例外/スタックトレースを含むログ)。スタックトレース・例外メッセージらしさの判定は独立した抽出ステップではなく、この削減時の優先度判定にのみ使う
 - 収集結果はトークン予算内に収まるようサンプリング・要約して `IncidentContext` に整形
-- さらに **Flue の Tool としても公開**し、エージェントが診断中に追加クエリを発行できるようにする(現時点では GreptimeDB のみ対応。Loki/Tempo/Prometheus/ClickStack/SigNoz/OpenObserve をこの Tool に接続するのは将来課題)
+- さらに **Flue の Tool としても公開**し、エージェントが診断中に追加クエリを発行できるように
+  する(`query_telemetry`)。この追加クエリ Tool は現時点では GreptimeDB(SQL /
+  PromQL)専用で、Loki/Tempo/Prometheus/ClickStack/SigNoz/OpenObserve を含む
+  他バックエンドは自動収集フェーズのみをサポートする(`agent-host/src/tools.ts`
+  の dispatch、および `src/agent/sidecar.ts` / `src/agent/runner.ts` の
+  `telemetry` フィールドのコメントを参照)
 
 ### 3.5 Repo Resolver(修正対象リポジトリの解決)
 

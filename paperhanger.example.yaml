@@ -40,11 +40,18 @@ sources:
 
 # Discriminated union on `source` (like `storage`/`notifiers` above); exactly
 # one of "greptimedb", "loki", "tempo", "prometheus", "clickstack", "signoz",
-# "openobserve" is active at a time. Omit the whole `telemetry` section to run
-# without one (see the config reference below). "loki"/"tempo"/"prometheus" are
-# single-signal sources -- pick those if you run a Grafana OSS stack with those
-# three as separate backends, rather than GreptimeDB's single do-everything
-# endpoint. The alternatives below are commented out.
+# "openobserve", "datadog", "newrelic", "grafana", "zabbix", "mackerel" is
+# active at a time. Omit the whole `telemetry` section to run without one
+# (see the config reference below). "loki"/"tempo"/"prometheus" are
+# single-signal sources -- pick those if you run a Grafana OSS stack with
+# those three as separate backends, rather than GreptimeDB's single
+# do-everything endpoint. Only "greptimedb" exposes a follow-up
+# query_telemetry tool to the fix agent during diagnosis -- every source
+# here still feeds the initial collection phase. Zabbix and Mackerel are
+# monitoring systems, not log/trace stores, so their collection is
+# necessarily best-effort (see README.md's config reference and
+# src/telemetry/{zabbix,mackerel}.ts's module doc comments). The
+# alternatives below are commented out.
 telemetry:
   source: greptimedb
   url: ${GREPTIMEDB_URL}
@@ -55,6 +62,31 @@ telemetry:
   # logsTable: opentelemetry_logs
   # tracesTable: opentelemetry_traces
   # timeoutMs: 30000
+# telemetry:
+#   source: datadog
+#   apiKey: ${DATADOG_API_KEY}
+#   appKey: ${DATADOG_APP_KEY}
+#   site: datadoghq.com # or datadoghq.eu, us3.datadoghq.com, ...
+# telemetry:
+#   source: newrelic
+#   apiKey: ${NEW_RELIC_API_KEY} # NerdGraph User API key, "NRAK-..."
+#   accountId: 1234567
+#   region: US # or EU
+# telemetry:
+#   source: grafana
+#   url: https://myorg.grafana.net
+#   serviceAccountToken: ${GRAFANA_SERVICE_ACCOUNT_TOKEN}
+#   # Each UID is optional; the corresponding signal is skipped if omitted.
+#   lokiDatasourceUid: ${GRAFANA_LOKI_UID}
+#   tempoDatasourceUid: ${GRAFANA_TEMPO_UID}
+#   prometheusDatasourceUid: ${GRAFANA_PROMETHEUS_UID}
+# telemetry:
+#   source: zabbix
+#   url: https://zabbix.example.com/zabbix # without /api_jsonrpc.php
+#   apiToken: ${ZABBIX_API_TOKEN} # assumes Zabbix >= 6.4 (Authorization: Bearer)
+# telemetry:
+#   source: mackerel
+#   apiKey: ${MACKEREL_API_KEY}
 
 # Alternative telemetry sources for a Grafana OSS stack (Loki/Tempo/
 # Prometheus), each single-signal: queries for the other two signals log a
