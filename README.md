@@ -5,8 +5,8 @@ loop until the pull request lands:
 
 **alert → telemetry collection → Flue agent diagnosis → auto fix PR**
 
-Given a webhook alert (Grafana Alerting, Prometheus Alertmanager, or a
-generic internal format), paperhanger deduplicates it against any
+Given a webhook alert (Grafana Alerting, Prometheus Alertmanager, Sentry, or
+a generic internal format), paperhanger deduplicates it against any
 in-progress incident, collects the surrounding logs/traces/metrics from
 GreptimeDB, resolves which GitHub repository is responsible, and hands the
 whole bundle to a [Flue](https://flueframework.com/) agent that diagnoses
@@ -29,11 +29,13 @@ flowchart LR
     subgraph Sources
       GF[Grafana Alerting]
       AM[Alertmanager]
+      SE[Sentry]
       GN[Generic / internal]
     end
 
     GF -- webhook --> ING
     AM -- webhook --> ING
+    SE -- webhook --> ING
     GN -- webhook --> ING
 
     subgraph container["paperhanger container (single image)"]
@@ -223,6 +225,64 @@ All data routes require the same `server.apiToken`. The page prompts for it
 once, keeps it in `localStorage`, and sends it as `X-Api-Token` on every
 request. The dashboard has no merge/approve/deploy action of any kind.
 
+## Webhook sources
+
+Every source posts to `POST /webhooks/{source}` and authenticates with the
+per-source shared secret (`sources.<name>.secret`) via the `X-Webhook-Token`
+header or a `?token=` query param. Grafana Alerting, Prometheus Alertmanager,
+and the generic pass-through format need no source-side notes beyond that;
+Sentry does, below.
+
+### Sentry
+
+The `sentry` adapter consumes
+[Integration Platform](https://docs.sentry.io/organization/integrations/integration-platform/webhooks/)
+webhooks -- the payload format is identical on Sentry SaaS and self-hosted
+installations. Setup:
+
+1. Add a `sentry` entry under `sources:` with its own `secret` (see
+   `paperhanger.example.yaml`).
+2. In Sentry, create an **internal integration** (Settings -> Custom
+   Integrations) and set its webhook URL to
+   `https://<paperhanger-host>/webhooks/sentry?token=<secret>`. Sentry's
+   webhook settings have no custom-header field, so the token rides in the
+   query string -- use HTTPS so it is not exposed in transit.
+3. Subscribe the integration to the **issue** resource (state changes), and
+   add a "Send a notification via an integration" action to any issue alert
+   rule that should trigger diagnosis (those fire the `event_alert`
+   resource).
+
+Two resources map onto paperhanger's alert lifecycle; every other resource
+(`metric_alert`, `installation`, `error`, ...) is accepted and ignored:
+
+| Sentry webhook | paperhanger event |
+|---|---|
+| `event_alert` with action `triggered` (issue alert rule fired) | `firing` |
+| `issue` with action `created` or `unresolved` (regression) | `firing` |
+| `issue` with action `resolved` or `archived` | `resolved` |
+| anything else (e.g. `issue` `assigned`) | ignored (accepted, no event) |
+
+Normalization notes:
+
+- **fingerprint** is the Sentry issue id, so repeated triggers of the same
+  issue dedupe onto one incident, and a later `resolved` closes it.
+- **severity** maps Sentry `level` into the spec vocabulary:
+  `fatal`/`error` -> `critical`, `warning` -> `warning`, `info`/`debug` ->
+  `info`, anything else -> `unknown`.
+- **labels** carry `project`, `platform`, `culprit`, `level`, plus
+  `environment`/`release`/`rule` when present; for `event_alert` payloads all
+  event tags are promoted into labels too (curated fields win on conflicts),
+  so repo-resolution mappings can match on tags such as `service`.
+- **generatorUrl** links back to the issue/event in the Sentry UI
+  (`web_url`).
+- For `issue` `resolved`/`archived` the payload carries no resolution time,
+  so `endsAt` comes from the `Sentry-Hook-Timestamp` header.
+
+Sentry signs these webhooks with `Sentry-Hook-Signature` (HMAC-SHA256 of the
+raw body with the integration's client secret); paperhanger deliberately does
+not verify it in-process -- see "Security notes" below for the rationale and
+what to do if you want it verified anyway.
+
 ## Config reference
 
 Every key from `paperhanger.example.yaml`, with its default when omitted
@@ -235,7 +295,7 @@ Every key from `paperhanger.example.yaml`, with its default when omitted
 | `storage.driver` | *(required)* | `sqlite` or `postgres` |
 | `storage.path` | *(required if `sqlite`)* | SQLite file path; mount `/data` as a volume |
 | `storage.url` | *(required if `postgres`)* | `Bun.sql` connection string |
-| `sources.<name>.secret` | `{}` (no sources) | Per-source shared secret, checked via `X-Webhook-Token` header or `?token=` query param. Map key must match an implemented adapter name: `grafana`, `alertmanager`, or `generic` |
+| `sources.<name>.secret` | `{}` (no sources) | Per-source shared secret, checked via `X-Webhook-Token` header or `?token=` query param. Map key must match an implemented adapter name: `grafana`, `alertmanager`, `sentry`, or `generic`. Sentry cannot set custom headers, so its token rides in the webhook URL's `?token=` query param -- see [Webhook sources](#webhook-sources) |
 | `telemetry.source` | *(the whole `telemetry` section is optional)* | Discriminated union like `storage`/`notifiers`; `greptimedb` is the only backend today. Omit `telemetry` entirely to run without one -- the pipeline degrades to an empty-telemetry context (see "Incident state machine") rather than failing |
 | `telemetry.url` | *(required if `telemetry` is set)* | GreptimeDB HTTP endpoint |
 | `telemetry.database` | *(required if `telemetry` is set)* | e.g. `public` |
@@ -394,6 +454,20 @@ The agent-host (`agent-host/`) is a separate Node-only package with its own
   unauthenticated, since it carries no data of its own.
   `/healthz` and `/readyz` are never gated. See `paperhanger.example.yaml`
   and the config reference above.
+- **Webhook endpoints (`POST /webhooks/{source}`) all authenticate the same
+  way**: a per-source shared secret presented as `X-Webhook-Token` or
+  `?token=`, constant-time compared before the body is read. Source-specific
+  signature schemes are intentionally NOT verified in-process -- notably
+  Sentry's `Sentry-Hook-Signature` (HMAC-SHA256 of the raw body with the
+  integration's client secret). The `SourceAdapter` contract receives only
+  the request and has no per-adapter secret plumbing, so verifying it would
+  mean widening the shared contract (or special-casing one source) and
+  breaking the uniform auth model; the shared secret already gates every
+  webhook call with equivalent strength. Put paperhanger behind HTTPS so the
+  token (which for Sentry rides in the webhook URL's query string) is not
+  exposed in transit, and if your threat model additionally requires Sentry's
+  native signature verification, enforce it at a reverse proxy in front of
+  paperhanger.
 - **The fix agent's sandbox (`agent-host`, `local()` from
   `@flue/runtime/node`) has no isolation of its own** -- the agent-host
   container itself is the isolation boundary. Provider API keys

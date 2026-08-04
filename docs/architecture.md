@@ -51,6 +51,7 @@ src/
       grafana.ts           # Grafana Alerting webhook payloads
       alertmanager.ts      # Prometheus Alertmanager webhook payloads
       generic.ts           # Pass-through internal format
+      sentry.ts            # Sentry Integration Platform webhooks (event_alert + issue resources)
   storage/
     types.ts               # IncidentStore + RepoDefinitionStore + CommonSetupScriptStore + CommonSystemPromptStore interfaces
     sqlite.ts              # bun:sqlite implementation (all interfaces)
@@ -191,4 +192,9 @@ restart can observe where each incident stopped. Terminal states trigger a notif
 
 Each configured source has a shared secret. Requests must present it either as an
 `X-Webhook-Token` header or a `?token=` query parameter; mismatch or absence yields 401
-without reading the body further.
+without reading the body further. Source-specific signature schemes are not verified
+in-process (notably Sentry's `Sentry-Hook-Signature`, an HMAC-SHA256 of the raw body
+with the integration's client secret): the `SourceAdapter` contract receives only the
+request and has no per-adapter secret plumbing, so every source authenticates through
+the one uniform mechanism -- see README.md "Security notes" for the rationale and the
+reverse-proxy alternative.

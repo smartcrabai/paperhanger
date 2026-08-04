@@ -43,8 +43,8 @@ received → collecting → resolving_repo → diagnosing → fixing
 
 - `Bun.serve()` による HTTP サーバー
 - `POST /webhooks/{source}` で受信。`source` ごとに `SourceAdapter` が payload を共通形式に正規化
-- 初期実装アダプタ: **grafana**(Grafana Alerting webhook)、**alertmanager**、**generic**(内部形式をそのまま受ける)
-- 将来: Sentry 等を adapter 追加のみで対応
+- 初期実装アダプタ: **grafana**(Grafana Alerting webhook)、**alertmanager**、**generic**(内部形式をそのまま受ける)、**sentry**(Sentry Integration Platform webhook の `event_alert` / `issue` リソース)
+- 将来: その他のソースも adapter 追加のみで対応
 - 認証: ソースごとの共有シークレット(ヘッダ or クエリトークン)。不一致は 401
 
 ```ts

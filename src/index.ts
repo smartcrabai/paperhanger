@@ -26,6 +26,7 @@ import dashboard from "./dashboard/index.html";
 import { alertmanagerAdapter } from "./ingest/adapters/alertmanager";
 import { genericAdapter } from "./ingest/adapters/generic";
 import { grafanaAdapter } from "./ingest/adapters/grafana";
+import { sentryAdapter } from "./ingest/adapters/sentry";
 import { createServer } from "./ingest/server";
 import { createLogger } from "./observability/logger";
 import type { Logger } from "./observability/logger";
@@ -185,6 +186,7 @@ async function main(): Promise<void> {
 		[grafanaAdapter.name]: grafanaAdapter,
 		[genericAdapter.name]: genericAdapter,
 		[alertmanagerAdapter.name]: alertmanagerAdapter,
+		[sentryAdapter.name]: sentryAdapter,
 	};
 
 	const server = createServer({
