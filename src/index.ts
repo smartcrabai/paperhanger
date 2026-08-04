@@ -120,15 +120,6 @@ async function main(): Promise<void> {
 			)
 		: undefined;
 
-	// `AgentHostSidecar`/`FixAgentRunner` only forward telemetry connection
-	// details to the fix agent's `query_telemetry` follow-up tool, which is
-	// wired for `greptimedb` only so far (see telemetry/factory.ts's doc
-	// comment) -- narrow explicitly rather than widening those two modules'
-	// long-standing `{ source: "greptimedb"; ... }` config types to the full
-	// (now seven-member) `TelemetryConfig` union.
-	const greptimeDbTelemetry =
-		config.telemetry?.source === "greptimedb" ? config.telemetry : undefined;
-
 	const github = new GitHubAppClient(
 		{ appId: config.github.appId, privateKey: config.github.privateKey },
 		logger.child({ component: "github-app-client" }),
@@ -147,7 +138,7 @@ async function main(): Promise<void> {
 	// child process in the default (internal) mode, and is a no-op when
 	// `agent.hostUrl` points at an externally deployed agent-host instead.
 	const sidecar = new AgentHostSidecar({
-		config: { agent: config.agent, telemetry: greptimeDbTelemetry },
+		config: { agent: config.agent, telemetry: config.telemetry },
 		logger: logger.child({ component: "agent-host-sidecar" }),
 		serverPath: Bun.env.AGENT_HOST_SERVER_PATH,
 		nodeBinPath: Bun.env.AGENT_HOST_NODE_PATH,
@@ -170,7 +161,7 @@ async function main(): Promise<void> {
 		repoDefinitions: store,
 		commonSetupScripts: store,
 		commonSystemPrompt: store,
-		config: { agent: config.agent, telemetry: greptimeDbTelemetry },
+		config: { agent: config.agent, telemetry: config.telemetry },
 		logger: logger.child({ component: "fix-agent-runner" }),
 		tracer: tracing.getTracer("fix-agent-runner"),
 	});
