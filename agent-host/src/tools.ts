@@ -88,8 +88,8 @@ export function createTelemetryTools() {
 						"root-cause hypothesis with additional evidence beyond what was already collected.",
 					input: QueryTelemetryInputSchema,
 					output: QueryTelemetryOutputSchema,
-					async run({ input }) {
-						return queryTelemetry(config, input);
+					async run({ data }) {
+						return { output: await queryTelemetry(config, data) };
 					},
 				}),
 			];

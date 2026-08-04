@@ -1,10 +1,6 @@
 /**
- * Remote/branch tamper-check comparison used just before the deterministic
- * commit+push step in `../workflows/fix-incident.ts` (finding 1c: verify the
- * model didn't repoint the checkout's git remote or switch branches before
- * the workflow's own commit/push runs). Pure comparison logic, no
- * `@flue/*` import, so it is unit-testable directly by the main paperhanger
- * repo's `bun test`.
+ * Remote/branch tamper-check comparison used before the deterministic
+ * commit+push step. Pure comparison logic, so it is unit-testable directly.
  */
 
 export interface TamperCheckInput {

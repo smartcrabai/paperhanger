@@ -4,14 +4,19 @@ import { runConditionalSetupScripts } from "./common-setup-scripts.ts";
 describe("runConditionalSetupScripts", () => {
 	test("runs matching scripts in order, skips missing triggers, and stops on failure", async () => {
 		const commands: string[] = [];
+		const signals: (AbortSignal | undefined)[] = [];
 		const runLabels: string[] = [];
 		const harness = {
-			async shell(command: string): Promise<{ exitCode: number }> {
+			async exec(
+				command: string,
+				options: { timeoutMs: number; signal?: AbortSignal },
+			): Promise<{ exitCode: number }> {
 				commands.push(command);
+				signals.push(options.signal);
 				return { exitCode: command.includes("package-lock.json") ? 42 : 0 };
 			},
 		};
-
+		const controller = new AbortController();
 		const result = await runConditionalSetupScripts(
 			harness,
 			[
@@ -27,6 +32,7 @@ describe("runConditionalSetupScripts", () => {
 					? { ok: false, failureReason: "failed" }
 					: { ok: true };
 			},
+			controller.signal,
 		);
 
 		expect(result).toEqual({ ok: false, failureReason: "failed" });
@@ -39,13 +45,18 @@ describe("runConditionalSetupScripts", () => {
 			"setup script for bun.lock",
 			"setup script for packages/app's lock",
 		]);
+		expect(signals).toEqual([
+			controller.signal,
+			controller.signal,
+			controller.signal,
+		]);
 	});
 
 	test("fails closed when checking a trigger file cannot complete", async () => {
 		let ran = false;
 		const result = await runConditionalSetupScripts(
 			{
-				async shell() {
+				async exec() {
 					return { exitCode: 1 };
 				},
 			},

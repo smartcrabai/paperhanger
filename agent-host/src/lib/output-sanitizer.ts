@@ -1,20 +1,9 @@
 /**
- * Central output-redaction helpers for the `fix-incident` workflow (finding
- * 2). Pulled out of `../workflows/fix-incident.ts` into `lib/` -- alongside
- * this file's `import type` of `../contract.ts` (a plain Valibot schema
- * module, no `@flue/*` dependency) -- specifically so it stays unit
- * testable directly by the main paperhanger repo's `bun test`.
- *
- * This matters in practice: `../workflows/fix-incident.ts` imports
- * `../fix-agent.ts`, which imports `local` from `@flue/runtime/node`, which
- * (per docs/research/flue.md) statically imports `node:sqlite` -- a module
- * Bun does not implement. Importing the workflow file itself under Bun's
- * test runner fails immediately for that reason, so the security-relevant,
- * dependency-free logic has to live in a module the workflow file merely
- * *composes*, not one it re-exports from.
+ * Central output-redaction helpers for the fix agent. This module has no
+ * Flue runtime dependency, so it remains directly unit-testable from Bun.
  */
 
-import type { WorkflowInput, WorkflowOutput } from "../contract.ts";
+import type { FixIncidentInput, FixIncidentOutput } from "../contract.ts";
 import { extractCloneToken, redactSecrets } from "./redaction.ts";
 
 /**
@@ -23,7 +12,7 @@ import { extractCloneToken, redactSecrets } from "./redaction.ts";
  * arbitrary error/report text (see the redaction module's own note).
  */
 export function collectSecrets(
-	input: WorkflowInput,
+	input: FixIncidentInput,
 ): ReadonlyArray<string | undefined> {
 	// `input.telemetry` is a discriminated union on `source`; every currently
 	// supported source (just "greptimedb" today) happens to carry its secret
@@ -41,9 +30,9 @@ export function collectSecrets(
  * own catch-block error message.
  */
 export function sanitizeOutput(
-	output: WorkflowOutput,
+	output: FixIncidentOutput,
 	secrets: ReadonlyArray<string | undefined>,
-): WorkflowOutput {
+): FixIncidentOutput {
 	return {
 		...output,
 		diagnosis: redactSecrets(output.diagnosis, secrets),

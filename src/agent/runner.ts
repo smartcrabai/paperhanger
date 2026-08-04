@@ -1,21 +1,3 @@
-/**
- * FixAgentRunner: invokes the `fix-incident` Flue workflow (agent-host) for a
- * single incident and turns its result into a PR, a report-only outcome, or a
- * failure. See docs/architecture.md "Flue agent host (Node sidecar)" and
- * docs/spec.md section 3.6.
- *
- * Division of responsibility (already decided in docs/architecture.md): the
- * agent host diagnoses, edits code, runs tests, and pushes a branch — it
- * never creates PRs. This runner never trusts the agent's own self-report of
- * what it changed; it re-derives the actual diff from the GitHub compare API
- * and only creates a PR once that diff clears the configured guardrails.
- *
- * This runner returns a structured result. It does not send notifications and
- * does not set a terminal incident status itself (the M7 pipeline owns
- * that) — but it does manage the intermediate "diagnosing"/"fixing"
- * transitions.
- */
-
 import { createFlueClient as defaultCreateFlueClient } from "@flue/sdk";
 import {
 	context,
@@ -41,14 +23,14 @@ import type {
 import { renderContextMarkdown } from "../telemetry/context-builder";
 import type { IncidentContext } from "../telemetry/types";
 import {
-	FIX_INCIDENT_WORKFLOW_NAME,
-	type FixAgentWorkflowInput,
-	type FixAgentWorkflowOutput,
-	FixAgentWorkflowOutputSchema,
+	FIX_INCIDENT_AGENT_ROUTE,
+	FIX_INCIDENT_RESULT_DATA_NAME,
+	type FixAgentInput,
+	type FixAgentOutput,
+	FixAgentOutputSchema,
 } from "./contract";
 import { findForbiddenPaths } from "./forbidden-paths";
 
-/** Structural subset of `GitHubAppClient` this runner depends on. */
 export interface FixAgentGitHubClient {
 	getRepoInstallation(owner: string, repo: string): Promise<{ id: number }>;
 	createInstallationToken(
@@ -76,20 +58,38 @@ export interface FixAgentGitHubClient {
 	): Promise<void>;
 }
 
-/** Structural subset of `@flue/sdk`'s `FlueClient` this runner depends on. */
-export interface FixAgentFlueClient {
-	workflows: {
-		invoke(
-			name: string,
-			options: { input?: unknown; wait: "result"; signal?: AbortSignal },
-		): Promise<{ runId: string; result: unknown }>;
-	};
+export interface FixAgentAdmission {
+	streamUrl: string;
+	offset: string;
+	submissionId: string;
+	uid: string;
+	deduplicated?: boolean;
 }
 
-/** Either a ready-made client, or a base URL the runner builds one from lazily. */
-export type FlueClientProvider = FixAgentFlueClient | { baseUrl: string };
+export interface FixAgentFlueClient {
+	send(options: {
+		message: { kind: "signal"; type: string; body: string };
+		initialData: unknown;
+		uid: null;
+		signal?: AbortSignal;
+	}): Promise<FixAgentAdmission>;
+	read(
+		admission: FixAgentAdmission,
+		options?: { signal?: AbortSignal },
+	): Promise<{
+		submissionId: string;
+		data: Record<string, unknown[]>;
+	}>;
+	abort(options?: { signal?: AbortSignal }): Promise<{ aborted: boolean }>;
+}
 
-/** Narrow config slice this runner needs; keeps it decoupled from the full `Config`. */
+export interface FlueClientProvider {
+	baseUrl: string;
+}
+export type FixAgentFlueClientFactory = (options: {
+	url: string;
+}) => FixAgentFlueClient;
+
 export interface FixAgentRunnerConfig {
 	agent: {
 		model: string;
@@ -99,10 +99,6 @@ export interface FixAgentRunnerConfig {
 		maxFixAttempts: number;
 		draftPr: boolean;
 	};
-	/**
-	 * `source`-discriminated union mirroring `src/config/schema.ts`'s
-	 * `TelemetryConfig` -- `greptimedb` is the only member today.
-	 */
 	telemetry?: {
 		source: "greptimedb";
 		url: string;
@@ -115,17 +111,13 @@ export interface FixAgentRunnerDeps {
 	flue: FlueClientProvider;
 	github: FixAgentGitHubClient;
 	store: IncidentStore;
-	/** Used to look up a matching, enabled RepoDefinition for per-repository overrides. */
 	repoDefinitions: Pick<RepoDefinitionStore, "findRepoDefinitionByRepo">;
-	/** Supplies conditional setup scripts shared by every repository. */
 	commonSetupScripts?: Pick<CommonSetupScriptStore, "listCommonSetupScripts">;
 	/** Supplies the dashboard-managed operator instruction text shared by every repository. */
 	commonSystemPrompt?: Pick<CommonSystemPromptStore, "getCommonSystemPrompt">;
 	config: FixAgentRunnerConfig;
 	logger: Logger;
-	/** Injectable for tests; defaults to `@flue/sdk`'s `createFlueClient`. Only used for the `{ baseUrl }` `FlueClientProvider` form. */
-	createFlueClient?: typeof defaultCreateFlueClient;
-	/** Tracer for the `agent.invoke_workflow` span. Defaults to a no-op tracer (tracing disabled) when omitted. */
+	createFlueClient?: FixAgentFlueClientFactory;
 	tracer?: Tracer;
 }
 
@@ -141,69 +133,55 @@ export type FixAgentRunResult =
 
 const PR_LABELS = ["paperhanger", "automated-fix"];
 
-function isFlueClient(
-	provider: FlueClientProvider,
-): provider is FixAgentFlueClient {
-	return "workflows" in provider;
-}
-
-/**
- * Best-effort extraction of a workflow run id from a thrown error, for the
- * timeout log line. `@flue/sdk` 1.0.0-beta.9 does not expose a run id on an
- * aborted `workflows.invoke(...)` call (the id is only returned as part of
- * the success response), so this currently always resolves to `undefined`;
- * it stays defensive in case a future SDK version attaches one to the error.
- */
-function extractRunId(err: unknown): string | undefined {
-	if (err && typeof err === "object" && "runId" in err) {
-		const runId = (err as { runId?: unknown }).runId;
-		return typeof runId === "string" ? runId : undefined;
-	}
-	return undefined;
+function conversationUrl(baseUrl: string, agentRunId: string): string {
+	const url = new URL(baseUrl);
+	url.search = "";
+	url.hash = "";
+	const prefix = url.pathname.replace(/\/+$/, "");
+	url.pathname = `${prefix}${FIX_INCIDENT_AGENT_ROUTE}/${encodeURIComponent(agentRunId)}`;
+	return url.toString();
 }
 
 function buildPrBody(
-	output: FixAgentWorkflowOutput,
+	output: FixAgentOutput,
 	incident: Incident,
 	alert: IncidentEvent,
 	contextMarkdown: string,
 ): string {
-	const lines: string[] = [];
-	lines.push(output.report.trim());
-	lines.push("");
-	lines.push("## Telemetry evidence");
-	lines.push(
+	const lines = [
+		output.report.trim(),
+		"",
+		"## Telemetry evidence",
 		"<details>",
 		"<summary>Collected logs, traces, and metrics (click to expand)</summary>",
 		"",
-	);
-	lines.push(contextMarkdown);
-	lines.push("", "</details>", "");
-	lines.push("## Alert");
-	lines.push(
+		contextMarkdown,
+		"",
+		"</details>",
+		"",
+		"## Alert",
 		`- **${alert.title}** (severity: ${alert.severity}, source: ${alert.source})`,
-	);
-	if (alert.generatorUrl) {
-		lines.push(`- [Alert link](${alert.generatorUrl})`);
-	}
-	lines.push("");
-	lines.push(`_Incident ${incident.id}. Generated by paperhanger._`);
+	];
+	if (alert.generatorUrl) lines.push(`- [Alert link](${alert.generatorUrl})`);
+	lines.push("", `_Incident ${incident.id}. Generated by paperhanger._`);
 	return lines.join("\n");
 }
 
 export class FixAgentRunner {
 	private readonly logger: Logger;
-	private readonly createFlueClientFn: typeof defaultCreateFlueClient;
-	private flueClient: FixAgentFlueClient | undefined;
+	private readonly createFlueClientFn: FixAgentFlueClientFactory;
 
 	constructor(private readonly deps: FixAgentRunnerDeps) {
 		this.logger = deps.logger.child({ component: "fix-agent-runner" });
-		this.createFlueClientFn = deps.createFlueClient ?? defaultCreateFlueClient;
+		this.createFlueClientFn =
+			deps.createFlueClient ??
+			((options) =>
+				defaultCreateFlueClient(options) as unknown as FixAgentFlueClient);
 	}
 
 	async run(
 		incident: Incident,
-		context: IncidentContext,
+		incidentContext: IncidentContext,
 		repo: ResolvedRepo,
 	): Promise<FixAgentRunResult> {
 		const { store, config } = this.deps;
@@ -212,14 +190,11 @@ export class FixAgentRunner {
 			startedAt: new Date().toISOString(),
 			model: config.agent.model,
 		});
-
 		try {
 			await store.updateIncident(incident.id, { status: "diagnosing" });
-
 			const branchName = `paperhanger/incident-${incident.id}`;
-			const contextMarkdown = renderContextMarkdown(context);
-			const alert = context.alert;
-
+			const contextMarkdown = renderContextMarkdown(incidentContext);
+			const alert = incidentContext.alert;
 			const installation = await this.deps.github.getRepoInstallation(
 				repo.owner,
 				repo.repo,
@@ -244,7 +219,7 @@ export class FixAgentRunner {
 			const setupScripts = await this.resolveCommonSetupScripts(incident.id);
 			const systemPrompt = await this.resolveCommonSystemPrompt(incident.id);
 
-			const workflowInput: FixAgentWorkflowInput = {
+			const input: FixAgentInput = {
 				incidentId: incident.id,
 				contextMarkdown,
 				alert: {
@@ -273,20 +248,18 @@ export class FixAgentRunner {
 				telemetry: config.telemetry,
 				systemPrompt,
 			};
-
-			const invocation = await this.invokeWorkflow(
-				workflowInput,
+			const invocation = await this.invokeAgent(
+				input,
 				config.agent.timeoutMinutes,
 				incident.id,
+				agentRun.id,
 			);
-			if (!invocation.ok) {
+			if (!invocation.ok)
 				return await this.finalize(agentRun.id, {
 					status: "failed",
 					failureReason: invocation.failureReason,
 				});
-			}
-
-			const parsed = FixAgentWorkflowOutputSchema.safeParse(invocation.result);
+			const parsed = FixAgentOutputSchema.safeParse(invocation.result);
 			if (!parsed.success) {
 				this.logger.error("fix_agent.malformed_result", {
 					incidentId: incident.id,
@@ -294,20 +267,17 @@ export class FixAgentRunner {
 				});
 				return await this.finalize(agentRun.id, {
 					status: "failed",
-					failureReason: `Malformed fix-agent workflow result: ${parsed.error.message}`,
+					failureReason: `Malformed fix-agent result: ${parsed.error.message}`,
 				});
 			}
 			const output = parsed.data;
-
-			if (output.outcome === "report_only") {
+			if (output.outcome === "report_only")
 				return await this.finalize(agentRun.id, {
 					status: "report_only",
 					diagnosis: output.diagnosis,
 					report: output.report,
 				});
-			}
-
-			if (output.outcome === "failed") {
+			if (output.outcome === "failed")
 				return await this.finalize(agentRun.id, {
 					status: "failed",
 					failureReason:
@@ -315,9 +285,6 @@ export class FixAgentRunner {
 					diagnosis: output.diagnosis,
 					report: output.report,
 				});
-			}
-
-			// outcome === "fixed" from here on.
 			await store.updateIncident(incident.id, { status: "fixing" });
 			return await this.finalizeFixed({
 				agentRunId: agentRun.id,
@@ -344,7 +311,7 @@ export class FixAgentRunner {
 
 	private async resolveCommonSetupScripts(
 		incidentId: string,
-	): Promise<FixAgentWorkflowInput["repo"]["setupScripts"]> {
+	): Promise<FixAgentInput["repo"]["setupScripts"]> {
 		try {
 			const scripts =
 				(await this.deps.commonSetupScripts?.listCommonSetupScripts()) ?? [];
@@ -385,72 +352,35 @@ export class FixAgentRunner {
 		}
 	}
 
-	/**
-	 * Looks up a `RepoDefinition` matching the resolved owner/repo and, when
-	 * one exists and is enabled, returns its setupScript/testCommand to merge
-	 * into `workflowInput.repo`. A lookup failure (store error) is logged and
-	 * treated the same as "no definition found" -- a broken lookup must not
-	 * block a fix run.
-	 */
 	private async resolveRepoOverrides(
 		owner: string,
 		repo: string,
 		incidentId: string,
-	): Promise<
-		Pick<FixAgentWorkflowInput["repo"], "setupScript" | "testCommand">
-	> {
+	): Promise<Pick<FixAgentInput["repo"], "setupScript" | "testCommand">> {
 		try {
 			const definition =
 				await this.deps.repoDefinitions.findRepoDefinitionByRepo(owner, repo);
-			if (!definition || !definition.enabled) {
-				return {};
-			}
+			if (!definition || !definition.enabled) return {};
 			return {
 				setupScript: definition.setupScript,
 				testCommand: definition.testCommand,
 			};
 		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
 			this.logger.warn("fix_agent.repo_definition_lookup_failed", {
 				incidentId,
 				owner,
 				repo,
-				error: message,
+				error: err instanceof Error ? err.message : String(err),
 			});
 			return {};
 		}
 	}
 
-	private getFlueClient(): FixAgentFlueClient {
-		if (!this.flueClient) {
-			const provider = this.deps.flue;
-			this.flueClient = isFlueClient(provider)
-				? provider
-				: this.createFlueClientFn({ baseUrl: provider.baseUrl });
-		}
-		return this.flueClient;
-	}
-
-	/**
-	 * Waits (up to `timeoutMinutes`) for the fix-incident workflow to finish.
-	 *
-	 * IMPORTANT limitation, verified against the installed `@flue/sdk`
-	 * `1.0.0-beta.9` types and docs/research/flue.md section 5 ("Recovery
-	 * semantics"): this timeout only aborts *this process's* HTTP wait on
-	 * `workflows.invoke(..., { wait: "result" })`. The SDK exposes
-	 * `client.agents.abort(name, id)` to cancel a direct agent instance's
-	 * in-flight work, but nothing analogous for a workflow *run* -- the
-	 * `runs` client surface is read-only (`get`/`stream`/`events`), and the
-	 * research doc notes an interrupted run's record simply "stays active
-	 * forever". So when this times out, the agent-host may still be
-	 * diagnosing/fixing in the background and could push a branch or
-	 * otherwise mutate the repository after this method has already returned
-	 * a failure. Do not report this as a clean, contained failure.
-	 */
-	private async invokeWorkflow(
-		input: FixAgentWorkflowInput,
+	private async invokeAgent(
+		input: FixAgentInput,
 		timeoutMinutes: number,
 		incidentId: string,
+		agentRunId: string,
 	): Promise<
 		{ ok: true; result: unknown } | { ok: false; failureReason: string }
 	> {
@@ -460,10 +390,7 @@ export class FixAgentRunner {
 		});
 		span.setAttribute("paperhanger.incident.id", incidentId);
 		span.setAttribute("paperhanger.agent.timeout_minutes", timeoutMinutes);
-
 		try {
-			// Active so that logger calls inside this scope (e.g.
-			// fix_agent.workflow_wait_timed_out) correlate to this span.
 			return await context.with(
 				trace.setSpan(context.active(), span),
 				async () => {
@@ -471,51 +398,77 @@ export class FixAgentRunner {
 						| { ok: true; result: unknown }
 						| { ok: false; failureReason: string };
 					try {
-						// getFlueClient() lives inside this try too: a malformed
-						// `agent.hostUrl` (e.g. "127.0.0.1:8700") makes @flue/sdk's
-						// createFlueClient throw synchronously from `new URL(...)`,
-						// and that must be converted into the same resolved
-						// `{ ok: false, failureReason }` shape as every other
-						// failure path -- otherwise it would escape this method
-						// entirely, breaking invokeWorkflow's never-throw contract
-						// and leaving the span below UNSET instead of ERROR.
-						const client = this.getFlueClient();
-						const controller = new AbortController();
+						const client = this.createFlueClientFn({
+							url: conversationUrl(this.deps.flue.baseUrl, agentRunId),
+						});
+						const operationController = new AbortController();
 						let timedOut = false;
 						const timer = setTimeout(() => {
 							timedOut = true;
-							controller.abort();
+							operationController.abort();
 						}, timeoutMinutes * 60_000);
-
+						let admission: FixAgentAdmission | undefined;
 						try {
-							const { result } = await client.workflows.invoke(
-								FIX_INCIDENT_WORKFLOW_NAME,
-								{ input, wait: "result", signal: controller.signal },
-							);
-							invocation = { ok: true, result };
+							admission = await client.send({
+								message: {
+									kind: "signal",
+									type: "paperhanger.fix-incident",
+									body: `Run paperhanger fix incident ${incidentId}.`,
+								},
+								initialData: input,
+								uid: null,
+								signal: operationController.signal,
+							});
+							const reply = await client.read(admission, {
+								signal: operationController.signal,
+							});
+							if (timedOut) throw new Error("operation timed out");
+							const values = reply.data[FIX_INCIDENT_RESULT_DATA_NAME];
+							invocation = {
+								ok: true,
+								result:
+									Array.isArray(values) && values.length === 1
+										? values[0]
+										: undefined,
+							};
 						} catch (err) {
-							if (timedOut || controller.signal.aborted) {
-								const runId = extractRunId(err);
+							if (timedOut) {
+								let abortNote = admission
+									? "abort requested"
+									: "admission request aborted";
+								if (admission) {
+									const abortController = new AbortController();
+									const abortTimer = setTimeout(
+										() => abortController.abort(),
+										10_000,
+									);
+									try {
+										await client.abort({ signal: abortController.signal });
+									} catch (abortError) {
+										const message =
+											abortError instanceof Error
+												? abortError.message
+												: String(abortError);
+										abortNote = `abort request failed (${message}); execution may continue`;
+									} finally {
+										clearTimeout(abortTimer);
+									}
+								}
 								this.logger.warn("fix_agent.workflow_wait_timed_out", {
 									incidentId,
 									timeoutMinutes,
-									runId,
+									submissionId: admission?.submissionId,
 								});
 								invocation = {
 									ok: false,
-									failureReason:
-										`Timed out after waiting ${timeoutMinutes}m for the fix-incident workflow to finish. ` +
-										"paperhanger has stopped waiting, but the agent-host may still be executing the " +
-										"workflow in the background and could push a branch or otherwise modify the " +
-										"repository later; @flue/sdk currently exposes no workflow-level cancellation API " +
-										"(see docs/research/flue.md section 5).",
+									failureReason: `Timed out after waiting ${timeoutMinutes}m for the fix-incident agent to finish; ${abortNote}.`,
 								};
 							} else {
 								const message =
 									err instanceof Error ? err.message : String(err);
 								invocation = {
 									ok: false,
-									failureReason: `Failed to invoke the fix-incident workflow: ${message}`,
+									failureReason: `Failed to invoke the fix-incident agent: ${message}`,
 								};
 							}
 						} finally {
@@ -525,19 +478,9 @@ export class FixAgentRunner {
 						const message = err instanceof Error ? err.message : String(err);
 						invocation = {
 							ok: false,
-							failureReason: `Failed to invoke the fix-incident workflow: ${message}`,
+							failureReason: `Failed to invoke the fix-incident agent: ${message}`,
 						};
 					}
-
-					// Span status is set from the RESOLVED value, not from a catch: this
-					// method's contract is to never reject (a wait-timeout, an SDK-level
-					// failure, and a throwing client factory are all captured above as
-					// `{ ok: false, failureReason }`), so a try/catch around this whole
-					// method would never observe an error. Note also that the span only
-					// exports once `.end()` runs below, after `invokeWorkflow` has already
-					// resolved -- a long-running workflow gives no partial visibility
-					// while it's in flight; this is an accepted limitation of a
-					// request/response CLIENT span here.
 					if (!invocation.ok) {
 						span.setAttribute("paperhanger.agent.ok", false);
 						span.setStatus({
@@ -561,7 +504,7 @@ export class FixAgentRunner {
 		branchName: string;
 		defaultBranch: string;
 		contextMarkdown: string;
-		output: FixAgentWorkflowOutput;
+		output: FixAgentOutput;
 	}): Promise<FixAgentRunResult> {
 		const {
 			agentRunId,
@@ -573,10 +516,7 @@ export class FixAgentRunner {
 			output,
 		} = args;
 		const { github, config } = this.deps;
-
 		if (!output.fix) {
-			// Guarded by FixAgentWorkflowOutputSchema's superRefine already; kept
-			// as defense in depth against a future schema relaxation.
 			return await this.finalize(agentRunId, {
 				status: "failed",
 				failureReason: 'Agent reported outcome "fixed" without a fix block.',
@@ -584,7 +524,6 @@ export class FixAgentRunner {
 				report: output.report,
 			});
 		}
-
 		const compare = await github.compareCommits(
 			repo.owner,
 			repo.repo,
@@ -596,9 +535,7 @@ export class FixAgentRunner {
 			config.agent.forbiddenPaths,
 		);
 		const totalChangedLines = compare.totalAdditions + compare.totalDeletions;
-		const oversized = totalChangedLines > config.agent.maxDiffLines;
-
-		if (forbidden.length > 0 || oversized) {
+		if (forbidden.length > 0 || totalChangedLines > config.agent.maxDiffLines) {
 			const guardrailFailureReason =
 				forbidden.length > 0
 					? `Guardrail violation: fix touched forbidden path(s): ${forbidden.join(", ")}`
@@ -609,14 +546,6 @@ export class FixAgentRunner {
 				forbidden,
 				totalChangedLines,
 			});
-
-			// The guardrail violation is the actionable failure the operator
-			// needs to see; a failure to clean up the now-rejected branch is a
-			// secondary, best-effort concern. If `deleteRef` throws, keep the
-			// guardrail violation as the primary `failureReason` (rather than
-			// letting it be replaced by the raw GitHub error) and append a note
-			// so the operator knows a policy-violating branch may still be
-			// sitting in the repo and which one it is.
 			let failureReason = guardrailFailureReason;
 			try {
 				await github.deleteRef(repo.owner, repo.repo, `heads/${branchName}`);
@@ -627,11 +556,8 @@ export class FixAgentRunner {
 					branchName,
 					error: message,
 				});
-				failureReason =
-					`${guardrailFailureReason} Additionally, cleanup of the rejected branch failed ` +
-					`(branch "${branchName}" may still exist in the repo): ${message}`;
+				failureReason = `${guardrailFailureReason} Additionally, cleanup of the rejected branch failed (branch "${branchName}" may still exist in the repo): ${message}`;
 			}
-
 			return await this.finalize(agentRunId, {
 				status: "failed",
 				failureReason,
@@ -639,7 +565,6 @@ export class FixAgentRunner {
 				report: output.report,
 			});
 		}
-
 		const pr = await github.createPullRequest(repo.owner, repo.repo, {
 			title: `fix: ${alert.title} (incident ${incident.id})`,
 			head: branchName,
@@ -647,7 +572,6 @@ export class FixAgentRunner {
 			draft: config.agent.draftPr,
 			body: buildPrBody(output, incident, alert, args.contextMarkdown),
 		});
-
 		try {
 			await github.addLabels(repo.owner, repo.repo, pr.number, PR_LABELS);
 		} catch (err) {
@@ -657,7 +581,6 @@ export class FixAgentRunner {
 				error: err instanceof Error ? err.message : String(err),
 			});
 		}
-
 		return await this.finalize(agentRunId, {
 			status: "pr_created",
 			prUrl: pr.url,
@@ -666,12 +589,6 @@ export class FixAgentRunner {
 		});
 	}
 
-	/**
-	 * Persists the terminal `AgentRun` row and returns `result` unchanged.
-	 * `costUsd` is left unset: the SDK does not currently expose aggregated
-	 * workflow-level token/cost usage (docs/research/flue.md section 7b only
-	 * documents per-prompt `PromptUsage`), so there is nothing honest to record.
-	 */
 	private async finalize(
 		agentRunId: string,
 		result: FixAgentRunResult,

@@ -1,16 +1,6 @@
 /**
- * Pure decision logic for the fix-retry loop in `../workflows/fix-incident.ts`,
- * extracted for the same reason `./test-detection.ts` is: it's the part of
- * the loop that doesn't need `harness`/model I/O, so it can be unit tested
- * directly by the main paperhanger repo's `bun test` without pulling in
- * `../fix-agent.ts` (which statically imports `node:sqlite` via
- * `@flue/runtime/node` and cannot load under Bun's test runner -- see the
- * file-level comment on `./output-sanitizer.ts`).
- *
- * `../workflows/fix-incident.ts` still owns the loop itself (running tests,
- * committing/pushing, prompting the model for a retry) and calls
- * `decideFixAttempt` once per iteration with a plain-data summary of that
- * iteration's test run.
+ * Pure decision logic for the fix agent's test-retry loop. It stays
+ * independent from sandbox and model I/O so the main repository can test it.
  */
 
 /** Plain-data summary of one `detectAndRunTests` call, enough to decide what to do next. */

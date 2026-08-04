@@ -1,10 +1,7 @@
 /**
- * Deterministic test-command selection, extracted from
- * `../workflows/fix-incident.ts`'s `detectAndRunTests` so the decision logic
- * (which command to run, given what's on disk) is a pure function testable
- * without a sandbox/filesystem. `detectAndRunTests` itself stays in the
- * workflow file: it owns the `harness.fs`/`harness.shell` I/O, and calls
- * `detectTestCommand` with a plain-data probe of what it found.
+ * Deterministic test-command selection extracted from the fix agent's
+ * orchestration. The pure decision logic is testable without a sandbox;
+ * runtime command execution stays in the agent module.
  */
 
 /** Best-effort, file-existence-only probe of a checked-out repository. */
@@ -28,7 +25,7 @@ export interface TestSuiteProbe {
 /**
  * Chooses a test command from a best-effort probe of the checked-out repo:
  * an explicit `override` (a RepoDefinition's `testCommand`, threaded through
- * `WorkflowInput.repo.testCommand`) always wins and is returned verbatim,
+ * `FixIncidentInput.repo.testCommand`) always wins and is returned verbatim,
  * bypassing detection entirely. A whitespace-only override is treated as
  * absent (it would otherwise run a blank shell command that exits 0,
  * falsely reporting tests as passed), falling through to auto-detection.

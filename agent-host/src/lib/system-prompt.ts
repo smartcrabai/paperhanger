@@ -5,7 +5,7 @@
  * result without an extra guard.
  *
  * Placed in `lib/` -- dependency-free, no `@flue/*` import -- for the same
- * reason as `./output-sanitizer.ts`: `../workflows/fix-incident.ts` imports
+ * reason as `./output-sanitizer.ts`: `../fix-incident.ts` imports
  * `../fix-agent.ts`, which imports `local` from `@flue/runtime/node`, which
  * statically imports `node:sqlite`, a module Bun's test runner cannot import.
  *

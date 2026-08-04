@@ -1,16 +1,16 @@
 /**
  * Builds the first diagnosis prompt sent to the fix agent. Split out of
- * `../workflows/fix-incident.ts` (rather than kept as a private function
- * there) so it can be unit-tested directly: that file imports `../fix-agent.ts`,
- * which imports `local` from `@flue/runtime/node`, which statically imports
+ * `../fix-incident.ts` (rather than kept as a private function there) so it
+ * can be unit-tested directly: that file imports `../fix-agent.ts`, which
+ * imports `local` from `@flue/runtime/node`, which statically imports
  * `node:sqlite`, a module Bun's test runner cannot import. `./contract.ts`
  * only depends on valibot, so this file -- and a test importing it -- is safe.
  */
 
-import type { WorkflowInput } from "../contract.ts";
+import type { FixIncidentInput } from "../contract.ts";
 import { renderCommonSystemPromptSection } from "./system-prompt.ts";
 
-export function buildDiagnosisPrompt(input: WorkflowInput): string {
+export function buildDiagnosisPrompt(input: FixIncidentInput): string {
 	const forbidden =
 		input.forbiddenPaths.length > 0
 			? input.forbiddenPaths.join(", ")

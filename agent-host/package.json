@@ -8,17 +8,18 @@
 		"node": ">=22.19.0"
 	},
 	"scripts": {
-		"build": "flue build --target node",
-		"dev": "flue dev --target node",
+		"build": "vite build",
+		"dev": "vite dev",
 		"start": "node dist/server.mjs",
 		"smoke": "node scripts/smoke.mjs"
 	},
 	"dependencies": {
-		"@flue/runtime": "1.0.0-beta.9",
+		"@flue/runtime": "2.0.1",
 		"hono": "^4.12.30",
 		"valibot": "^1.4.2"
 	},
 	"devDependencies": {
-		"@flue/cli": "1.0.0-beta.9"
+		"@flue/vite": "2.0.1",
+		"vite": "8.1.2"
 	}
 }
