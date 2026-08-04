@@ -17,6 +17,7 @@
  *   serving webhooks vs. exit), while the sidecar keeps trying to recover.
  */
 
+import type { TelemetryConfig } from "../config/schema";
 import type { Logger } from "../observability/logger";
 
 /** Structural subset of `Bun.Subprocess` this module depends on. */
@@ -54,17 +55,16 @@ export interface AgentHostSidecarConfig {
 		model: string;
 	};
 	/**
-	 * Omitted when no telemetry backend is configured; the `query_telemetry`
-	 * tool is then unavailable to the agent (see agent-host/README.md).
-	 * `source`-discriminated union mirroring `src/config/schema.ts`'s
-	 * `TelemetryConfig` -- `greptimedb` is the only member today.
+	 * The full `Config["telemetry"]` union (see `src/config/schema.ts`). Only
+	 * ever forwarded to the agent-host process when `source === "greptimedb"`
+	 * (see `buildSpawnEnv` below) -- agent-host's `query_telemetry` follow-up
+	 * tool (agent-host/src/tools.ts, agent-host/README.md) is SQL/PromQL-
+	 * shaped and stays scoped to GreptimeDB. The other telemetry sources
+	 * (Datadog, New Relic, Grafana, Zabbix, Mackerel) are collection-only:
+	 * they feed the initial `IncidentContext` (see `telemetry/factory.ts`)
+	 * but have no follow-up query tool in the fix agent.
 	 */
-	telemetry?: {
-		source: "greptimedb";
-		url: string;
-		database: string;
-		auth?: string;
-	};
+	telemetry?: TelemetryConfig;
 }
 
 /**
@@ -424,12 +424,13 @@ function buildSpawnEnv(
 			env[key] = value;
 		}
 	}
-	if (config.telemetry) {
+	if (config.telemetry?.source === "greptimedb") {
 		// A single serialized JSON env var carries the whole telemetry config,
 		// rather than one bespoke env var per field (the previous GREPTIMEDB_*
 		// vars): agent-host/src/tools.ts parses this and dispatches on
-		// `source`, so adding a future telemetry backend never requires adding
-		// more env var plumbing here.
+		// `source`. Only forwarded for "greptimedb" -- see the doc comment on
+		// `AgentHostSidecarConfig.telemetry` above for why the other sources
+		// have no follow-up query tool in agent-host.
 		env.PAPERHANGER_TELEMETRY = JSON.stringify(config.telemetry);
 	}
 	return env;

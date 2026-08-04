@@ -952,3 +952,71 @@ describe("FixAgentRunner - per-repo system prompt", () => {
 		await store.close();
 	});
 });
+
+describe("FixAgentRunner - telemetry forwarding", () => {
+	// `FixAgentTelemetryConfigSchema` (src/agent/contract.ts) is SQL/PromQL-
+	// shaped and only speaks GreptimeDB, so every other configured source must
+	// be dropped rather than forwarded in a shape the fix agent's
+	// `query_telemetry` tool cannot use. This guard is the only thing standing
+	// between a non-GreptimeDB config and that tool -- `src/index.ts` passes
+	// `config.telemetry` straight through.
+	async function runWithTelemetry(
+		telemetry: unknown,
+	): Promise<Record<string, unknown> | undefined> {
+		const { store, incident } = await createStoreWithIncident();
+		const context = makeContext(incident, makeAlert());
+		const github = createFakeGithub();
+		const flue = createFakeFlue({
+			outcome: "report_only",
+			diagnosis: "d",
+			report: "r",
+		});
+		const config = makeConfig();
+		config.telemetry = telemetry as typeof config.telemetry;
+		const runner = new FixAgentRunner({
+			flue: { baseUrl: "http://agent-host:9000" },
+			createFlueClient: () => flue.client,
+			github: github.client,
+			store,
+			repoDefinitions: store,
+			config,
+			logger: silentLogger(),
+		});
+
+		const result = await runner.run(incident, context, testRepo);
+		expect(result.status).toBe("report_only");
+		const input = flue.calls.send?.initialData as {
+			telemetry?: Record<string, unknown>;
+		};
+		await store.close();
+		return input.telemetry;
+	}
+
+	test("forwards a greptimedb telemetry config to the fix agent", async () => {
+		expect(
+			await runWithTelemetry({
+				source: "greptimedb",
+				url: "http://greptimedb:4000",
+				database: "public",
+			}),
+		).toEqual({
+			source: "greptimedb",
+			url: "http://greptimedb:4000",
+			database: "public",
+		});
+	});
+
+	test.each([
+		["loki", { source: "loki", url: "http://loki:3100" }],
+		[
+			"datadog",
+			{ source: "datadog", site: "datadoghq.com", apiKey: "k", appKey: "a" },
+		],
+	])("omits telemetry when the configured source is %s", async (_n, cfg) => {
+		expect(await runWithTelemetry(cfg)).toBeUndefined();
+	});
+
+	test("omits telemetry when none is configured", async () => {
+		expect(await runWithTelemetry(undefined)).toBeUndefined();
+	});
+});

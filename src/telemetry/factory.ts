@@ -14,14 +14,19 @@
 import type { Tracer } from "@opentelemetry/api";
 import type { TelemetryConfig } from "../config/schema";
 import { ClickStackSource } from "./clickstack";
+import { DatadogSource } from "./datadog";
+import { GrafanaSource } from "./grafana";
 import { GreptimeDbSource } from "./greptimedb";
 import { LokiSource } from "./loki";
+import { MackerelSource } from "./mackerel";
+import { NewRelicSource } from "./newrelic";
 import type { Logger } from "../observability/logger";
 import { OpenObserveSource } from "./openobserve";
 import { PrometheusSource } from "./prometheus";
 import { SigNozSource } from "./signoz";
 import { TempoSource } from "./tempo";
 import type { TelemetrySource } from "./types";
+import { ZabbixSource } from "./zabbix";
 
 export function createTelemetrySource(
 	config: TelemetryConfig,
@@ -43,5 +48,15 @@ export function createTelemetrySource(
 			return new SigNozSource(config, logger, undefined, tracer);
 		case "openobserve":
 			return new OpenObserveSource(config, logger, undefined, tracer);
+		case "datadog":
+			return new DatadogSource(config, logger, undefined, tracer);
+		case "newrelic":
+			return new NewRelicSource(config, logger, undefined, tracer);
+		case "grafana":
+			return new GrafanaSource(config, logger, undefined, tracer);
+		case "zabbix":
+			return new ZabbixSource(config, logger, undefined, tracer);
+		case "mackerel":
+			return new MackerelSource(config, logger, undefined, tracer);
 	}
 }

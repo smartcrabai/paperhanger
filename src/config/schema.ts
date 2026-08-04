@@ -47,11 +47,16 @@ const SourcesSchema = z.record(z.string(), SourceConfigSchema).default({});
  * path every backend must support). Wiring a backend into the fix agent's
  * *follow-up* query tool is a separate, optional step -- a `case` in
  * `agent-host/src/tools.ts` plus the two contract mirrors
- * (`src/agent/contract.ts` / `agent-host/src/contract.ts`).
- * `greptimedb`, `loki`, `tempo`, `prometheus`, `clickstack`, `signoz`, and
- * `openobserve` are the members today; only `greptimedb` backs the
- * follow-up query tool so far (`src/index.ts` narrows `config.telemetry` to
- * that one member before passing it through to the agent-host sidecar/runner).
+ * (`src/agent/contract.ts` / `agent-host/src/contract.ts`). This tool is
+ * SQL/PromQL-shaped and stays scoped to `greptimedb` only -- `src/index.ts`
+ * narrows `config.telemetry` to that one member before passing it through to
+ * the agent-host sidecar/runner (see also the doc comments on
+ * `AgentHostSidecarConfig.telemetry` (`src/agent/sidecar.ts`) and
+ * `FixAgentRunnerConfig.telemetry` (`src/agent/runner.ts`) for why every
+ * other source below is collection-only, no follow-up query tool).
+ * `greptimedb`, `loki`, `tempo`, `prometheus`, `clickstack`, `signoz`,
+ * `openobserve`, `datadog`, `newrelic`, `grafana`, `zabbix`, and `mackerel`
+ * are the members today.
  */
 const GreptimeDbTelemetrySchema = z.object({
 	source: z.literal("greptimedb"),
@@ -141,6 +146,52 @@ const OpenObserveTelemetrySchema = z.object({
 	timeoutMs: z.number().int().positive().optional(),
 });
 
+/** See `src/telemetry/datadog.ts`'s module doc comment for the verified API shapes. */
+const DatadogTelemetrySchema = z.object({
+	source: z.literal("datadog"),
+	apiKey: z.string().min(1),
+	appKey: z.string().min(1),
+	/** Datadog site, e.g. `datadoghq.com` (default), `datadoghq.eu`, `us3.datadoghq.com`. */
+	site: z.string().min(1).optional(),
+	timeoutMs: z.number().int().positive().optional(),
+});
+
+/** See `src/telemetry/newrelic.ts`'s module doc comment for the verified API shapes. */
+const NewRelicTelemetrySchema = z.object({
+	source: z.literal("newrelic"),
+	apiKey: z.string().min(1),
+	accountId: z.number().int().positive(),
+	region: z.enum(["US", "EU"]).optional(),
+	timeoutMs: z.number().int().positive().optional(),
+});
+
+/** See `src/telemetry/grafana.ts`'s module doc comment for the chosen API and its tradeoffs. */
+const GrafanaTelemetrySchema = z.object({
+	source: z.literal("grafana"),
+	url: z.string().min(1),
+	serviceAccountToken: z.string().min(1),
+	lokiDatasourceUid: z.string().min(1).optional(),
+	tempoDatasourceUid: z.string().min(1).optional(),
+	prometheusDatasourceUid: z.string().min(1).optional(),
+	timeoutMs: z.number().int().positive().optional(),
+});
+
+/** See `src/telemetry/zabbix.ts`'s module doc comment for the version assumption and API shapes. */
+const ZabbixTelemetrySchema = z.object({
+	source: z.literal("zabbix"),
+	url: z.string().min(1),
+	apiToken: z.string().min(1),
+	timeoutMs: z.number().int().positive().optional(),
+});
+
+/** See `src/telemetry/mackerel.ts`'s module doc comment for the API shapes and monitoring-only limitations. */
+const MackerelTelemetrySchema = z.object({
+	source: z.literal("mackerel"),
+	apiKey: z.string().min(1),
+	baseUrl: z.string().min(1).optional(),
+	timeoutMs: z.number().int().positive().optional(),
+});
+
 const TelemetrySchema = z.discriminatedUnion("source", [
 	GreptimeDbTelemetrySchema,
 	LokiTelemetrySchema,
@@ -149,6 +200,11 @@ const TelemetrySchema = z.discriminatedUnion("source", [
 	ClickStackTelemetrySchema,
 	SigNozTelemetrySchema,
 	OpenObserveTelemetrySchema,
+	DatadogTelemetrySchema,
+	NewRelicTelemetrySchema,
+	GrafanaTelemetrySchema,
+	ZabbixTelemetrySchema,
+	MackerelTelemetrySchema,
 ]);
 
 /** Time window (relative to alert time) used when collecting telemetry. See spec section 3.4. */
@@ -349,5 +405,10 @@ export type SigNozTelemetryConfig = z.infer<typeof SigNozTelemetrySchema>;
 export type OpenObserveTelemetryConfig = z.infer<
 	typeof OpenObserveTelemetrySchema
 >;
+export type DatadogTelemetryConfig = z.infer<typeof DatadogTelemetrySchema>;
+export type NewRelicTelemetryConfig = z.infer<typeof NewRelicTelemetrySchema>;
+export type GrafanaTelemetryConfig = z.infer<typeof GrafanaTelemetrySchema>;
+export type ZabbixTelemetryConfig = z.infer<typeof ZabbixTelemetrySchema>;
+export type MackerelTelemetryConfig = z.infer<typeof MackerelTelemetrySchema>;
 export type ObservabilityConfig = z.infer<typeof ObservabilitySchema>;
 export type ObservabilityLogsConfig = z.infer<typeof ObservabilityLogsSchema>;

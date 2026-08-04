@@ -6,6 +6,7 @@ import {
 	type Tracer,
 	trace,
 } from "@opentelemetry/api";
+import type { TelemetryConfig } from "../config/schema";
 import type { Incident, IncidentEvent } from "../core/types";
 import type { Logger } from "../observability/logger";
 import type {
@@ -115,12 +116,18 @@ export interface FixAgentRunnerConfig {
 	repos?: {
 		systemPrompts?: Record<string, string>;
 	};
-	telemetry?: {
-		source: "greptimedb";
-		url: string;
-		database: string;
-		auth?: string;
-	};
+	/**
+	 * The full `Config["telemetry"]` union (see `src/config/schema.ts`). Only
+	 * ever forwarded to the fix agent as `FixAgentInput.telemetry` when
+	 * `source === "greptimedb"` (see the `telemetry:` field construction
+	 * below) -- `FixAgentTelemetryConfigSchema` (`src/agent/contract.ts`) is
+	 * SQL/PromQL-shaped and stays scoped to GreptimeDB. The other telemetry
+	 * sources (Datadog, New Relic, Grafana, Zabbix, Mackerel) are
+	 * collection-only: they feed the initial `IncidentContext` (see
+	 * `telemetry/factory.ts`) but have no follow-up query tool in the fix
+	 * agent.
+	 */
+	telemetry?: TelemetryConfig;
 }
 
 export interface FixAgentRunnerDeps {
@@ -279,7 +286,12 @@ export class FixAgentRunner {
 					maxFixAttempts: config.agent.maxFixAttempts,
 				},
 				forbiddenPaths: config.agent.forbiddenPaths,
-				telemetry: config.telemetry,
+				// Only "greptimedb" has a follow-up query tool in agent-host; see
+				// the doc comment on `FixAgentRunnerConfig.telemetry` above.
+				telemetry:
+					config.telemetry?.source === "greptimedb"
+						? config.telemetry
+						: undefined,
 				systemPrompt,
 				repoSystemPrompt,
 			};

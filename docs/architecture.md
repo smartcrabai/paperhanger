@@ -65,6 +65,12 @@ src/
     clickstack.ts          # ClickHouse HTTP interface (SQL) client, ClickStack's OTel schema; no PromQL API, so metrics unsupported
     signoz.ts              # Unified query_range API (v5) client; builder-query metrics unsupported (no raw PromQL passthrough)
     openobserve.ts         # _search HTTP API (SQL) client; metrics via an inferred Prometheus-compatible query_range path
+    http-client.ts         # Shared per-request timeout + OTel CLIENT span helpers for the HTTP-based sources below
+    datadog.ts             # Logs Search v2 + Spans Search v2 + classic Metrics Query API
+    newrelic.ts            # NRQL over NerdGraph (Log/Span/Metric event types)
+    grafana.ts             # Query front-end: /api/ds/query against provisioned Loki/Tempo/Prometheus datasources
+    zabbix.ts              # JSON-RPC (problem/event history + item history); monitoring-only, no tracing
+    mackerel.ts            # REST (alerts + service metrics); monitoring-only, no tracing
     factory.ts             # Dispatches config.telemetry.source -> concrete TelemetrySource
     context-builder.ts     # Collection strategy → token-budget-aware IncidentContext
   repo/
@@ -164,6 +170,63 @@ code has since migrated to `2.0.1` in PR #8):
   `resolveRepoSystemPrompt`): dashboard-managed storage first, config file
   (`agent.systemPrompt` / `repos.systemPrompts["owner/repo"]`) second, both fail-soft — a
   lookup error is logged and treated as unset rather than blocking the fix run.
+
+## Telemetry backends
+
+`config.telemetry.source` selects one `TelemetrySource` implementation (see
+`src/telemetry/factory.ts`); each speaks a different backend's current
+public HTTP API (docs URLs and verified request/response shapes live in
+each file's module doc comment):
+
+- `greptimedb` (`greptimedb.ts`): direct SQL + PromQL-compatible HTTP APIs.
+  The only backend today with a follow-up `query_telemetry` tool available
+  to the fix agent during diagnosis (`agent-host/src/tools.ts`) -- see the
+  doc comments on `AgentHostSidecarConfig.telemetry` (`src/agent/sidecar.ts`)
+  and `FixAgentRunnerConfig.telemetry` (`src/agent/runner.ts`) for why that
+  stays scoped to GreptimeDB rather than generalizing to every source below.
+- `loki` / `tempo` / `prometheus` (`loki.ts` / `tempo.ts` / `prometheus.ts`):
+  single-signal backends for a Grafana OSS stack that runs those three as
+  separate services rather than GreptimeDB's one do-everything endpoint;
+  querying a signal the chosen backend doesn't carry returns `[]` with a
+  warning instead of failing.
+- `clickstack` / `signoz` / `openobserve` (`clickstack.ts` / `signoz.ts` /
+  `openobserve.ts`): each speaks its own native HTTP API (ClickHouse SQL,
+  SigNoz's unified `query_range`, OpenObserve's `_search`); each has a
+  metrics-collection caveat noted in its own module doc comment.
+- `datadog` (`datadog.ts`): Logs Search API v2 + Spans Search API v2 for
+  collection, the classic (v1) timeseries Metrics Query API for metrics.
+- `newrelic` (`newrelic.ts`): NRQL over NerdGraph (New Relic's GraphQL API),
+  querying the `Log`/`Span`/`Metric` event types.
+- `grafana` (`grafana.ts`): a **query front-end**, not a store -- it proxies
+  `POST /api/ds/query` to whatever Loki/Tempo/Prometheus datasources are
+  provisioned behind it, addressed by UID. Chosen over Grafana Cloud's
+  separate per-signal APIs because it works identically for self-hosted and
+  Cloud Grafana with one service-account token; the tradeoff is that
+  per-datasource query bodies are plugin-defined, not part of this HTTP
+  API's own schema (see the module doc comment's field-name caveats).
+- `zabbix` (`zabbix.ts`) / `mackerel` (`mackerel.ts`): monitoring systems,
+  not log/trace stores, so both are shaped as best-effort context
+  enrichment rather than full backends: `queryTraces` always returns no
+  spans (neither has a tracing concept), `queryLogs` maps problem/alert
+  history onto `LogRecord[]` as the closest available substitute, and
+  `queryMetrics` only returns a series when the caller can supply both a
+  resolvable host/service label and a metric-name hint. Documented plainly
+  here and in README.md's config reference rather than silently degraded.
+
+`src/telemetry/http-client.ts` factors the per-request timeout
+(`AbortController`-based) and OTel CLIENT span wrapping the `datadog`/
+`newrelic`/`grafana`/`zabbix`/`mackerel` sources share, following the
+pattern `greptimedb.ts` established first (its own JSON-RPC/SQL-shaped
+redaction concerns are specific enough to that file that it keeps its own
+copy rather than using the shared helper; `loki`/`tempo`/`prometheus` were
+written independently and likewise keep their own).
+
+**Testing note**: none of the five non-GreptimeDB sources above were built
+against a live backend (no Datadog/New Relic/Grafana/Zabbix/Mackerel
+instance was available) -- their query construction and response mapping
+are verified against public API docs and covered by unit tests with a
+stubbed `fetch`, but not against real traffic. See each PR that introduced
+them for the equivalent caveat.
 
 ## Dashboard (repo definitions + incident browser)
 

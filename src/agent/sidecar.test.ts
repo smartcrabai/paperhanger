@@ -293,6 +293,47 @@ describe("AgentHostSidecar - internal mode spawn arguments", () => {
 
 		await sidecar.stop();
 	});
+
+	// agent-host's query_telemetry follow-up tool is SQL/PromQL-shaped and only
+	// speaks GreptimeDB, so every other configured source must be dropped here
+	// rather than handed to the sidecar in a shape it cannot use. This guard is
+	// the only thing standing between a non-GreptimeDB config and that tool --
+	// `src/index.ts` passes `config.telemetry` straight through.
+	test.each([
+		["loki", { source: "loki", url: "http://loki:3100" }],
+		[
+			"datadog",
+			{ source: "datadog", site: "datadoghq.com", apiKey: "k", appKey: "a" },
+		],
+	] as const)(
+		"omits PAPERHANGER_TELEMETRY when the configured source is %s, not greptimedb",
+		async (_name, telemetry) => {
+			const fake = createFakeProcess();
+			let capturedEnv: Record<string, string> | undefined;
+			const spawn: SpawnFn = (_cmd, options) => {
+				capturedEnv = options.env;
+				return fake.process;
+			};
+
+			const config = baseConfig();
+			// Cast: these are real TelemetryConfig members, but each carries more
+			// required fields than this test needs to express the guard.
+			config.telemetry = telemetry as unknown as typeof config.telemetry;
+			const sidecar = new AgentHostSidecar({
+				config,
+				logger: silentLogger(),
+				spawn,
+				fetchImpl: okFetch(),
+				env: {},
+			});
+
+			await sidecar.start();
+
+			expect(capturedEnv?.PAPERHANGER_TELEMETRY).toBeUndefined();
+
+			await sidecar.stop();
+		},
+	);
 });
 
 describe("AgentHostSidecar - readiness", () => {
