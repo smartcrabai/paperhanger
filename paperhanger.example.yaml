@@ -39,11 +39,12 @@ sources:
   #   secret: ${SENTRY_WEBHOOK_SECRET}
 
 # Discriminated union on `source` (like `storage`/`notifiers` above); exactly
-# one of "greptimedb", "loki", "tempo", "prometheus" is active at a time. Omit
-# the whole `telemetry` section to run without one (see the config reference
-# below). "loki"/"tempo"/"prometheus" are single-signal sources -- pick this
-# one if you run a Grafana OSS stack with those three as separate backends,
-# rather than GreptimeDB's single do-everything endpoint.
+# one of "greptimedb", "loki", "tempo", "prometheus", "clickstack", "signoz",
+# "openobserve" is active at a time. Omit the whole `telemetry` section to run
+# without one (see the config reference below). "loki"/"tempo"/"prometheus" are
+# single-signal sources -- pick those if you run a Grafana OSS stack with those
+# three as separate backends, rather than GreptimeDB's single do-everything
+# endpoint. The alternatives below are commented out.
 telemetry:
   source: greptimedb
   url: ${GREPTIMEDB_URL}
@@ -79,6 +80,39 @@ telemetry:
 #   source: prometheus
 #   url: ${PROMETHEUS_URL}
 #   auth: ${PROMETHEUS_AUTH}
+#   # timeoutMs: 30000
+
+# ClickStack (ClickHouse's observability stack, successor of HyperDX): talks
+# directly to ClickHouse's HTTP interface (SQL), not a separate HyperDX API.
+# Metrics collection is unsupported -- ClickHouse has no PromQL-compatible
+# query endpoint (see docs/spec.md section 3.4).
+# telemetry:
+#   source: clickstack
+#   url: ${CLICKSTACK_URL}       # ClickHouse HTTP interface, e.g. http://localhost:8123
+#   database: default
+#   auth: ${CLICKSTACK_AUTH}     # username:password; omit if ClickHouse auth is disabled
+#   # logsTable: otel_logs
+#   # tracesTable: otel_traces
+#   # timeoutMs: 30000
+
+# SigNoz: the unified query_range API (v5). Metrics collection is unsupported --
+# SigNoz's builder API takes a metric name + aggregation spec, not raw PromQL.
+# telemetry:
+#   source: signoz
+#   url: ${SIGNOZ_URL}
+#   apiKey: ${SIGNOZ_API_KEY}     # sent as the SIGNOZ-API-KEY header
+#   # timeoutMs: 30000
+
+# OpenObserve: the _search API (SQL-style, per-stream). Metrics use an inferred
+# Prometheus-compatible query_range path (see docs/spec.md section 3.4 for the
+# caveat -- not verified against a live instance).
+# telemetry:
+#   source: openobserve
+#   url: ${OPENOBSERVE_URL}
+#   organization: default
+#   auth: ${OPENOBSERVE_AUTH}    # username:password; sent as HTTP Basic auth
+#   # logsStream: default
+#   # tracesStream: default
 #   # timeoutMs: 30000
 
 # Self-instrumentation: where paperhanger exports ITS OWN OTLP traces (see

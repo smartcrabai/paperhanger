@@ -48,8 +48,10 @@ const SourcesSchema = z.record(z.string(), SourceConfigSchema).default({});
  * *follow-up* query tool is a separate, optional step -- a `case` in
  * `agent-host/src/tools.ts` plus the two contract mirrors
  * (`src/agent/contract.ts` / `agent-host/src/contract.ts`).
- * `greptimedb`, `loki`, `tempo`, and `prometheus` are the members today;
- * only `greptimedb` backs the follow-up query tool so far.
+ * `greptimedb`, `loki`, `tempo`, `prometheus`, `clickstack`, `signoz`, and
+ * `openobserve` are the members today; only `greptimedb` backs the
+ * follow-up query tool so far (`src/index.ts` narrows `config.telemetry` to
+ * that one member before passing it through to the agent-host sidecar/runner).
  */
 const GreptimeDbTelemetrySchema = z.object({
 	source: z.literal("greptimedb"),
@@ -106,11 +108,47 @@ const PrometheusTelemetrySchema = z.object({
 	timeoutMs: z.number().int().positive().optional(),
 });
 
+/** ClickStack (ClickHouse's observability stack, successor of HyperDX); see `src/telemetry/clickstack.ts`. */
+const ClickStackTelemetrySchema = z.object({
+	source: z.literal("clickstack"),
+	/** ClickHouse HTTP interface base URL, e.g. `http://localhost:8123`. */
+	url: z.string().min(1),
+	database: z.string().min(1),
+	auth: z.string().optional(),
+	logsTable: z.string().min(1).optional(),
+	tracesTable: z.string().min(1).optional(),
+	timeoutMs: z.number().int().positive().optional(),
+});
+
+/** SigNoz's unified `query_range` API; see `src/telemetry/signoz.ts`. */
+const SigNozTelemetrySchema = z.object({
+	source: z.literal("signoz"),
+	url: z.string().min(1),
+	/** Sent as the `SIGNOZ-API-KEY` header. */
+	apiKey: z.string().min(1),
+	timeoutMs: z.number().int().positive().optional(),
+});
+
+/** OpenObserve's `_search` API; see `src/telemetry/openobserve.ts`. */
+const OpenObserveTelemetrySchema = z.object({
+	source: z.literal("openobserve"),
+	url: z.string().min(1),
+	/** Organization slug in the URL path (`/api/{organization}/...`). */
+	organization: z.string().min(1),
+	auth: z.string().optional(),
+	logsStream: z.string().min(1).optional(),
+	tracesStream: z.string().min(1).optional(),
+	timeoutMs: z.number().int().positive().optional(),
+});
+
 const TelemetrySchema = z.discriminatedUnion("source", [
 	GreptimeDbTelemetrySchema,
 	LokiTelemetrySchema,
 	TempoTelemetrySchema,
 	PrometheusTelemetrySchema,
+	ClickStackTelemetrySchema,
+	SigNozTelemetrySchema,
+	OpenObserveTelemetrySchema,
 ]);
 
 /** Time window (relative to alert time) used when collecting telemetry. See spec section 3.4. */
@@ -303,6 +341,13 @@ export type LokiTelemetryConfig = z.infer<typeof LokiTelemetrySchema>;
 export type TempoTelemetryConfig = z.infer<typeof TempoTelemetrySchema>;
 export type PrometheusTelemetryConfig = z.infer<
 	typeof PrometheusTelemetrySchema
+>;
+export type ClickStackTelemetryConfig = z.infer<
+	typeof ClickStackTelemetrySchema
+>;
+export type SigNozTelemetryConfig = z.infer<typeof SigNozTelemetrySchema>;
+export type OpenObserveTelemetryConfig = z.infer<
+	typeof OpenObserveTelemetrySchema
 >;
 export type ObservabilityConfig = z.infer<typeof ObservabilitySchema>;
 export type ObservabilityLogsConfig = z.infer<typeof ObservabilityLogsSchema>;

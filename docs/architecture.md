@@ -62,6 +62,9 @@ src/
     loki.ts                # LogQL HTTP client (logs only; Grafana OSS stack)
     tempo.ts               # TraceQL search + trace-by-id HTTP client (traces only; Grafana OSS stack)
     prometheus.ts          # PromQL HTTP client (metrics only; Grafana OSS stack)
+    clickstack.ts          # ClickHouse HTTP interface (SQL) client, ClickStack's OTel schema; no PromQL API, so metrics unsupported
+    signoz.ts              # Unified query_range API (v5) client; builder-query metrics unsupported (no raw PromQL passthrough)
+    openobserve.ts         # _search HTTP API (SQL) client; metrics via an inferred Prometheus-compatible query_range path
     factory.ts             # Dispatches config.telemetry.source -> concrete TelemetrySource
     context-builder.ts     # Collection strategy → token-budget-aware IncidentContext
   repo/
