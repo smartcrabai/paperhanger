@@ -13,10 +13,13 @@
 
 import type { Tracer } from "@opentelemetry/api";
 import type { TelemetryConfig } from "../config/schema";
+import { ClickStackSource } from "./clickstack";
 import { GreptimeDbSource } from "./greptimedb";
 import { LokiSource } from "./loki";
 import type { Logger } from "../observability/logger";
+import { OpenObserveSource } from "./openobserve";
 import { PrometheusSource } from "./prometheus";
+import { SigNozSource } from "./signoz";
 import { TempoSource } from "./tempo";
 import type { TelemetrySource } from "./types";
 
@@ -34,5 +37,11 @@ export function createTelemetrySource(
 			return new TempoSource(config, logger);
 		case "prometheus":
 			return new PrometheusSource(config, logger);
+		case "clickstack":
+			return new ClickStackSource(config, logger, undefined, tracer);
+		case "signoz":
+			return new SigNozSource(config, logger, undefined, tracer);
+		case "openobserve":
+			return new OpenObserveSource(config, logger, undefined, tracer);
 	}
 }

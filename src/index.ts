@@ -125,7 +125,7 @@ async function main(): Promise<void> {
 	// wired for `greptimedb` only so far (see telemetry/factory.ts's doc
 	// comment) -- narrow explicitly rather than widening those two modules'
 	// long-standing `{ source: "greptimedb"; ... }` config types to the full
-	// (now four-member) `TelemetryConfig` union.
+	// (now seven-member) `TelemetryConfig` union.
 	const greptimeDbTelemetry =
 		config.telemetry?.source === "greptimedb" ? config.telemetry : undefined;
 
