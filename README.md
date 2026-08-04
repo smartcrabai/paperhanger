@@ -7,8 +7,9 @@ loop until the pull request lands:
 
 Given a webhook alert (Grafana Alerting, Prometheus Alertmanager, Sentry, or
 a generic internal format), paperhanger deduplicates it against any
-in-progress incident, collects the surrounding logs/traces/metrics from
-GreptimeDB, resolves which GitHub repository is responsible, and hands the
+in-progress incident, collects the surrounding logs/traces/metrics from the
+configured telemetry backend (GreptimeDB, or a Grafana OSS stack of Loki/
+Tempo/Prometheus), resolves which GitHub repository is responsible, and hands the
 whole bundle to a [Flue](https://flueframework.com/) agent that diagnoses
 the root cause and, when it can, clones the repo, writes a fix, runs the
 tests, and opens a pull request. When it can't confidently resolve a
@@ -296,13 +297,14 @@ Every key from `paperhanger.example.yaml`, with its default when omitted
 | `storage.path` | *(required if `sqlite`)* | SQLite file path; mount `/data` as a volume |
 | `storage.url` | *(required if `postgres`)* | `Bun.sql` connection string |
 | `sources.<name>.secret` | `{}` (no sources) | Per-source shared secret, checked via `X-Webhook-Token` header or `?token=` query param. Map key must match an implemented adapter name: `grafana`, `alertmanager`, `sentry`, or `generic`. Sentry cannot set custom headers, so its token rides in the webhook URL's `?token=` query param -- see [Webhook sources](#webhook-sources) |
-| `telemetry.source` | *(the whole `telemetry` section is optional)* | Discriminated union like `storage`/`notifiers`; `greptimedb` is the only backend today. Omit `telemetry` entirely to run without one -- the pipeline degrades to an empty-telemetry context (see "Incident state machine") rather than failing |
-| `telemetry.url` | *(required if `telemetry` is set)* | GreptimeDB HTTP endpoint |
-| `telemetry.database` | *(required if `telemetry` is set)* | e.g. `public` |
-| `telemetry.auth` | *(none)* | `username:password`, unencoded (base64-encoded internally) |
-| `telemetry.logsTable` | `opentelemetry_logs` | Override if your deployment renamed the OTLP-ingested logs table |
-| `telemetry.tracesTable` | `opentelemetry_traces` | Override if your deployment renamed the OTLP-ingested traces table |
-| `telemetry.timeoutMs` | `30000` | Per-request HTTP timeout for all GreptimeDB calls |
+| `telemetry.source` | *(the whole `telemetry` section is optional)* | Discriminated union like `storage`/`notifiers`: `greptimedb`, `loki`, `tempo`, or `prometheus`. Omit `telemetry` entirely to run without one -- the pipeline degrades to an empty-telemetry context (see "Incident state machine") rather than failing. `loki`/`tempo`/`prometheus` are single-signal sources for a Grafana OSS stack: querying the other two signals against them logs a warning and returns no results rather than failing (unlike `greptimedb`, which serves all three signals from one endpoint) |
+| `telemetry.url` | *(required if `telemetry` is set)* | Backend HTTP endpoint (GreptimeDB / Loki / Tempo / Prometheus, per `telemetry.source`) |
+| `telemetry.database` | *(required if `source: greptimedb`)* | e.g. `public`. Not used by `loki`/`tempo`/`prometheus` |
+| `telemetry.auth` | *(none)* | `username:password`, unencoded (base64-encoded internally as HTTP Basic auth). Applies to every source |
+| `telemetry.logsTable` | `opentelemetry_logs` | `greptimedb` only: override if your deployment renamed the OTLP-ingested logs table |
+| `telemetry.tracesTable` | `opentelemetry_traces` | `greptimedb` only: override if your deployment renamed the OTLP-ingested traces table |
+| `telemetry.orgId` | *(none)* | `loki` only: `X-Scope-OrgID` tenant header, for multi-tenant Loki deployments |
+| `telemetry.timeoutMs` | `30000` | Per-request HTTP timeout for all calls to the configured backend |
 | `observability.endpoint` | *(the whole `observability` section is optional)* | OTLP/HTTP traces endpoint paperhanger exports ITS OWN spans to, e.g. `http://localhost:4318/v1/traces`. Distinct from `telemetry` above, which is where paperhanger *reads* other services' telemetry from. Omit `observability` entirely to run with tracing disabled (no-op tracers, no context manager registered) |
 | `observability.serviceName` | `paperhanger` | `service.name` resource attribute on exported spans |
 | `observability.headers` | `{}` | Extra headers sent with every OTLP export request (values may use `${ENV_VAR}`) |

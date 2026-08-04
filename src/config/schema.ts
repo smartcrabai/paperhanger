@@ -42,11 +42,14 @@ const SourcesSchema = z.record(z.string(), SourceConfigSchema).default({});
 
 /**
  * `telemetry` is a discriminated union on `source`, mirroring `storage` and
- * `notifiers` below -- adding a future backend (Loki, Tempo, ...) means
- * adding one more member here plus a `case` in `src/telemetry/factory.ts`,
- * `agent-host/src/tools.ts`, and the two contract mirrors
- * (`src/agent/contract.ts` / `agent-host/src/contract.ts`); nowhere else.
- * `greptimedb` is the only member today.
+ * `notifiers` below -- adding a future backend means adding one more member
+ * here plus a `case` in `src/telemetry/factory.ts` (the initial-collection
+ * path every backend must support). Wiring a backend into the fix agent's
+ * *follow-up* query tool is a separate, optional step -- a `case` in
+ * `agent-host/src/tools.ts` plus the two contract mirrors
+ * (`src/agent/contract.ts` / `agent-host/src/contract.ts`).
+ * `greptimedb`, `loki`, `tempo`, and `prometheus` are the members today;
+ * only `greptimedb` backs the follow-up query tool so far.
  */
 const GreptimeDbTelemetrySchema = z.object({
 	source: z.literal("greptimedb"),
@@ -60,8 +63,54 @@ const GreptimeDbTelemetrySchema = z.object({
 	timeoutMs: z.number().int().positive().optional(),
 });
 
+/**
+ * Logs-only backend (see `src/telemetry/loki.ts`): `queryTraces`/`queryMetrics`
+ * against a Loki-sourced `TelemetrySource` gracefully return no results,
+ * since a single Loki instance carries no trace/metric data.
+ */
+const LokiTelemetrySchema = z.object({
+	source: z.literal("loki"),
+	url: z.string().min(1),
+	/** `username:password`, unencoded; base64-encoded internally (Basic auth). */
+	auth: z.string().optional(),
+	/** `X-Scope-OrgID` tenant header, for multi-tenant Loki deployments. */
+	orgId: z.string().min(1).optional(),
+	/** Per-request HTTP timeout in milliseconds. Defaults to 30s when omitted. */
+	timeoutMs: z.number().int().positive().optional(),
+});
+
+/**
+ * Traces-only backend (see `src/telemetry/tempo.ts`): `queryLogs`/`queryMetrics`
+ * against a Tempo-sourced `TelemetrySource` gracefully return no results,
+ * since a single Tempo instance carries no log/metric data.
+ */
+const TempoTelemetrySchema = z.object({
+	source: z.literal("tempo"),
+	url: z.string().min(1),
+	auth: z.string().optional(),
+	timeoutMs: z.number().int().positive().optional(),
+});
+
+/**
+ * Metrics-only backend (see `src/telemetry/prometheus.ts`): `queryLogs`/`queryTraces`
+ * against a Prometheus-sourced `TelemetrySource` gracefully return no
+ * results, since a single Prometheus instance carries no log/trace data.
+ * Like `GreptimeDbSource.queryMetrics`, `queryMetrics` only runs when the
+ * caller supplies a PromQL expression (see `context-builder.ts`'s
+ * promql/metric annotation gate).
+ */
+const PrometheusTelemetrySchema = z.object({
+	source: z.literal("prometheus"),
+	url: z.string().min(1),
+	auth: z.string().optional(),
+	timeoutMs: z.number().int().positive().optional(),
+});
+
 const TelemetrySchema = z.discriminatedUnion("source", [
 	GreptimeDbTelemetrySchema,
+	LokiTelemetrySchema,
+	TempoTelemetrySchema,
+	PrometheusTelemetrySchema,
 ]);
 
 /** Time window (relative to alert time) used when collecting telemetry. See spec section 3.4. */
@@ -228,6 +277,11 @@ export type RepoMappingConfig = z.infer<typeof RepoMappingSchema>;
 export type TelemetryConfig = z.infer<typeof TelemetrySchema>;
 export type GreptimeDbTelemetryConfig = z.infer<
 	typeof GreptimeDbTelemetrySchema
+>;
+export type LokiTelemetryConfig = z.infer<typeof LokiTelemetrySchema>;
+export type TempoTelemetryConfig = z.infer<typeof TempoTelemetrySchema>;
+export type PrometheusTelemetryConfig = z.infer<
+	typeof PrometheusTelemetrySchema
 >;
 export type ObservabilityConfig = z.infer<typeof ObservabilitySchema>;
 export type ObservabilityLogsConfig = z.infer<typeof ObservabilityLogsSchema>;
