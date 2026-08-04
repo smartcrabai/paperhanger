@@ -133,4 +133,72 @@ describe("createLogger", () => {
 		const entry = JSON.parse(lines[0] as string);
 		expect(entry.traceId).toBe("overridden");
 	});
+
+	describe("recordSink", () => {
+		test("receives the same structured entry the line sink serializes", () => {
+			const { lines, sink } = collectLines();
+			const entries: unknown[] = [];
+			const logger = createLogger({
+				sink,
+				recordSink: (entry) => entries.push(entry),
+			});
+
+			logger.info("event", { incidentId: "abc-123" });
+
+			expect(entries.length).toBe(1);
+			const entry = entries[0] as Record<string, unknown>;
+			expect(entry.level).toBe("info");
+			expect(entry.msg).toBe("event");
+			expect(entry.incidentId).toBe("abc-123");
+			expect(typeof entry.ts).toBe("string");
+			// The record sink's entry is the pre-serialization form of the exact
+			// object the primary sink wrote.
+			expect(JSON.parse(lines[0] as string)).toEqual(entry);
+		});
+
+		test("is not called for messages below the configured level", () => {
+			const { sink } = collectLines();
+			const entries: unknown[] = [];
+			const logger = createLogger({
+				sink,
+				level: "warn",
+				recordSink: (entry) => entries.push(entry),
+			});
+
+			logger.info("dropped");
+			logger.warn("kept");
+
+			expect(entries.length).toBe(1);
+			expect((entries[0] as Record<string, unknown>).msg).toBe("kept");
+		});
+
+		test("child() inherits the parent's recordSink", () => {
+			const { sink } = collectLines();
+			const entries: unknown[] = [];
+			const logger = createLogger({
+				sink,
+				recordSink: (entry) => entries.push(entry),
+			});
+			const child = logger.child({ component: "ingest" });
+
+			child.info("from child");
+
+			expect(entries.length).toBe(1);
+			expect((entries[0] as Record<string, unknown>).component).toBe("ingest");
+		});
+
+		test("a throwing recordSink never breaks the primary sink or the caller", () => {
+			const { lines, sink } = collectLines();
+			const logger = createLogger({
+				sink,
+				recordSink: () => {
+					throw new Error("record sink exploded");
+				},
+			});
+
+			expect(() => logger.info("still logged")).not.toThrow();
+			expect(lines.length).toBe(1);
+			expect(JSON.parse(lines[0] as string).msg).toBe("still logged");
+		});
+	});
 });

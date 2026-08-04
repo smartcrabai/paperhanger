@@ -29,6 +29,7 @@ import { grafanaAdapter } from "./ingest/adapters/grafana";
 import { createServer } from "./ingest/server";
 import { createLogger } from "./observability/logger";
 import type { Logger } from "./observability/logger";
+import { createLogExport } from "./observability/log-export";
 import { createTracing } from "./observability/tracing";
 import { DiscordNotifier } from "./notify/discord";
 import { SlackNotifier } from "./notify/slack";
@@ -50,7 +51,7 @@ import type { TelemetrySource } from "./telemetry/types";
 /** Best-effort bound on how long shutdown waits for in-flight incidents to finish. */
 const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 10_000;
 
-const logger = createLogger({ fields: { component: "paperhanger" } });
+const startupLogger = createLogger({ fields: { component: "paperhanger" } });
 
 function buildStore(
 	config: Config,
@@ -81,6 +82,21 @@ function buildNotifier(
 
 async function main(): Promise<void> {
 	const config = await loadConfig();
+
+	// Log export is built first and takes the startup logger for its internal
+	// (shutdown-path) messages: routing those through the OTel-exporting root
+	// logger below would feed the logs pipeline's own failures back into
+	// itself. The root logger then attaches the export as its `recordSink`,
+	// so every component log line is mirrored to the OTLP logs endpoint while
+	// stdout JSON lines remain the primary sink.
+	const logExport = createLogExport(
+		config.observability,
+		startupLogger.child({ component: "log-export" }),
+	);
+	const logger = createLogger({
+		fields: { component: "paperhanger" },
+		recordSink: logExport.recordSink,
+	});
 
 	// Registers the global context manager (when tracing is enabled) before
 	// any component is constructed, so every span created below propagates
@@ -207,6 +223,7 @@ async function main(): Promise<void> {
 		agentHostMode: sidecar.isExternal ? "external" : "internal",
 		notifierCount: config.notifiers.length,
 		tracingEnabled: config.observability !== undefined,
+		logExportEnabled: config.observability?.logs !== undefined,
 	});
 
 	let shuttingDown = false;
@@ -232,6 +249,11 @@ async function main(): Promise<void> {
 		await tracing.shutdown();
 		logger.info("shutdown.tracing_stopped", {});
 
+		// Log export shuts down after tracing so diag messages emitted during
+		// tracing's own shutdown are still captured and flushed here.
+		await logExport.shutdown();
+		logger.info("shutdown.log_export_stopped", {});
+
 		await store.close();
 		logger.info("shutdown.complete", { signal });
 		process.exit(0);
@@ -246,7 +268,7 @@ async function main(): Promise<void> {
 }
 
 main().catch((err) => {
-	logger.error("startup.failed", {
+	startupLogger.error("startup.failed", {
 		error: err instanceof Error ? err.message : String(err),
 	});
 	process.exit(1);

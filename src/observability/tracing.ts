@@ -3,9 +3,10 @@
  * own traces. Distinct from `src/telemetry/*`, which is where paperhanger
  * READS other services' telemetry from (GreptimeDB).
  *
- * Signal scope: traces only. No OTel logs export, no metrics -- see
- * `src/observability/logger.ts` for the trace/span correlation fields added
- * to paperhanger's existing structured JSON logs instead.
+ * Signal scope: traces only. OTel log export lives in
+ * `src/observability/log-export.ts`, which bridges the structured JSON logs
+ * from `src/observability/logger.ts` (including their trace/span correlation
+ * fields) onto an OTLP logs exporter.
  */
 
 import {
@@ -26,6 +27,7 @@ import {
 } from "@opentelemetry/sdk-trace-base";
 import type { ObservabilityConfig } from "../config/schema";
 import type { Logger } from "./logger";
+import { withTimeout } from "./timeout";
 
 /** Hard cap on flush+shutdown so process shutdown stays bounded even against an unreachable OTLP endpoint. */
 const TRACING_SHUTDOWN_TIMEOUT_MS = 5_000;
@@ -59,25 +61,6 @@ function createDiagLoggerAdapter(logger: Logger): DiagLogger {
 		debug: noop,
 		verbose: noop,
 	};
-}
-
-async function withTimeout(
-	work: Promise<void>,
-	timeoutMs: number,
-	onTimeout: () => void,
-): Promise<void> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-	const timeout = new Promise<void>((resolve) => {
-		timer = setTimeout(() => {
-			onTimeout();
-			resolve();
-		}, timeoutMs);
-	});
-	try {
-		await Promise.race([work, timeout]);
-	} finally {
-		clearTimeout(timer);
-	}
 }
 
 /**

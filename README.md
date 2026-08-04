@@ -246,6 +246,8 @@ Every key from `paperhanger.example.yaml`, with its default when omitted
 | `observability.endpoint` | *(the whole `observability` section is optional)* | OTLP/HTTP traces endpoint paperhanger exports ITS OWN spans to, e.g. `http://localhost:4318/v1/traces`. Distinct from `telemetry` above, which is where paperhanger *reads* other services' telemetry from. Omit `observability` entirely to run with tracing disabled (no-op tracers, no context manager registered) |
 | `observability.serviceName` | `paperhanger` | `service.name` resource attribute on exported spans |
 | `observability.headers` | `{}` | Extra headers sent with every OTLP export request (values may use `${ENV_VAR}`) |
+| `observability.logs.endpoint` | *(the whole `logs` subsection is optional)* | OTLP/HTTP **logs** endpoint paperhanger exports ITS OWN log lines to, e.g. `http://localhost:4318/v1/logs`. Presence of this subsection is the enable flag, mirroring `observability` itself. Stdout JSON lines remain the primary sink; this is an additional one. Omit to export traces only |
+| `observability.logs.headers` | *(inherits `observability.headers`)* | Extra headers sent with every OTLP **log** export request (values may use `${ENV_VAR}`). Set only when the logs endpoint needs different auth than traces -- typical collectors share auth across signals |
 | `collect.windowBeforeMinutes` | `30` | Telemetry window before the alert's `startsAt` |
 | `collect.windowAfterMinutes` | `5` | Telemetry window after `startsAt` (capped at "now") |
 | `repos.attributeKeys` | `[]` | Annotation/label/resource-attribute keys checked (in order) for an `owner/repo` value |
@@ -351,20 +353,25 @@ The agent-host (`agent-host/`) is a separate Node-only package with its own
   plus contextual fields). When `observability` is configured, log lines
   written while a span is active also carry `traceId`/`spanId` for
   correlation with the exported trace. OTel export of paperhanger's own
-  *traces* happens when `observability` is configured (see the config
-  reference above); OTel export of paperhanger's own *logs* is still future
-  work (spec section 3.10).
+  *traces* happens when `observability` is configured, and OTel export of its
+  own *logs* when `observability.logs` is additionally set (see the config
+  reference above). Stdout JSON lines stay the primary sink either way: log
+  export is an additional sink, and an exporter that is failing or
+  unreachable never blocks or drops a stdout line.
 - Shutdown order on `SIGINT`/`SIGTERM`: stop accepting new HTTP requests,
   wait (bounded, default 10s) for in-flight incidents to drain, stop the
-  agent-host sidecar, flush and shut down tracing (bounded, 5s), close the
+  agent-host sidecar, flush and shut down tracing (bounded, 5s), flush and
+  shut down log export (bounded, 5s -- after tracing, so diag messages from
+  tracing's own shutdown are still captured), close the
   store. An incident still mid-flight past the drain timeout is abandoned at
   its last persisted status rather than force-completed -- see "Current
   limitations".
-- Shutdown time budget: the drain and tracing-shutdown phases are bounded
-  (10s + 5s), but the sidecar stop in between is not, so worst case is
-  ~15s plus however long the agent-host sidecar takes to exit (only when
-  `observability` is configured -- otherwise the 5s tracing bound doesn't
-  apply). This exceeds Docker's default 10s stop grace period, so a slow
+- Shutdown time budget: the drain, tracing-shutdown, and log-export-shutdown
+  phases are bounded (10s + 5s + 5s), but the sidecar stop in between is not,
+  so worst case is ~20s plus however long the agent-host sidecar takes to
+  exit (the 5s tracing bound applies only when `observability` is configured,
+  and the 5s log-export bound only when `observability.logs` is set on top of
+  it). This exceeds Docker's default 10s stop grace period, so a slow
   shutdown can be SIGKILLed before `store.close()` runs, severing the
   storage handle uncleanly. Set the container termination grace period to
   at least ~30s in production (Compose's `stop_grace_period`, Kubernetes'

@@ -74,7 +74,9 @@ src/
     webhook.ts             # Generic JSON POST
   observability/
     logger.ts              # Structured JSON line logger
-    tracing.ts             # OTel tracer provider setup (traces-only self-instrumentation)
+    tracing.ts             # OTel tracer provider setup (traces self-instrumentation)
+    log-export.ts          # OTel logger provider setup (logs self-instrumentation; bridges logger.ts)
+    timeout.ts             # Bounded flush/shutdown helper shared by both signals
   dashboard/                # Personal-use configuration + observation UI (Bun HTML import + React)
     index.html              # Entry point; imported only from src/index.ts, the composition root
     app.tsx                 # Token gate + Repositories/Setup scripts/System prompt/Incidents tab state
