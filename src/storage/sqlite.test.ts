@@ -2,11 +2,13 @@ import { describe, expect, test } from "bun:test";
 import { SqliteIncidentStore } from "./sqlite";
 import type {
 	CommonSetupScriptStoreHarness,
+	CommonSystemPromptStoreHarness,
 	IncidentStoreHarness,
 	RepoDefinitionStoreHarness,
 } from "./store-suite";
 import {
 	runCommonSetupScriptStoreSuite,
+	runCommonSystemPromptStoreSuite,
 	runIncidentStoreSuite,
 	runRepoDefinitionStoreSuite,
 } from "./store-suite";
@@ -53,6 +55,18 @@ async function createCommonSetupScriptStoreHarness(): Promise<CommonSetupScriptS
 	};
 }
 
+async function createCommonSystemPromptStoreHarness(): Promise<CommonSystemPromptStoreHarness> {
+	let current = new Date("2024-01-01T00:00:00.000Z");
+	const store = new SqliteIncidentStore(":memory:", { now: () => current });
+	await store.init();
+	return {
+		store,
+		advance: (ms) => {
+			current = new Date(current.getTime() + ms);
+		},
+	};
+}
+
 runIncidentStoreSuite("SqliteIncidentStore", createStoreHarness);
 runRepoDefinitionStoreSuite(
 	"SqliteIncidentStore (RepoDefinitionStore)",
@@ -61,6 +75,10 @@ runRepoDefinitionStoreSuite(
 runCommonSetupScriptStoreSuite(
 	"SqliteIncidentStore (CommonSetupScriptStore)",
 	createCommonSetupScriptStoreHarness,
+);
+runCommonSystemPromptStoreSuite(
+	"SqliteIncidentStore (CommonSystemPromptStore)",
+	createCommonSystemPromptStoreHarness,
 );
 
 describe("SqliteIncidentStore - lifecycle", () => {

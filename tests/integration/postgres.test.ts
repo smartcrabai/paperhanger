@@ -14,11 +14,13 @@ import type { StartedTestContainer } from "testcontainers";
 import { PostgresIncidentStore } from "../../src/storage/postgres";
 import type {
 	CommonSetupScriptStoreHarness,
+	CommonSystemPromptStoreHarness,
 	IncidentStoreHarness,
 	RepoDefinitionStoreHarness,
 } from "../../src/storage/store-suite";
 import {
 	runCommonSetupScriptStoreSuite,
+	runCommonSystemPromptStoreSuite,
 	runIncidentStoreSuite,
 	runRepoDefinitionStoreSuite,
 } from "../../src/storage/store-suite";
@@ -102,7 +104,7 @@ describe.skipIf(!dockerAvailable)(
 			// Reuse the same container/connection across the whole suite (starting
 			// a fresh container per test would be far too slow); reset table
 			// contents instead so each test sees an empty store.
-			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incidents, repo_definitions, common_setup_scripts RESTART IDENTITY CASCADE`;
+			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incidents, repo_definitions, common_setup_scripts, common_system_prompt RESTART IDENTITY CASCADE`;
 			currentTime = new Date();
 			return {
 				store: sharedStore,
@@ -113,7 +115,7 @@ describe.skipIf(!dockerAvailable)(
 		}
 
 		async function makeRepoDefinitionStore(): Promise<RepoDefinitionStoreHarness> {
-			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incidents, repo_definitions, common_setup_scripts RESTART IDENTITY CASCADE`;
+			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incidents, repo_definitions, common_setup_scripts, common_system_prompt RESTART IDENTITY CASCADE`;
 			currentTime = new Date();
 			return {
 				store: sharedStore,
@@ -124,7 +126,18 @@ describe.skipIf(!dockerAvailable)(
 		}
 
 		async function makeCommonSetupScriptStore(): Promise<CommonSetupScriptStoreHarness> {
-			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incidents, repo_definitions, common_setup_scripts RESTART IDENTITY CASCADE`;
+			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incidents, repo_definitions, common_setup_scripts, common_system_prompt RESTART IDENTITY CASCADE`;
+			currentTime = new Date();
+			return {
+				store: sharedStore,
+				advance: (ms) => {
+					currentTime = new Date(currentTime.getTime() + ms);
+				},
+			};
+		}
+
+		async function makeCommonSystemPromptStore(): Promise<CommonSystemPromptStoreHarness> {
+			await adminSql`TRUNCATE TABLE incident_events, agent_runs, incidents, repo_definitions, common_setup_scripts, common_system_prompt RESTART IDENTITY CASCADE`;
 			currentTime = new Date();
 			return {
 				store: sharedStore,
@@ -142,6 +155,10 @@ describe.skipIf(!dockerAvailable)(
 		runCommonSetupScriptStoreSuite(
 			"PostgresIncidentStore (CommonSetupScriptStore)",
 			makeCommonSetupScriptStore,
+		);
+		runCommonSystemPromptStoreSuite(
+			"PostgresIncidentStore (CommonSystemPromptStore)",
+			makeCommonSystemPromptStore,
 		);
 
 		test("ping returns false once the connection is closed", async () => {

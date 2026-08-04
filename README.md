@@ -191,9 +191,9 @@ curl http://localhost:8080/readyz    # DB connectivity
 ```
 
 `GET /incidents`, `GET /incidents/:id`, `GET /incidents/:id/events`, and
-every `/repo-definitions` route (the dashboard's API -- see
-[Dashboard](#dashboard) below) refuse every request with 401 unless
-`server.apiToken` is set in `paperhanger.yaml` (see the
+every `/repo-definitions`, `/setup-scripts`, and `/system-prompt` route (the
+dashboard's API -- see [Dashboard](#dashboard) below) refuse every request
+with 401 unless `server.apiToken` is set in `paperhanger.yaml` (see the
 [config reference](#config-reference) below) -- there is no unauthenticated
 fallback:
 
@@ -213,6 +213,10 @@ separate service). It manages:
 - **common setup scripts**: an ordered list of scripts shared by every
   repository. Each script runs after clone only when its configured
   repository-relative trigger file exists;
+- **system prompt**: a single instruction text shared by every repository,
+  prepended to every fix-agent run. Clearing it disables it. This text is
+  stored in plaintext and sent to the model on every run -- do not paste
+  secrets into it;
 - a read-only incident list/detail/event-timeline view.
 
 All data routes require the same `server.apiToken`. The page prompts for it
@@ -227,7 +231,7 @@ Every key from `paperhanger.example.yaml`, with its default when omitted
 | Key | Default | Notes |
 |---|---|---|
 | `server.port` | `8080` | |
-| `server.apiToken` | *(unset)* | Bearer token required by `GET /incidents`, `GET /incidents/:id`, `GET /incidents/:id/events`, and every `/repo-definitions` route (the dashboard's API; see [Dashboard](#dashboard)) (`Authorization: Bearer <token>` or `X-Api-Token: <token>`). Secure by default: unset means those endpoints refuse every request with 401 -- there is no unauthenticated fallback. `/healthz` and `/readyz` are never gated |
+| `server.apiToken` | *(unset)* | Bearer token required by `GET /incidents`, `GET /incidents/:id`, `GET /incidents/:id/events`, and every `/repo-definitions`, `/setup-scripts`, and `/system-prompt` route (the dashboard's API; see [Dashboard](#dashboard)) (`Authorization: Bearer <token>` or `X-Api-Token: <token>`). Secure by default: unset means those endpoints refuse every request with 401 -- there is no unauthenticated fallback. `/healthz` and `/readyz` are never gated |
 | `storage.driver` | *(required)* | `sqlite` or `postgres` |
 | `storage.path` | *(required if `sqlite`)* | SQLite file path; mount `/data` as a volume |
 | `storage.url` | *(required if `postgres`)* | `Bun.sql` connection string |
@@ -378,15 +382,16 @@ The agent-host (`agent-host/`) is a separate Node-only package with its own
 ## Security notes
 
 - **`GET /incidents`, `GET /incidents/:id`, `GET /incidents/:id/events`,
-  every `/repo-definitions` route, and every `/setup-scripts` route require
-  `server.apiToken` by default-refused**: incident records can carry sensitive
-  diagnosis/failureReason text, while repository definitions and common setup
-  scripts can carry infrastructure commands. These routes demand a bearer
-  token (`Authorization: Bearer <token>` or `X-Api-Token: <token>`,
-  constant-time compared) whenever `server.apiToken` is set, and return 401
-  with an explanatory body when it is *not* set. The dashboard's static page
-  itself (`GET /` and `GET /dashboard`) is unauthenticated, since it carries
-  no data of its own.
+  every `/repo-definitions` route, every `/setup-scripts` route, and the
+  `/system-prompt` route require `server.apiToken` by default-refused**:
+  incident records can carry sensitive diagnosis/failureReason text, while
+  repository definitions, common setup scripts, and the common system prompt
+  can carry infrastructure commands or operator instructions. These routes
+  demand a bearer token (`Authorization: Bearer <token>` or
+  `X-Api-Token: <token>`, constant-time compared) whenever `server.apiToken`
+  is set, and return 401 with an explanatory body when it is *not* set. The
+  dashboard's static page itself (`GET /` and `GET /dashboard`) is
+  unauthenticated, since it carries no data of its own.
   `/healthz` and `/readyz` are never gated. See `paperhanger.example.yaml`
   and the config reference above.
 - **The fix agent's sandbox (`agent-host`, `local()` from

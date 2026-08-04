@@ -11,11 +11,12 @@ import { createRoot } from "react-dom/client";
 import { IncidentsView } from "./incidents-view";
 import { RepositoriesView } from "./repositories-view";
 import { SetupScriptsView } from "./setup-scripts-view";
+import { SystemPromptView } from "./system-prompt-view";
 import { TokenPrompt } from "./token-prompt";
 
 const TOKEN_STORAGE_KEY = "paperhanger.apiToken";
 
-type View = "repositories" | "setup-scripts" | "incidents";
+type View = "repositories" | "setup-scripts" | "system-prompt" | "incidents";
 
 function readStoredToken(): string | null {
 	try {
@@ -74,6 +75,27 @@ function App() {
 		return <TokenPrompt onSubmit={handleTokenSubmit} error={authError} />;
 	}
 
+	const renderView = () => {
+		switch (view) {
+			case "repositories":
+				return (
+					<RepositoriesView token={token} onUnauthorized={handleUnauthorized} />
+				);
+			case "setup-scripts":
+				return (
+					<SetupScriptsView token={token} onUnauthorized={handleUnauthorized} />
+				);
+			case "system-prompt":
+				return (
+					<SystemPromptView token={token} onUnauthorized={handleUnauthorized} />
+				);
+			case "incidents":
+				return (
+					<IncidentsView token={token} onUnauthorized={handleUnauthorized} />
+				);
+		}
+	};
+
 	return (
 		<div className="app">
 			<header className="app-header">
@@ -95,6 +117,13 @@ function App() {
 					</button>
 					<button
 						type="button"
+						className={view === "system-prompt" ? "tab active" : "tab"}
+						onClick={() => setView("system-prompt")}
+					>
+						System prompt
+					</button>
+					<button
+						type="button"
 						className={view === "incidents" ? "tab active" : "tab"}
 						onClick={() => setView("incidents")}
 					>
@@ -105,15 +134,7 @@ function App() {
 					Sign out
 				</button>
 			</header>
-			<main>
-				{view === "repositories" ? (
-					<RepositoriesView token={token} onUnauthorized={handleUnauthorized} />
-				) : view === "setup-scripts" ? (
-					<SetupScriptsView token={token} onUnauthorized={handleUnauthorized} />
-				) : (
-					<IncidentsView token={token} onUnauthorized={handleUnauthorized} />
-				)}
-			</main>
+			<main>{renderView()}</main>
 		</div>
 	);
 }

@@ -8,12 +8,14 @@ import type {
 	AgentRun,
 	AgentRunOutcome,
 	CommonSetupScript,
+	CommonSystemPrompt,
 	CreateCommonSetupScriptInput,
 	CreateRepoDefinitionInput,
 	Incident,
 	IncidentEvent,
 	IncidentStatus,
 	RepoDefinition,
+	SetCommonSystemPromptInput,
 	UpdateCommonSetupScriptInput,
 	UpdateRepoDefinitionInput,
 } from "../core/types";
@@ -166,6 +168,15 @@ export class CommonSetupScriptNotFoundError extends Error {
 		super(`Common setup script not found: ${id}`);
 		this.name = "CommonSetupScriptNotFoundError";
 	}
+}
+
+export interface CommonSystemPromptStore {
+	/** `undefined` when the operator has never saved one. */
+	getCommonSystemPrompt(): Promise<CommonSystemPrompt | undefined>;
+	/** Upsert of the single row; `createdAt` is preserved across updates. */
+	setCommonSystemPrompt(
+		input: SetCommonSystemPromptInput,
+	): Promise<CommonSystemPrompt>;
 }
 
 /**

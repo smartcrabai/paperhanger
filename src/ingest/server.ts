@@ -18,6 +18,7 @@ import type { IncidentEvent } from "../core/types";
 import type { Logger } from "../observability/logger";
 import type {
 	CommonSetupScriptStore,
+	CommonSystemPromptStore,
 	IncidentStore,
 	RepoDefinitionStore,
 } from "../storage/types";
@@ -35,6 +36,10 @@ import {
 	handleListRepoDefinitions,
 	handleUpdateRepoDefinition,
 } from "./repo-definitions";
+import {
+	handleGetCommonSystemPrompt,
+	handleSetCommonSystemPrompt,
+} from "./system-prompt";
 
 const WEBHOOK_PATH_PREFIX = "/webhooks/";
 const INCIDENTS_PATH_PREFIX = "/incidents/";
@@ -43,6 +48,7 @@ const REPO_DEFINITIONS_PATH = "/repo-definitions";
 const REPO_DEFINITIONS_PATH_PREFIX = "/repo-definitions/";
 const COMMON_SETUP_SCRIPTS_PATH = "/setup-scripts";
 const COMMON_SETUP_SCRIPTS_PATH_PREFIX = "/setup-scripts/";
+const SYSTEM_PROMPT_PATH = "/system-prompt";
 /** Cap on `GET /incidents` regardless of what a caller asks for via `?limit=`. */
 const MAX_INCIDENTS_LIST_LIMIT = 500;
 const DEFAULT_INCIDENTS_LIST_LIMIT = 100;
@@ -71,6 +77,8 @@ export interface ServerDeps {
 	repoDefinitions: RepoDefinitionStore;
 	/** Backs dashboard CRUD for setup scripts shared by every repository. */
 	commonSetupScripts: CommonSetupScriptStore;
+	/** Backs the dashboard's single GET/PUT `/system-prompt` operator-instruction editor. */
+	commonSystemPrompt: CommonSystemPromptStore;
 	/** Falls back to a no-op tracer (no global provider registered) when omitted. See docs/spec.md section 3.9. */
 	tracer?: Tracer;
 	/**
@@ -97,6 +105,7 @@ type RouteTemplate =
 	| "/repo-definitions/:id"
 	| "/setup-scripts"
 	| "/setup-scripts/:id"
+	| "/system-prompt"
 	| "unmatched";
 
 /**
@@ -166,6 +175,9 @@ function deriveRouteTemplate(url: URL): RouteTemplate {
 	}
 	if (commonSetupScriptIdFromPath(url.pathname) !== undefined) {
 		return "/setup-scripts/:id";
+	}
+	if (url.pathname === SYSTEM_PROMPT_PATH) {
+		return "/system-prompt";
 	}
 	if (incidentEventsIdFromPath(url.pathname) !== undefined) {
 		return "/incidents/:id/events";
@@ -261,6 +273,7 @@ export function createServer(deps: ServerDeps): ReturnType<typeof Bun.serve> {
 		store,
 		repoDefinitions,
 		commonSetupScripts,
+		commonSystemPrompt,
 		htmlRoutes,
 	} = deps;
 	const tracer = deps.tracer ?? trace.getTracer("server");
@@ -388,6 +401,19 @@ export function createServer(deps: ServerDeps): ReturnType<typeof Bun.serve> {
 					commonSetupScripts,
 					commonSetupScriptId,
 				);
+			}
+		}
+
+		if (url.pathname === SYSTEM_PROMPT_PATH) {
+			const authError = checkApiToken(config, req);
+			if (authError) {
+				return authError;
+			}
+			if (req.method === "GET") {
+				return handleGetCommonSystemPrompt(commonSystemPrompt);
+			}
+			if (req.method === "PUT") {
+				return handleSetCommonSystemPrompt(commonSystemPrompt, req);
 			}
 		}
 

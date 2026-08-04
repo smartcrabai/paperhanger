@@ -9,6 +9,7 @@
 
 import type {
 	CommonSetupScript,
+	CommonSystemPrompt,
 	CreateCommonSetupScriptInput,
 	CreateRepoDefinitionInput,
 	Incident,
@@ -133,6 +134,29 @@ export async function deleteCommonSetupScript(
 	await request(`/setup-scripts/${encodeURIComponent(id)}`, token, {
 		method: "DELETE",
 	});
+}
+
+export async function getCommonSystemPrompt(
+	token: string,
+): Promise<CommonSystemPrompt | null> {
+	const res = await request("/system-prompt", token);
+	const body = (await res.json()) as {
+		systemPrompt: CommonSystemPrompt | null;
+	};
+	return body.systemPrompt;
+}
+
+export async function saveCommonSystemPrompt(
+	token: string,
+	prompt: string,
+	signal?: AbortSignal,
+): Promise<CommonSystemPrompt> {
+	const res = await request("/system-prompt", token, {
+		method: "PUT",
+		body: JSON.stringify({ prompt }),
+		signal,
+	});
+	return (await res.json()) as CommonSystemPrompt;
 }
 
 export async function listIncidents(token: string): Promise<Incident[]> {

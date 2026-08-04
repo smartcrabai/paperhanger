@@ -1,5 +1,4 @@
 import { z } from "zod";
-import { formatZodError } from "../config/load";
 import type {
 	CreateCommonSetupScriptInput,
 	UpdateCommonSetupScriptInput,
@@ -8,6 +7,7 @@ import {
 	CommonSetupScriptNotFoundError,
 	type CommonSetupScriptStore,
 } from "../storage/types";
+import { parseJsonBody } from "./http-utils";
 
 const TriggerFileSchema = z
 	.string()
@@ -50,31 +50,6 @@ const UpdateBodySchema = z
 	.refine((value) => Object.keys(value).length > 0, {
 		message: "must include triggerFile or script",
 	});
-
-type BodyResult<T> = { ok: true; value: T } | { ok: false; response: Response };
-
-async function parseJsonBody<T>(
-	req: Request,
-	schema: z.ZodType<T>,
-): Promise<BodyResult<T>> {
-	let raw: unknown;
-	try {
-		raw = await req.json();
-	} catch {
-		return {
-			ok: false,
-			response: new Response("invalid JSON body", { status: 400 }),
-		};
-	}
-	const parsed = schema.safeParse(raw);
-	if (!parsed.success) {
-		return {
-			ok: false,
-			response: new Response(formatZodError(parsed.error), { status: 400 }),
-		};
-	}
-	return { ok: true, value: parsed.data };
-}
 
 export async function handleListCommonSetupScripts(
 	store: Pick<CommonSetupScriptStore, "listCommonSetupScripts">,

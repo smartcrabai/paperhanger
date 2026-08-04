@@ -168,3 +168,17 @@ export interface UpdateCommonSetupScriptInput {
 	triggerFile?: string;
 	script?: string;
 }
+
+/** Dashboard-managed instruction text prepended to every fix-agent run, for all repositories. */
+export interface CommonSystemPrompt {
+	/** Operator-authored text. An empty/blank value means "no common prompt". */
+	prompt: string;
+	/** ISO 8601 timestamp. */
+	createdAt: string;
+	/** ISO 8601 timestamp. */
+	updatedAt: string;
+}
+
+export interface SetCommonSystemPromptInput {
+	prompt: string;
+}

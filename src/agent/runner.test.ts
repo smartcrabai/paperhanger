@@ -1244,3 +1244,217 @@ describe("FixAgentRunner - repo definition lookup", () => {
 		await store.close();
 	});
 });
+
+describe("FixAgentRunner - common system prompt", () => {
+	test("includes the stored common system prompt in the workflow input", async () => {
+		const { store, incident } = await createStoreWithIncident();
+		const context = makeContext(incident, makeAlert());
+		const github = createFakeGithub();
+		const flue = createFakeFlue({
+			outcome: "report_only",
+			diagnosis: "d",
+			report: "r",
+		});
+		const runner = new FixAgentRunner({
+			flue: flue.client,
+			github: github.client,
+			store,
+			repoDefinitions: store,
+			commonSystemPrompt: {
+				async getCommonSystemPrompt() {
+					return {
+						prompt: "Always write tests before implementing a fix.",
+						createdAt: "2024-01-01T00:00:00.000Z",
+						updatedAt: "2024-01-01T00:00:00.000Z",
+					};
+				},
+			},
+			config: makeConfig(),
+			logger: silentLogger(),
+		});
+
+		const result = await runner.run(incident, context, testRepo);
+		expect(result.status).toBe("report_only");
+
+		const input = flue.invokeCalls[0]?.input as { systemPrompt?: string };
+		expect(input.systemPrompt).toBe(
+			"Always write tests before implementing a fix.",
+		);
+
+		await store.close();
+	});
+
+	test("omits systemPrompt when the stored prompt is blank or whitespace-only", async () => {
+		const { store, incident } = await createStoreWithIncident();
+		const context = makeContext(incident, makeAlert());
+		const github = createFakeGithub();
+		const flue = createFakeFlue({
+			outcome: "report_only",
+			diagnosis: "d",
+			report: "r",
+		});
+		const runner = new FixAgentRunner({
+			flue: flue.client,
+			github: github.client,
+			store,
+			repoDefinitions: store,
+			commonSystemPrompt: {
+				async getCommonSystemPrompt() {
+					return {
+						prompt: "   \n\t  ",
+						createdAt: "2024-01-01T00:00:00.000Z",
+						updatedAt: "2024-01-01T00:00:00.000Z",
+					};
+				},
+			},
+			config: makeConfig(),
+			logger: silentLogger(),
+		});
+
+		await runner.run(incident, context, testRepo);
+
+		const input = flue.invokeCalls[0]?.input as { systemPrompt?: string };
+		expect(input.systemPrompt).toBeUndefined();
+
+		await store.close();
+	});
+
+	test("omits systemPrompt when no common system prompt has ever been saved", async () => {
+		const { store, incident } = await createStoreWithIncident();
+		const context = makeContext(incident, makeAlert());
+		const github = createFakeGithub();
+		const flue = createFakeFlue({
+			outcome: "report_only",
+			diagnosis: "d",
+			report: "r",
+		});
+		const runner = new FixAgentRunner({
+			flue: flue.client,
+			github: github.client,
+			store,
+			repoDefinitions: store,
+			commonSystemPrompt: {
+				async getCommonSystemPrompt() {
+					return undefined;
+				},
+			},
+			config: makeConfig(),
+			logger: silentLogger(),
+		});
+
+		await runner.run(incident, context, testRepo);
+
+		const input = flue.invokeCalls[0]?.input as { systemPrompt?: string };
+		expect(input.systemPrompt).toBeUndefined();
+
+		await store.close();
+	});
+
+	test("omits systemPrompt when the commonSystemPrompt dependency is not configured", async () => {
+		const { store, incident } = await createStoreWithIncident();
+		const context = makeContext(incident, makeAlert());
+		const github = createFakeGithub();
+		const flue = createFakeFlue({
+			outcome: "report_only",
+			diagnosis: "d",
+			report: "r",
+		});
+		const runner = new FixAgentRunner({
+			flue: flue.client,
+			github: github.client,
+			store,
+			repoDefinitions: store,
+			config: makeConfig(),
+			logger: silentLogger(),
+		});
+
+		await runner.run(incident, context, testRepo);
+
+		const input = flue.invokeCalls[0]?.input as { systemPrompt?: string };
+		expect(input.systemPrompt).toBeUndefined();
+
+		await store.close();
+	});
+
+	test("logs and proceeds without systemPrompt when the lookup throws", async () => {
+		const { store, incident } = await createStoreWithIncident();
+		const context = makeContext(incident, makeAlert());
+		const github = createFakeGithub();
+		const flue = createFakeFlue({
+			outcome: "report_only",
+			diagnosis: "d",
+			report: "r",
+		});
+		const { logger, lines } = capturingLogger();
+		const runner = new FixAgentRunner({
+			flue: flue.client,
+			github: github.client,
+			store,
+			repoDefinitions: store,
+			commonSystemPrompt: {
+				async getCommonSystemPrompt() {
+					throw new Error("common_system_prompt table is locked");
+				},
+			},
+			config: makeConfig(),
+			logger,
+		});
+
+		const result = await runner.run(incident, context, testRepo);
+		expect(result.status).toBe("report_only");
+
+		const input = flue.invokeCalls[0]?.input as { systemPrompt?: string };
+		expect(input.systemPrompt).toBeUndefined();
+
+		const entries = lines.map(
+			(line) => JSON.parse(line) as Record<string, unknown>,
+		);
+		const warning = entries.find(
+			(entry) => entry.msg === "fix_agent.common_system_prompt_lookup_failed",
+		);
+		expect(warning).toBeDefined();
+		expect(warning?.incidentId).toBe(incident.id);
+		expect(warning?.error).toBe("common_system_prompt table is locked");
+
+		await store.close();
+	});
+
+	test("logs a String(err) fallback when the lookup throws a non-Error value", async () => {
+		const { store, incident } = await createStoreWithIncident();
+		const context = makeContext(incident, makeAlert());
+		const github = createFakeGithub();
+		const flue = createFakeFlue({
+			outcome: "report_only",
+			diagnosis: "d",
+			report: "r",
+		});
+		const { logger, lines } = capturingLogger();
+		const runner = new FixAgentRunner({
+			flue: flue.client,
+			github: github.client,
+			store,
+			repoDefinitions: store,
+			commonSystemPrompt: {
+				async getCommonSystemPrompt() {
+					throw "table is locked";
+				},
+			},
+			config: makeConfig(),
+			logger,
+		});
+
+		const result = await runner.run(incident, context, testRepo);
+		expect(result.status).toBe("report_only");
+
+		const entries = lines.map(
+			(line) => JSON.parse(line) as Record<string, unknown>,
+		);
+		const warning = entries.find(
+			(entry) => entry.msg === "fix_agent.common_system_prompt_lookup_failed",
+		);
+		expect(warning).toBeDefined();
+		expect(warning?.error).toBe("table is locked");
+
+		await store.close();
+	});
+});

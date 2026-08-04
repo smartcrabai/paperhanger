@@ -473,7 +473,8 @@ tbody tr:last-child td {
 
 /* Repo definition form */
 
-.repo-form {
+.repo-form,
+.system-prompt-form {
 	display: flex;
 	flex-direction: column;
 	gap: var(--brand-size);
@@ -492,7 +493,8 @@ tbody tr:last-child td {
 	min-height: 0;
 }
 
-.repo-form label {
+.repo-form label,
+.system-prompt-form label {
 	display: flex;
 	flex-direction: column;
 	gap: var(--brand-size-xxs);
@@ -514,7 +516,8 @@ tbody tr:last-child td {
 
 .repo-form input[type="text"],
 .repo-form input[type="password"],
-.repo-form textarea {
+.repo-form textarea,
+.system-prompt-form textarea {
 	background: var(--canvas);
 	border: var(--brand-line-width) solid var(--control-border);
 	border-radius: var(--radius-sm);
@@ -531,7 +534,8 @@ tbody tr:last-child td {
 
 .repo-form input[type="text"]:focus,
 .repo-form input[type="password"]:focus,
-.repo-form textarea:focus {
+.repo-form textarea:focus,
+.system-prompt-form textarea:focus {
 	border-color: var(--primary-border-hover);
 	box-shadow: 0 0 0 3px var(--focus-wash);
 }

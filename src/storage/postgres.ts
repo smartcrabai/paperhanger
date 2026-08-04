@@ -15,12 +15,14 @@ import { TERMINAL_INCIDENT_STATUSES } from "../core/types";
 import type {
 	AgentRun,
 	CommonSetupScript,
+	CommonSystemPrompt,
 	CreateCommonSetupScriptInput,
 	CreateRepoDefinitionInput,
 	Incident,
 	IncidentEvent,
 	IncidentStatus,
 	RepoDefinition,
+	SetCommonSystemPromptInput,
 	UpdateCommonSetupScriptInput,
 	UpdateRepoDefinitionInput,
 } from "../core/types";
@@ -30,6 +32,7 @@ import {
 	DuplicateRepoDefinitionError,
 	RepoDefinitionNotFoundError,
 	type CommonSetupScriptStore,
+	type CommonSystemPromptStore,
 	type CreateAgentRunInput,
 	type CreateIncidentInput,
 	type IncidentEventRecord,
@@ -47,7 +50,10 @@ import {
  * method (and a version check in `init()`) for future schema changes instead
  * of mutating an already-shipped migration in place.
  */
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
+
+/** Primary key pinning `common_system_prompt` to a single row (see `migrateV5`). */
+const COMMON_SYSTEM_PROMPT_ID = "default";
 
 /** SQL literal list of terminal statuses, safe to inline: sourced from our own constant, never user input. */
 const TERMINAL_STATUS_LITERALS = TERMINAL_INCIDENT_STATUSES.map(
@@ -133,6 +139,13 @@ interface CommonSetupScriptRow {
 	id: string;
 	trigger_file: string;
 	script: string;
+	created_at: unknown;
+	updated_at: unknown;
+}
+
+interface CommonSystemPromptRow {
+	id: string;
+	prompt: string;
 	created_at: unknown;
 	updated_at: unknown;
 }
@@ -230,13 +243,27 @@ export function mapCommonSetupScriptRow(
 	};
 }
 
+export function mapCommonSystemPromptRow(
+	row: CommonSystemPromptRow,
+): CommonSystemPrompt {
+	return {
+		prompt: row.prompt,
+		createdAt: toIso(row.created_at),
+		updatedAt: toIso(row.updated_at),
+	};
+}
+
 export interface PostgresIncidentStoreOptions {
 	/** Injectable clock for `created_at`/`updated_at` stamping. Defaults to the real wall clock; tests use this to pin cooldown-window boundaries deterministically. */
 	now?: () => Date;
 }
 
 export class PostgresIncidentStore
-	implements IncidentStore, RepoDefinitionStore, CommonSetupScriptStore
+	implements
+		IncidentStore,
+		RepoDefinitionStore,
+		CommonSetupScriptStore,
+		CommonSystemPromptStore
 {
 	private readonly sql: SQL;
 	private readonly now: () => Date;
@@ -281,6 +308,11 @@ export class PostgresIncidentStore
 		if (version < 4) {
 			await this.migrateV4();
 			version = 4;
+			await this.setSchemaVersion(version);
+		}
+		if (version < 5) {
+			await this.migrateV5();
+			version = 5;
 			await this.setSchemaVersion(version);
 		}
 		if (version !== SCHEMA_VERSION) {
@@ -389,6 +421,18 @@ export class PostgresIncidentStore
 				id TEXT PRIMARY KEY,
 				trigger_file TEXT NOT NULL,
 				script TEXT NOT NULL,
+				created_at TIMESTAMPTZ NOT NULL,
+				updated_at TIMESTAMPTZ NOT NULL
+			)
+		`;
+	}
+
+	/** Adds the dashboard-managed, single-row common system prompt shared by every repository. */
+	private async migrateV5(): Promise<void> {
+		await this.sql`
+			CREATE TABLE IF NOT EXISTS common_system_prompt (
+				id TEXT PRIMARY KEY CHECK (id = 'default'),
+				prompt TEXT NOT NULL,
 				created_at TIMESTAMPTZ NOT NULL,
 				updated_at TIMESTAMPTZ NOT NULL
 			)
@@ -778,5 +822,29 @@ export class PostgresIncidentStore
 			DELETE FROM repo_definitions WHERE id = ${id} RETURNING id
 		`;
 		return rows.length > 0;
+	}
+
+	async getCommonSystemPrompt(): Promise<CommonSystemPrompt | undefined> {
+		const rows = await this.sql<CommonSystemPromptRow[]>`
+			SELECT * FROM common_system_prompt WHERE id = ${COMMON_SYSTEM_PROMPT_ID}
+		`;
+		return rows[0] ? mapCommonSystemPromptRow(rows[0]) : undefined;
+	}
+
+	async setCommonSystemPrompt(
+		input: SetCommonSystemPromptInput,
+	): Promise<CommonSystemPrompt> {
+		const now = this.now().toISOString();
+		const rows = await this.sql<CommonSystemPromptRow[]>`
+			INSERT INTO common_system_prompt (id, prompt, created_at, updated_at)
+			VALUES (${COMMON_SYSTEM_PROMPT_ID}, ${input.prompt}, ${now}, ${now})
+			ON CONFLICT (id) DO UPDATE SET prompt = excluded.prompt, updated_at = GREATEST(common_system_prompt.updated_at, excluded.updated_at)
+			RETURNING *
+		`;
+		const row = rows[0];
+		if (!row) {
+			throw new Error("Failed to read back upserted common system prompt");
+		}
+		return mapCommonSystemPromptRow(row);
 	}
 }

@@ -40,6 +40,7 @@ import { PostgresIncidentStore } from "./storage/postgres";
 import { SqliteIncidentStore } from "./storage/sqlite";
 import type {
 	CommonSetupScriptStore,
+	CommonSystemPromptStore,
 	IncidentStore,
 	RepoDefinitionStore,
 } from "./storage/types";
@@ -53,7 +54,10 @@ const logger = createLogger({ fields: { component: "paperhanger" } });
 
 function buildStore(
 	config: Config,
-): IncidentStore & RepoDefinitionStore & CommonSetupScriptStore {
+): IncidentStore &
+	RepoDefinitionStore &
+	CommonSetupScriptStore &
+	CommonSystemPromptStore {
 	if (config.storage.driver === "postgres") {
 		return new PostgresIncidentStore(config.storage.url);
 	}
@@ -139,6 +143,7 @@ async function main(): Promise<void> {
 		store,
 		repoDefinitions: store,
 		commonSetupScripts: store,
+		commonSystemPrompt: store,
 		config,
 		logger: logger.child({ component: "fix-agent-runner" }),
 		tracer: tracing.getTracer("fix-agent-runner"),
@@ -190,6 +195,7 @@ async function main(): Promise<void> {
 		store,
 		repoDefinitions: store,
 		commonSetupScripts: store,
+		commonSystemPrompt: store,
 		tracer: tracing.getTracer("server"),
 		htmlRoutes: { "/": dashboard, "/dashboard": dashboard },
 	});

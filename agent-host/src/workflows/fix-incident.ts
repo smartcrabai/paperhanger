@@ -69,6 +69,7 @@ import {
 } from "../contract.ts";
 import { fixAgent } from "../fix-agent.ts";
 import { runConditionalSetupScripts } from "../lib/common-setup-scripts.ts";
+import { buildDiagnosisPrompt } from "../lib/diagnosis-prompt.ts";
 import { decideFixAttempt } from "../lib/fix-attempt-policy.ts";
 import { collectSecrets, sanitizeOutput } from "../lib/output-sanitizer.ts";
 import { redactSecrets, tokenlessCloneUrl } from "../lib/redaction.ts";
@@ -383,26 +384,6 @@ async function detectAndRunTests(
 		-MAX_TEST_OUTPUT_CHARS,
 	);
 	return { command, passed: result.exitCode === 0, output, found: true };
-}
-
-function buildDiagnosisPrompt(input: WorkflowInput): string {
-	const forbidden =
-		input.forbiddenPaths.length > 0
-			? input.forbiddenPaths.join(", ")
-			: "(none configured)";
-	return [
-		"## Incident context",
-		input.contextMarkdown,
-		"",
-		"## Constraints for this run",
-		`- Forbidden paths (never modify a matching file): ${forbidden}`,
-		`- Max diff size: ${input.limits.maxDiffLines} changed lines (additions + deletions)`,
-		"",
-		"Investigate the checked-out repository at your current working directory and respond with the",
-		"structured result: `diagnosis` (root-cause analysis), `report` (a complete markdown write-up",
-		"suitable for a notification or pull request description), `codeFixable` (boolean), and",
-		"`commitMessage` (required when `codeFixable` is true).",
-	].join("\n");
 }
 
 function buildRetryPrompt(testRun: TestRunResult): string {

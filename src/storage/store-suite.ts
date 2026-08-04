@@ -30,6 +30,7 @@ import {
 import type {
 	CreateIncidentInput,
 	CommonSetupScriptStore,
+	CommonSystemPromptStore,
 	IncidentStore,
 	RepoDefinitionStore,
 } from "./types";
@@ -300,12 +301,14 @@ export function runIncidentStoreSuite(
 			const created = await store.createIncident(
 				makeIncidentInput({
 					fingerprint: "fp-unicode",
+					// sakoku-ignore-next-line
 					labels: { service: "日本語サービス", note: "emoji 🎉 test" },
 					annotations: { path: 'C:\\Users\\test\\n"quoted"' },
 				}),
 			);
 
 			const rawPayload = {
+				// sakoku-ignore-next-line
 				message: "こんにちは、世界! 🌍",
 				nested: {
 					list: [1, 2, { deep: 'value with "quotes" and \\ slashes' }],
@@ -314,8 +317,11 @@ export function runIncidentStoreSuite(
 			};
 			const event = makeIncidentEvent({
 				fingerprint: "fp-unicode",
+				// sakoku-ignore-next-line
 				title: "エラー発生 🔥",
+				// sakoku-ignore-next-line
 				description: '改行を含む\nテキストと "引用符" と \\バックスラッシュ',
+				// sakoku-ignore-next-line
 				labels: { service: "日本語サービス", tags: '["a","b"]' },
 				annotations: { note: '{"a":1,"b":[1,2,3]}' },
 				raw: rawPayload,
@@ -329,6 +335,7 @@ export function runIncidentStoreSuite(
 
 			const fetchedIncident = await store.getIncident(created.id);
 			expect(fetchedIncident?.labels).toEqual({
+				// sakoku-ignore-next-line
 				service: "日本語サービス",
 				note: "emoji 🎉 test",
 			});
@@ -686,6 +693,7 @@ export function runRepoDefinitionStoreSuite(
 
 		test("mappings round-trip nested unicode and multiple matcher entries", async () => {
 			const mappings: Array<Record<string, string>> = [
+				// sakoku-ignore-next-line
 				{ service: "日本語サービス", env: "prod" },
 				{ service: "widgets", note: 'emoji 🎉 and "quotes"' },
 			];
@@ -781,6 +789,111 @@ export function runCommonSetupScriptStoreSuite(
 			);
 			expect(await store.deleteCommonSetupScript(created.id)).toBe(true);
 			expect(await store.getCommonSetupScript(created.id)).toBeUndefined();
+		});
+	});
+}
+
+/**
+ * What a `makeStore` factory hands back to `runCommonSystemPromptStoreSuite`:
+ * an initialized store, plus a way to advance that store's injected clock.
+ * See `IncidentStoreHarness` above for why the clock is advanced explicitly
+ * rather than by sleeping on the real wall clock.
+ */
+export interface CommonSystemPromptStoreHarness {
+	store: CommonSystemPromptStore;
+	/** Advances the store's injected clock by `ms` milliseconds. */
+	advance(ms: number): void;
+}
+
+/**
+ * Registers the shared `CommonSystemPromptStore` behavioral suite under a
+ * `describe` block named `label`. `makeStore` is called before each test and
+ * must return a harness wrapping a store that is initialized and empty (or
+ * reset to empty -- i.e. the operator has never saved a prompt).
+ */
+export function runCommonSystemPromptStoreSuite(
+	label: string,
+	makeStore: () => Promise<CommonSystemPromptStoreHarness>,
+): void {
+	describe(label, () => {
+		let harness: CommonSystemPromptStoreHarness;
+		let store: CommonSystemPromptStore;
+
+		beforeEach(async () => {
+			harness = await makeStore();
+			store = harness.store;
+		});
+
+		test("getCommonSystemPrompt returns undefined when the operator has never saved one", async () => {
+			expect(await store.getCommonSystemPrompt()).toBeUndefined();
+		});
+
+		test("setCommonSystemPrompt then getCommonSystemPrompt round-trips the prompt", async () => {
+			const saved = await store.setCommonSystemPrompt({
+				prompt: "Always run the full test suite before proposing a fix.",
+			});
+
+			expect(saved.prompt).toBe(
+				"Always run the full test suite before proposing a fix.",
+			);
+			expect(saved.createdAt).toBe(saved.updatedAt);
+
+			const fetched = await store.getCommonSystemPrompt();
+			expect(fetched).toEqual(saved);
+		});
+
+		test("re-setting updates the prompt and strictly advances updatedAt while preserving createdAt", async () => {
+			const first = await store.setCommonSystemPrompt({ prompt: "v1" });
+
+			harness.advance(2);
+			const second = await store.setCommonSystemPrompt({ prompt: "v2" });
+
+			expect(second.prompt).toBe("v2");
+			expect(second.createdAt).toBe(first.createdAt);
+			expect(new Date(second.updatedAt).getTime()).toBeGreaterThan(
+				new Date(first.updatedAt).getTime(),
+			);
+
+			const fetched = await store.getCommonSystemPrompt();
+			expect(fetched).toEqual(second);
+		});
+
+		test("stores and reads back an empty string verbatim (the 'disabled' state)", async () => {
+			const saved = await store.setCommonSystemPrompt({ prompt: "" });
+			expect(saved.prompt).toBe("");
+
+			const fetched = await store.getCommonSystemPrompt();
+			expect(fetched?.prompt).toBe("");
+		});
+
+		test("round-trips unicode and multiline text", async () => {
+			const prompt =
+				// sakoku-ignore-next-line
+				"常に日本語でコミットメッセージを書いてください。\nAlso: never touch `infra/**`. 🚀";
+			const saved = await store.setCommonSystemPrompt({ prompt });
+
+			expect(saved.prompt).toBe(prompt);
+			expect((await store.getCommonSystemPrompt())?.prompt).toBe(prompt);
+		});
+
+		test("two concurrent setCommonSystemPrompt calls both survive and never leave updatedAt before createdAt", async () => {
+			const results = await Promise.all([
+				store.setCommonSystemPrompt({ prompt: "v1" }),
+				store.setCommonSystemPrompt({ prompt: "v2" }),
+			]);
+
+			for (const result of results) {
+				expect(new Date(result.updatedAt).getTime()).toBeGreaterThanOrEqual(
+					new Date(result.createdAt).getTime(),
+				);
+			}
+
+			const final = await store.getCommonSystemPrompt();
+			if (!final) throw new Error("expected a stored common system prompt");
+			expect(["v1", "v2"]).toContain(final.prompt);
+			expect(new Date(final.updatedAt).getTime()).toBeGreaterThanOrEqual(
+				new Date(final.createdAt).getTime(),
+			);
 		});
 	});
 }

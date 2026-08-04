@@ -50,6 +50,7 @@ const exampleInput = {
 		url: "http://greptimedb:4000",
 		database: "public",
 	},
+	systemPrompt: "Always write tests before implementing a fix.",
 };
 
 assert(

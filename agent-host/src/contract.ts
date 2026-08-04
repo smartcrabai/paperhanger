@@ -74,6 +74,8 @@ export const WorkflowInputSchema = v.object({
 	limits: LimitsSchema,
 	forbiddenPaths: v.array(v.string()),
 	telemetry: v.optional(TelemetryConfigSchema),
+	/** Dashboard-managed operator instructions shared by every repository. */
+	systemPrompt: v.optional(v.string()),
 });
 
 export const FixSchema = v.object({
