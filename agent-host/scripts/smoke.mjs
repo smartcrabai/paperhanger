@@ -40,6 +40,7 @@ const exampleInput = {
 	},
 	limits: { timeoutMinutes: 30, maxDiffLines: 500, maxFixAttempts: 3 },
 	forbiddenPaths: [".github/workflows/**"],
+	systemPrompt: "Always write tests before implementing a fix.",
 };
 
 assert(

@@ -10,6 +10,7 @@ import {
 import type { IncidentManager } from "../core/incident-manager";
 import type {
 	CommonSetupScript,
+	CommonSystemPrompt,
 	Incident,
 	IncidentEvent,
 	RepoDefinition,
@@ -21,6 +22,7 @@ import {
 	DuplicateRepoDefinitionError,
 	RepoDefinitionNotFoundError,
 	type CommonSetupScriptStore,
+	type CommonSystemPromptStore,
 	type IncidentEventRecord,
 	type IncidentStore,
 	type RepoDefinitionStore,
@@ -334,6 +336,27 @@ function fakeCommonSetupScriptStore(): CommonSetupScriptStore {
 	};
 }
 
+/** In-memory `CommonSystemPromptStore` stub mirroring the single-row upsert semantics of the real stores. */
+function fakeCommonSystemPromptStore(
+	initial?: CommonSystemPrompt,
+): CommonSystemPromptStore {
+	let row: CommonSystemPrompt | undefined = initial;
+	return {
+		async getCommonSystemPrompt() {
+			return row;
+		},
+		async setCommonSystemPrompt(input) {
+			const now = new Date().toISOString();
+			row = {
+				prompt: input.prompt,
+				createdAt: row?.createdAt ?? now,
+				updatedAt: now,
+			};
+			return row;
+		},
+	};
+}
+
 function bearerHeaders(token: string): Record<string, string> {
 	return { authorization: `Bearer ${token}` };
 }
@@ -352,6 +375,7 @@ describe("ingest server", () => {
 		store?: IncidentsStoreSlice;
 		repoDefinitions?: RepoDefinitionStore;
 		commonSetupScripts?: CommonSetupScriptStore;
+		commonSystemPrompt?: CommonSystemPromptStore;
 		tracer?: Tracer;
 		manager?: IncidentManager;
 		logger?: Logger;
@@ -376,6 +400,8 @@ describe("ingest server", () => {
 			repoDefinitions: options?.repoDefinitions ?? fakeRepoDefinitionStore(),
 			commonSetupScripts:
 				options?.commonSetupScripts ?? fakeCommonSetupScriptStore(),
+			commonSystemPrompt:
+				options?.commonSystemPrompt ?? fakeCommonSystemPromptStore(),
 			tracer: options?.tracer,
 		});
 		baseUrl = `http://localhost:${server.port}`;
@@ -1316,6 +1342,165 @@ describe("ingest server", () => {
 		});
 	});
 
+	describe("/system-prompt", () => {
+		test("GET returns { systemPrompt: null } when the operator has never saved one", async () => {
+			const res = await fetch(`${baseUrl}/system-prompt`, {
+				headers: bearerHeaders(API_TOKEN),
+			});
+
+			expect(res.status).toBe(200);
+			expect(await res.json()).toEqual({ systemPrompt: null });
+		});
+
+		test("PUT saves the prompt, and a following GET reflects it", async () => {
+			server.stop(true);
+			startServer({ commonSystemPrompt: fakeCommonSystemPromptStore() });
+
+			const putRes = await fetch(`${baseUrl}/system-prompt`, {
+				method: "PUT",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({ prompt: "Always write tests first." }),
+			});
+			expect(putRes.status).toBe(200);
+			const saved = (await putRes.json()) as CommonSystemPrompt;
+			expect(saved.prompt).toBe("Always write tests first.");
+			expect(saved.createdAt).toBe(saved.updatedAt);
+
+			const getRes = await fetch(`${baseUrl}/system-prompt`, {
+				headers: bearerHeaders(API_TOKEN),
+			});
+			expect(getRes.status).toBe(200);
+			expect(
+				((await getRes.json()) as { systemPrompt: CommonSystemPrompt | null })
+					.systemPrompt,
+			).toEqual(saved);
+		});
+
+		test("PUT clearing with an empty string succeeds and reads back blank", async () => {
+			server.stop(true);
+			startServer({
+				commonSystemPrompt: fakeCommonSystemPromptStore({
+					prompt: "old instructions",
+					createdAt: "2024-01-01T00:00:00.000Z",
+					updatedAt: "2024-01-01T00:00:00.000Z",
+				}),
+			});
+
+			const putRes = await fetch(`${baseUrl}/system-prompt`, {
+				method: "PUT",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({ prompt: "" }),
+			});
+			expect(putRes.status).toBe(200);
+			expect(((await putRes.json()) as CommonSystemPrompt).prompt).toBe("");
+
+			const getRes = await fetch(`${baseUrl}/system-prompt`, {
+				headers: bearerHeaders(API_TOKEN),
+			});
+			expect(
+				((await getRes.json()) as { systemPrompt: CommonSystemPrompt | null })
+					.systemPrompt?.prompt,
+			).toBe("");
+		});
+
+		test("PUT rejects a prompt over the 20,000-character cap, an unknown key, a non-string prompt, and a missing prompt", async () => {
+			const invalidBodies: Array<{ body: unknown; issuePath: string }> = [
+				{ body: { prompt: "x".repeat(20_001) }, issuePath: "prompt" },
+				{
+					body: { prompt: "ok", unknownField: "nope" },
+					issuePath: "unknownField",
+				},
+				{ body: { prompt: 12345 }, issuePath: "prompt" },
+				{ body: {}, issuePath: "prompt" },
+			];
+			for (const { body, issuePath } of invalidBodies) {
+				const res = await fetch(`${baseUrl}/system-prompt`, {
+					method: "PUT",
+					headers: bearerHeaders(API_TOKEN),
+					body: JSON.stringify(body),
+				});
+				expect(res.status).toBe(400);
+				// Asserts the per-field zod issue list (formatZodError) actually
+				// names the offending field, not just that *some* 400 body came
+				// back -- the dashboard shows this text verbatim to the operator.
+				expect(await res.text()).toContain(issuePath);
+			}
+		});
+
+		test("PUT trims a whitespace-only prompt down to the empty 'no common prompt' value", async () => {
+			server.stop(true);
+			startServer({
+				commonSystemPrompt: fakeCommonSystemPromptStore({
+					prompt: "old instructions",
+					createdAt: "2024-01-01T00:00:00.000Z",
+					updatedAt: "2024-01-01T00:00:00.000Z",
+				}),
+			});
+
+			const putRes = await fetch(`${baseUrl}/system-prompt`, {
+				method: "PUT",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({ prompt: "   \n\t  " }),
+			});
+			expect(putRes.status).toBe(200);
+			expect(((await putRes.json()) as CommonSystemPrompt).prompt).toBe("");
+		});
+
+		test("PUT trims leading/trailing whitespace off an otherwise valid prompt", async () => {
+			const res = await fetch(`${baseUrl}/system-prompt`, {
+				method: "PUT",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({ prompt: "  Always write tests first.  " }),
+			});
+			expect(res.status).toBe(200);
+			expect(((await res.json()) as CommonSystemPrompt).prompt).toBe(
+				"Always write tests first.",
+			);
+		});
+
+		test("PUT returns 400 on unparseable JSON", async () => {
+			const res = await fetch(`${baseUrl}/system-prompt`, {
+				method: "PUT",
+				headers: bearerHeaders(API_TOKEN),
+				body: "not json",
+			});
+			expect(res.status).toBe(400);
+			expect(await res.text()).toBe("invalid JSON body");
+		});
+
+		test("PUT accepts a prompt at exactly the 20,000-character cap", async () => {
+			const res = await fetch(`${baseUrl}/system-prompt`, {
+				method: "PUT",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({ prompt: "x".repeat(20_000) }),
+			});
+			expect(res.status).toBe(200);
+		});
+
+		test("PUT accepts a prompt that only exceeds the cap due to surrounding whitespace", async () => {
+			const res = await fetch(`${baseUrl}/system-prompt`, {
+				method: "PUT",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify({ prompt: `  ${"x".repeat(20_000)}  ` }),
+			});
+			expect(res.status).toBe(200);
+			expect(((await res.json()) as CommonSystemPrompt).prompt).toBe(
+				"x".repeat(20_000),
+			);
+		});
+
+		test("requires authentication for both GET and PUT", async () => {
+			const requests: Array<[string, RequestInit]> = [
+				["/system-prompt", { method: "GET" }],
+				["/system-prompt", { method: "PUT", body: "{}" }],
+			];
+			for (const [path, init] of requests) {
+				const res = await fetch(`${baseUrl}${path}`, init);
+				expect(res.status).toBe(401);
+			}
+		});
+	});
+
 	describe("tracing (design doc section 5/6, hermetic pattern from section 10)", () => {
 		let exporter: InMemorySpanExporter;
 		let provider: BasicTracerProvider;
@@ -1378,6 +1563,19 @@ describe("ingest server", () => {
 			const spans = exporter.getFinishedSpans();
 			expect(spans[0]?.attributes["http.route"]).toBe("/repo-definitions");
 			expect(spans[1]?.attributes["http.route"]).toBe("/repo-definitions/:id");
+		});
+
+		test("derives the '/system-prompt' route template", async () => {
+			server.stop(true);
+			startServer({ tracer: provider.getTracer("test") });
+
+			const res = await fetch(`${baseUrl}/system-prompt`, {
+				headers: bearerHeaders(API_TOKEN),
+			});
+			expect(res.status).toBe(200);
+
+			const spans = exporter.getFinishedSpans();
+			expect(spans[0]?.attributes["http.route"]).toBe("/system-prompt");
 		});
 
 		test("derives the '/incidents/:id/events' route template", async () => {

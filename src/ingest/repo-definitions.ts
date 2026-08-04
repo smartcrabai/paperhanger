@@ -6,7 +6,6 @@
  */
 
 import { z } from "zod";
-import { formatZodError } from "../config/load";
 import type {
 	CreateRepoDefinitionInput,
 	UpdateRepoDefinitionInput,
@@ -16,6 +15,7 @@ import {
 	RepoDefinitionNotFoundError,
 	type RepoDefinitionStore,
 } from "../storage/types";
+import { parseJsonBody } from "./http-utils";
 
 /** GitHub owner/repo names: letters, digits, `_`, `.`, `-` only. */
 const GITHUB_NAME_PATTERN = /^[A-Za-z0-9_.-]+$/;
@@ -93,31 +93,6 @@ const UpdateRepoDefinitionBodySchema = z
 		enabled: z.boolean().optional(),
 	})
 	.strict();
-
-type BodyResult<T> = { ok: true; value: T } | { ok: false; response: Response };
-
-async function parseJsonBody<T>(
-	req: Request,
-	schema: z.ZodType<T>,
-): Promise<BodyResult<T>> {
-	let raw: unknown;
-	try {
-		raw = await req.json();
-	} catch {
-		return {
-			ok: false,
-			response: new Response("invalid JSON body", { status: 400 }),
-		};
-	}
-	const parsed = schema.safeParse(raw);
-	if (!parsed.success) {
-		return {
-			ok: false,
-			response: new Response(formatZodError(parsed.error), { status: 400 }),
-		};
-	}
-	return { ok: true, value: parsed.data };
-}
 
 export async function handleListRepoDefinitions(
 	store: Pick<RepoDefinitionStore, "listRepoDefinitions">,

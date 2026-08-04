@@ -42,17 +42,19 @@ src/
     incident-manager.ts    # Dedup, cooldown, lifecycle, concurrency-limited queue
     pipeline.ts            # Stage orchestration: collect → resolve → agent → notify
   ingest/
-    server.ts              # Bun.serve routes: POST /webhooks/:source, /healthz, /readyz, GET /incidents(+:id, +:id/events), /repo-definitions CRUD, GET / + /dashboard (htmlRoutes passthrough)
+    server.ts              # Bun.serve routes: POST /webhooks/:source, /healthz, /readyz, GET /incidents(+:id, +:id/events), /repo-definitions + /setup-scripts + /system-prompt CRUD, GET / + /dashboard (htmlRoutes passthrough)
     repo-definitions.ts    # Zod validation + route handlers for the /repo-definitions CRUD routes (split out to keep server.ts readable)
+    common-setup-scripts.ts # Zod validation + route handlers for the /setup-scripts CRUD routes
+    system-prompt.ts       # Zod validation + route handlers for the single-row GET/PUT /system-prompt routes
     adapters/
       types.ts             # SourceAdapter interface
       grafana.ts           # Grafana Alerting webhook payloads
       alertmanager.ts      # Prometheus Alertmanager webhook payloads
       generic.ts           # Pass-through internal format
   storage/
-    types.ts               # IncidentStore + RepoDefinitionStore interfaces
-    sqlite.ts              # bun:sqlite implementation (both interfaces)
-    postgres.ts            # Bun.sql implementation (both interfaces)
+    types.ts               # IncidentStore + RepoDefinitionStore + CommonSetupScriptStore + CommonSystemPromptStore interfaces
+    sqlite.ts              # bun:sqlite implementation (all interfaces)
+    postgres.ts            # Bun.sql implementation (all interfaces)
   telemetry/
     types.ts               # TelemetrySource, LogRecord, TraceRecord, MetricSeries
     greptimedb.ts          # HTTP SQL + PromQL-compatible API client
@@ -75,9 +77,11 @@ src/
     tracing.ts             # OTel tracer provider setup (traces-only self-instrumentation)
   dashboard/                # Personal-use configuration + observation UI (Bun HTML import + React)
     index.html              # Entry point; imported only from src/index.ts, the composition root
-    app.tsx                 # Token gate + Repositories/Incidents tab state
+    app.tsx                 # Token gate + Repositories/Setup scripts/System prompt/Incidents tab state
     api.ts                  # Fetch wrapper for the dashboard's own HTTP API calls
     repositories-view.tsx   # Repo definition table + create/edit form (repo-definition-form.tsx, mappings-editor.tsx)
+    setup-scripts-view.tsx  # Common setup script table + create/edit modal
+    system-prompt-view.tsx  # Single always-visible editor for the common system prompt (GET/PUT /system-prompt)
     incidents-view.tsx      # Incident list (auto-refreshing) + detail panel (incident-detail.tsx, status-badge.tsx)
     token-prompt.tsx        # Full-screen API-token gate, shown until a working token is supplied
     dashboard.css           # Semantic layer over tokens.css -- restyle here, not in tokens.css
@@ -92,7 +96,7 @@ agent-host/                # Flue app (Node.js sidecar) — separate package.jso
     fix-agent.ts           # defineAgent: model/instructions/sandbox/tools, bound to the fix-incident workflow
     tools.ts               # defineTool: query_telemetry follow-up queries
     telemetry-client.ts    # Minimal GreptimeDB HTTP client used by query_telemetry
-    lib/                   # fix-attempt-policy, output-sanitizer, redaction, sql-guard, tamper-check, test-detection
+    lib/                   # common-setup-scripts, fix-attempt-policy, output-sanitizer, redaction, sql-guard, system-prompt, tamper-check, test-detection
     workflows/
       fix-incident.ts      # defineWorkflow: clone → diagnose → fix → test → push branch (PR creation happens back in the parent Bun process)
 tests/
@@ -130,6 +134,15 @@ Findings from `docs/research/flue.md` (verified against `@flue/*` `1.0.0-beta.9`
   host's durable-execution store uses the driver-agnostic `@flue/postgres` adapter so it
   can share paperhanger's PostgreSQL when configured, falling back to its default local
   persistence otherwise.
+- **Dashboard-managed common system prompt** (`docs/spec.md` §3.11): `1.0.0-beta.9` exposes
+  no per-run system-prompt override — `AgentInitializerContext` (the only place
+  `AgentRuntimeConfig.instructions` can be set) is just `{ id, env }`, with no visibility into
+  the workflow input for the run being initialized, and `OperationOptions`
+  (`PromptOptions`'s base) has no `instructions`/`system` field at all. So the operator text
+  is threaded through the workflow input instead and rendered by
+  `agent-host/src/lib/system-prompt.ts` as a leading section of the diagnosis prompt (see
+  `buildDiagnosisPrompt` in `agent-host/src/workflows/fix-incident.ts`) — the closest
+  achievable equivalent given the pinned SDK version.
 
 ## Dashboard (repo definitions + incident browser)
 
@@ -139,22 +152,26 @@ Findings from `docs/research/flue.md` (verified against `@flue/*` `1.0.0-beta.9`
   fallback. `src/index.ts` is the **only** file allowed to import a `.html` bundle —
   `src/ingest/server.ts` (and its unit tests) never do, keeping that module's import graph
   bundler-free.
-- `buildStore()` in `src/index.ts` returns `IncidentStore & RepoDefinitionStore` —
-  `SqliteIncidentStore`/`PostgresIncidentStore` implement both interfaces on the same
+- `buildStore()` in `src/index.ts` returns
+  `IncidentStore & RepoDefinitionStore & CommonSetupScriptStore & CommonSystemPromptStore` —
+  `SqliteIncidentStore`/`PostgresIncidentStore` implement all four interfaces on the same
   class/DB handle (see `docs/spec.md` §3.3). That single `store` value is then threaded to
-  every consumer that needs either half: `RepoResolver`'s repo-definition-source
-  constructor param, `FixAgentRunner`'s `repoDefinitions` dep, and `createServer`'s
-  `repoDefinitions` dep — kept as a separate `ServerDeps` field rather than folded into
-  `store`'s `Pick<IncidentStore, ...>`, so that `Pick` stays an honest, narrow slice of
+  every consumer that needs one of those slices: `RepoResolver`'s repo-definition-source
+  constructor param, `FixAgentRunner`'s `repoDefinitions`/`commonSetupScripts`/
+  `commonSystemPrompt` deps, and `createServer`'s `repoDefinitions`/`commonSetupScripts`/
+  `commonSystemPrompt` deps — each kept as a separate `ServerDeps` field rather than folded
+  into `store`'s `Pick<IncidentStore, ...>`, so that `Pick` stays an honest, narrow slice of
   `IncidentStore` alone.
-- `src/ingest/repo-definitions.ts` holds the zod validation and route handlers for the
-  `/repo-definitions` CRUD routes; `server.ts` itself still owns routing dispatch and the
-  `server.apiToken` auth gate for every dashboard data route.
+- `src/ingest/repo-definitions.ts` / `common-setup-scripts.ts` / `system-prompt.ts` hold the
+  zod validation and route handlers for their respective dashboard CRUD routes; `server.ts`
+  itself still owns routing dispatch and the `server.apiToken` auth gate for every dashboard
+  data route.
 
 ## Interface contracts
 
 The canonical interface signatures live in `docs/spec.md` §3 (`SourceAdapter`,
-`IncidentEvent`, `TelemetrySource`, `IncidentStore`, `RepoDefinitionStore`, `Notifier`).
+`IncidentEvent`, `TelemetrySource`, `IncidentStore`, `RepoDefinitionStore`,
+`CommonSetupScriptStore`, `CommonSystemPromptStore`, `Notifier`).
 Implementations must not widen those contracts without updating the spec first.
 
 ## Incident state machine

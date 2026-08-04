@@ -8,12 +8,14 @@ import { TERMINAL_INCIDENT_STATUSES } from "../core/types";
 import type {
 	AgentRun,
 	CommonSetupScript,
+	CommonSystemPrompt,
 	CreateCommonSetupScriptInput,
 	CreateRepoDefinitionInput,
 	Incident,
 	IncidentEvent,
 	IncidentStatus,
 	RepoDefinition,
+	SetCommonSystemPromptInput,
 	UpdateCommonSetupScriptInput,
 	UpdateRepoDefinitionInput,
 } from "../core/types";
@@ -23,6 +25,7 @@ import {
 	DuplicateRepoDefinitionError,
 	RepoDefinitionNotFoundError,
 	type CommonSetupScriptStore,
+	type CommonSystemPromptStore,
 	type CreateAgentRunInput,
 	type CreateIncidentInput,
 	type IncidentEventRecord,
@@ -40,7 +43,10 @@ import {
  * method (and a version check in `init()`) for future schema changes instead
  * of mutating an already-shipped migration in place.
  */
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
+
+/** Primary key pinning `common_system_prompt` to a single row (see `migrateV5`). */
+const COMMON_SYSTEM_PROMPT_ID = "default";
 
 /** SQL literal list of terminal statuses, safe to inline: sourced from our own constant, never user input. */
 const TERMINAL_STATUS_LITERALS = TERMINAL_INCIDENT_STATUSES.map(
@@ -127,6 +133,13 @@ interface CommonSetupScriptRow {
 	updated_at: string;
 }
 
+interface CommonSystemPromptRow {
+	id: string;
+	prompt: string;
+	created_at: string;
+	updated_at: string;
+}
+
 function rowToIncident(row: IncidentRow): Incident {
 	return {
 		id: row.id,
@@ -170,6 +183,16 @@ function rowToCommonSetupScript(row: CommonSetupScriptRow): CommonSetupScript {
 	};
 }
 
+function rowToCommonSystemPrompt(
+	row: CommonSystemPromptRow,
+): CommonSystemPrompt {
+	return {
+		prompt: row.prompt,
+		createdAt: row.created_at,
+		updatedAt: row.updated_at,
+	};
+}
+
 function rowToAgentRun(row: AgentRunRow): AgentRun {
 	return {
 		id: row.id,
@@ -188,7 +211,11 @@ export interface SqliteIncidentStoreOptions {
 }
 
 export class SqliteIncidentStore
-	implements IncidentStore, RepoDefinitionStore, CommonSetupScriptStore
+	implements
+		IncidentStore,
+		RepoDefinitionStore,
+		CommonSetupScriptStore,
+		CommonSystemPromptStore
 {
 	private readonly db: Database;
 	private readonly now: () => Date;
@@ -243,6 +270,11 @@ export class SqliteIncidentStore
 		if (version < 4) {
 			this.migrateV4();
 			version = 4;
+			this.setSchemaVersion(version);
+		}
+		if (version < 5) {
+			this.migrateV5();
+			version = 5;
 			this.setSchemaVersion(version);
 		}
 		if (version !== SCHEMA_VERSION) {
@@ -353,6 +385,18 @@ export class SqliteIncidentStore
 				id TEXT UNIQUE NOT NULL,
 				trigger_file TEXT NOT NULL,
 				script TEXT NOT NULL,
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL
+			);
+		`);
+	}
+
+	/** Adds the dashboard-managed, single-row common system prompt shared by every repository. */
+	private migrateV5(): void {
+		this.db.run(`
+			CREATE TABLE IF NOT EXISTS common_system_prompt (
+				id TEXT PRIMARY KEY CHECK (id = 'default'),
+				prompt TEXT NOT NULL,
 				created_at TEXT NOT NULL,
 				updated_at TEXT NOT NULL
 			);
@@ -784,5 +828,32 @@ export class SqliteIncidentStore
 			id,
 		]);
 		return result.changes > 0;
+	}
+
+	async getCommonSystemPrompt(): Promise<CommonSystemPrompt | undefined> {
+		const row = this.db
+			.query<CommonSystemPromptRow, [string]>(
+				"SELECT * FROM common_system_prompt WHERE id = ?;",
+			)
+			.get(COMMON_SYSTEM_PROMPT_ID);
+		return row ? rowToCommonSystemPrompt(row) : undefined;
+	}
+
+	async setCommonSystemPrompt(
+		input: SetCommonSystemPromptInput,
+	): Promise<CommonSystemPrompt> {
+		const now = this.now().toISOString();
+		const row = this.db
+			.query<CommonSystemPromptRow, [string, string, string, string]>(
+				`INSERT INTO common_system_prompt (id, prompt, created_at, updated_at)
+				VALUES (?, ?, ?, ?)
+				ON CONFLICT(id) DO UPDATE SET prompt = excluded.prompt, updated_at = MAX(common_system_prompt.updated_at, excluded.updated_at)
+				RETURNING *;`,
+			)
+			.get(COMMON_SYSTEM_PROMPT_ID, input.prompt, now, now);
+		if (!row) {
+			throw new Error("Failed to read back upserted common system prompt");
+		}
+		return rowToCommonSystemPrompt(row);
 	}
 }

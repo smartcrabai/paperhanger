@@ -70,6 +70,8 @@ export const FixAgentInputSchema = z.object({
 	limits: FixAgentLimitsSchema,
 	forbiddenPaths: z.array(z.string()),
 	telemetry: FixAgentTelemetryConfigSchema.optional(),
+	/** Dashboard-managed operator instructions shared by every repository. */
+	systemPrompt: z.string().optional(),
 });
 
 export const FixAgentFixSchema = z.object({

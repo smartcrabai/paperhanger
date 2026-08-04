@@ -16,6 +16,7 @@ import type {
 import type { ResolvedRepo } from "../repo/resolver";
 import type {
 	CommonSetupScriptStore,
+	CommonSystemPromptStore,
 	IncidentStore,
 	RepoDefinitionStore,
 } from "../storage/types";
@@ -112,6 +113,8 @@ export interface FixAgentRunnerDeps {
 	store: IncidentStore;
 	repoDefinitions: Pick<RepoDefinitionStore, "findRepoDefinitionByRepo">;
 	commonSetupScripts?: Pick<CommonSetupScriptStore, "listCommonSetupScripts">;
+	/** Supplies the dashboard-managed operator instruction text shared by every repository. */
+	commonSystemPrompt?: Pick<CommonSystemPromptStore, "getCommonSystemPrompt">;
 	config: FixAgentRunnerConfig;
 	logger: Logger;
 	createFlueClient?: FixAgentFlueClientFactory;
@@ -214,6 +217,8 @@ export class FixAgentRunner {
 				incident.id,
 			);
 			const setupScripts = await this.resolveCommonSetupScripts(incident.id);
+			const systemPrompt = await this.resolveCommonSystemPrompt(incident.id);
+
 			const input: FixAgentInput = {
 				incidentId: incident.id,
 				contextMarkdown,
@@ -241,6 +246,7 @@ export class FixAgentRunner {
 				},
 				forbiddenPaths: config.agent.forbiddenPaths,
 				telemetry: config.telemetry,
+				systemPrompt,
 			};
 			const invocation = await this.invokeAgent(
 				input,
@@ -319,6 +325,30 @@ export class FixAgentRunner {
 				error: err instanceof Error ? err.message : String(err),
 			});
 			return [];
+		}
+	}
+
+	/**
+	 * Looks up the dashboard-managed operator instruction text shared by every
+	 * repository. A blank/whitespace-only stored prompt, an unconfigured
+	 * dependency, or a lookup failure are all treated as "no common prompt" --
+	 * mirroring `resolveCommonSetupScripts`'s fail-soft precedent, since a
+	 * broken lookup must not block a fix run.
+	 */
+	private async resolveCommonSystemPrompt(
+		incidentId: string,
+	): Promise<string | undefined> {
+		try {
+			const stored =
+				await this.deps.commonSystemPrompt?.getCommonSystemPrompt();
+			const prompt = stored?.prompt.trim();
+			return prompt ? prompt : undefined;
+		} catch (err) {
+			this.logger.warn("fix_agent.common_system_prompt_lookup_failed", {
+				incidentId,
+				error: err instanceof Error ? err.message : String(err),
+			});
+			return undefined;
 		}
 	}
 

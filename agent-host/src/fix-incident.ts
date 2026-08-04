@@ -296,26 +296,6 @@ export async function detectAndRunTests(
 	return { command, passed: result.exitCode === 0, output, found: true };
 }
 
-export function buildDiagnosisPrompt(input: FixIncidentInput): string {
-	const forbidden =
-		input.forbiddenPaths.length > 0
-			? input.forbiddenPaths.join(", ")
-			: "(none configured)";
-	return [
-		"## Incident context",
-		input.contextMarkdown,
-		"",
-		"## Constraints for this run",
-		`- Forbidden paths (never modify a matching file): ${forbidden}`,
-		`- Max diff size: ${input.limits.maxDiffLines} changed lines (additions + deletions)`,
-		"",
-		"Investigate the checked-out repository at your current working directory and respond with the",
-		"structured result: `diagnosis` (root-cause analysis), `report` (a complete markdown write-up",
-		"suitable for a notification or pull request description), `codeFixable` (boolean), and",
-		"`commitMessage` (required when `codeFixable` is true).",
-	].join("\n");
-}
-
 export function buildRetryPrompt(testRun: TestRunResult): string {
 	return [
 		"The test suite failed after your fix. Command:",
