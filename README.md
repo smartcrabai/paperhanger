@@ -461,7 +461,7 @@ The agent-host (`agent-host/`) is a separate Node-only package with its own
     shell commands, bounded only by `agent.timeoutMinutes` for the whole fix
     attempt, not by the separate 10-minute bound on the deterministic
     `detectAndRunTests()` step (`TEST_SHELL_TIMEOUT_MS` in
-    `agent-host/src/workflows/fix-incident.ts`) that a detected language
+    `agent-host/src/fix-incident.ts`) that a detected language
     would go through instead.
   - **Docker**: CLI + compose plugin only, no `dockerd` -- the fix agent can
     drive a Docker daemon reachable via a bind-mounted host
@@ -498,10 +498,13 @@ The agent-host (`agent-host/`) is a separate Node-only package with its own
   cooldown suppressing repeat runs for the same alert fingerprint
   (`agent.cooldownHours`). True token/cost budgeting is blocked on the SDK
   exposing workflow-level usage.
-- **Flue is pinned to the exact version `1.0.0-beta.9`** everywhere it's
-  used (both `src/agent/` and `agent-host/`). It's pre-1.0 beta software
-  with an explicitly reset-only persisted schema; don't float this to a
-  semver range.
+- **Flue is pinned to the exact version `2.0.1`** everywhere it's used
+  (both `src/agent/` and `agent-host/`). It's no longer pre-1.0 beta, but
+  don't float this to a semver range: the `1.0.0-beta.9` -> `2.0.1` upgrade
+  was a breaking redesign that required a code migration (PR #8), and
+  persisted state can still be incompatible across versions (at 2.x a
+  database written by an incompatible Flue version refuses to start rather
+  than migrating in place). Upgrades stay deliberate, tested changes.
 - **No auto-merge, ever, by design** (non-goal, spec section 1): every fix
   lands as a normal pull request for human review. paperhanger does not
   merge, deploy, or perform any infrastructure mitigation.

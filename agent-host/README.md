@@ -9,10 +9,10 @@ process's dependency graph — it has its own `package.json`, its own
 
 ## Why a separate Node app?
 
-Flue's generated production server (`flue build --target node` ->
-`dist/server.mjs`) unconditionally imports `@flue/runtime/node`, which
-statically imports `node:sqlite` — a module Bun does not implement. The core
-`define*` APIs run fine under Bun, but a *served* Flue app cannot. So:
+Flue's Node-target server (`vite build` -> `dist/server.mjs`) unconditionally
+imports `@flue/runtime/node`, which statically imports `node:sqlite` — a
+module Bun does not implement. The core runtime APIs run fine under Bun, but
+a *served* Flue app cannot. So:
 
 - This directory is built and run with **Node >= 22.19** (`node:sqlite` has
   been available since Node 22.5).
@@ -28,53 +28,56 @@ statically imports `node:sqlite` — a module Bun does not implement. The core
 ```
 agent-host/
   flue.config.ts            # target: "node"
+  vite.config.ts            # vite + flue() plugin (the Flue 2 build)
   src/
-    app.ts                   # custom Hono app: mounts flue() + adds /healthz
-    contract.ts              # Valibot schemas for the workflow input/output contract
-    fix-agent.ts              # defineAgent: model, instructions, sandbox, tools
+    app.ts                   # custom Hono app: mounts the agent router + /healthz
+    contract.ts              # Valibot schemas for the agent input/output contract
+    fix-agent.ts              # "use agent" agent function: instructions + hooks
+    fix-incident.ts           # deterministic host steps: diagnose -> fix -> test -> push
     tools.ts                  # defineTool: query_telemetry
     telemetry-client.ts        # minimal read-only GreptimeDB HTTP client
     lib/                       # pure, @flue/*-free modules -- unit tested by the
                                 # main repo's `bun test` (root package.json "test")
       redaction.ts              # clone-token extraction + multi-secret redaction
-      output-sanitizer.ts        # central WorkflowOutput redaction (collectSecrets/sanitizeOutput)
+      output-sanitizer.ts        # central FixIncidentOutput redaction (collectSecrets/sanitizeOutput)
       sql-guard.ts               # read-only single-statement SQL guard (telemetry-client.ts)
       test-detection.ts          # test-command selection from a file-existence probe
       fix-attempt-policy.ts       # pure retry/give-up/commit decision for the fix-retry loop
       tamper-check.ts            # remote/branch tamper-check comparison
-    workflows/
-      fix-incident.ts          # defineWorkflow: diagnose -> fix -> test -> push
+      diagnosis-prompt.ts        # first-turn diagnosis prompt builder
+      system-prompt.ts           # operator-instructions prompt section
+      common-setup-scripts.ts    # trigger-file-gated common setup scripts
   scripts/
     smoke.mjs                 # Node-run schema/shape smoke test (no model/sandbox needed)
 ```
 
-Flue discovers `workflows/<name>.ts` by filename — `workflows/fix-incident.ts`
-is the `fix-incident` workflow, invoked as `POST /workflows/fix-incident`
-(admitted by the `route` export in that file). `fix-agent.ts` is *not* under
-`agents/` on purpose: it's private to this one workflow (no persistent,
-addressable agent route is needed), which Flue's docs explicitly allow ("the
-agent may be private to the workflow").
+Routing is explicit (Flue 2 has no directory discovery): `src/app.ts` mounts
+`createAgentRouter(FixIncidentAgent)` at `/agents/fix-incident`, so each run
+is a conversation admitted as `POST /agents/fix-incident/<run-id>` with the
+run input passed as `initialData` (validated against
+`FixIncidentAgent.initialData`). `fix-agent.ts` carries the `"use agent"`
+directive that registers it with the Flue build.
 
 Relative imports in `src/` use explicit `.ts` extensions so the sources can
 also be loaded directly by plain Node (used by `scripts/smoke.mjs`), not just
 through Flue's bundler.
 
 `src/lib/*.ts` deliberately import nothing from `@flue/*` (not even
-transitively): `src/workflows/fix-incident.ts` imports `src/fix-agent.ts`,
-which imports `local` from `@flue/runtime/node`, which statically imports
-`node:sqlite` — a module Bun does not implement (see "Why a separate Node
-app?" above). Since the main repo's `bun test` runs under **Bun**, any test
-file that imports the workflow module directly fails immediately with `error:
-No such built-in module: node:sqlite`, regardless of what it's actually
-trying to test. Keeping the security-relevant deterministic logic
-`@flue/*`-free in `lib/` is what makes it possible to unit test at all
-outside of `agent-host`'s own Node-only `bun install`/`flue build` cycle.
+transitively): `src/fix-agent.ts` imports `local` from `@flue/runtime/node`,
+which statically imports `node:sqlite` — a module Bun does not implement (see
+"Why a separate Node app?" above). Since the main repo's `bun test` runs
+under **Bun**, any test file that imports the agent module directly fails
+immediately with `error: No such built-in module: node:sqlite`, regardless of
+what it's actually trying to test. Keeping the security-relevant
+deterministic logic `@flue/*`-free in `lib/` is what makes it possible to
+unit test at all outside of `agent-host`'s own Node-only `bun
+install`/`vite build` cycle.
 
-## Workflow contract
+## Agent contract
 
-Input (`WorkflowInputSchema` in `src/contract.ts`; mirrored as a Zod schema at
-`src/agent/contract.ts` in the parent repo, since that Bun-side process cannot
-import this package directly):
+Input (`FixIncidentInputSchema` in `src/contract.ts`; mirrored as a Zod schema
+at `src/agent/contract.ts` in the parent repo, since that Bun-side process
+cannot import this package directly):
 
 ```ts
 {
@@ -88,16 +91,20 @@ import this package directly):
     owner: string; repo: string;
     cloneUrl: string;             // HTTPS URL with an embedded installation token -- SECRET
     defaultBranch: string; branchName: string;
+    setupScript?: string;         // repo-definition override, run right after clone
+    setupScripts?: { triggerFile: string; script: string }[];  // common, trigger-file-gated
+    testCommand?: string;         // repo-definition override for test auto-detection
   };
   limits: { timeoutMinutes: number; maxDiffLines: number; maxFixAttempts: number };
   forbiddenPaths: string[];
   // Discriminated union on `source`; "greptimedb" is the only backend today
   // (mirrors the parent repo's `src/config/schema.ts` `TelemetrySchema`).
   telemetry?: { source: "greptimedb"; url: string; database: string; auth?: string };
+  systemPrompt?: string;          // dashboard-managed operator instructions (all repos)
 }
 ```
 
-Output (`WorkflowOutputSchema`):
+Output (`FixIncidentOutputSchema`):
 
 ```ts
 {
@@ -112,10 +119,10 @@ Output (`WorkflowOutputSchema`):
 }
 ```
 
-This workflow only **pushes** a branch on `outcome: "fixed"` — it never opens
-a pull request. The parent repo's `src/agent/runner.ts` re-derives the actual
-diff via the GitHub compare API (never trusting this workflow's own
-self-reported `changedFiles`), checks it against `forbiddenPaths`/
+This agent only **pushes** a branch on `outcome: "fixed"` — it never opens a
+pull request. The parent repo's `src/agent/runner.ts` re-derives the actual
+diff via the GitHub compare API (never trusting the agent's self-reported
+`changedFiles`), checks it against `forbiddenPaths`/
 `maxDiffLines`, and only then creates the PR (or deletes the pushed branch and
 reports a failure if a guardrail is violated).
 
@@ -129,10 +136,11 @@ otherwise, and defends in depth at every stage:
 1. **Scrub immediately after clone.** `git clone` necessarily embeds the
    token in the remote URL (that's how the checkout gets read access), which
    git persists to `.git/config` as `origin`. Before the first model turn
-   (`cloneAndPrepareBranch`, out-of-band via `harness.shell()`, never
-   `session.shell()`), the workflow runs `git remote set-url origin
-   <tokenless URL>`. From that point on, nothing on disk in the checkout
-   carries a credential the model could read back out (`cat .git/config`,
+   (`cloneAndPrepareBranch`, out-of-band via the host's own `sandbox.exec()`,
+   never the model-facing bash tool), the host runs `git remote set-url
+   origin <tokenless URL>`. From that point on, nothing on disk in the
+   checkout carries a credential the model could read back out (`cat
+   .git/config`,
    `git remote -v`, etc.) and reuse to push to an arbitrary ref — which would
    otherwise bypass the parent repo's compare-API guardrails, since those
    only ever inspect this run's own fixed incident branch.
@@ -147,7 +155,7 @@ otherwise, and defends in depth at every stage:
    run closed (`outcome: "failed"`) if either no longer matches what step 1
    set up — catching other forms of checkout tampering even though the push
    target itself no longer depends on `origin`.
-4. **Central output redaction.** Every string this workflow returns
+4. **Central output redaction.** Every string this agent returns
    (`diagnosis`, `report`, `fix.commitMessage`, `failureReason`) passes
    through a single `sanitizeOutput()` (`src/lib/output-sanitizer.ts`) right
    before `run()` returns, which redacts both the clone token — derived
@@ -190,15 +198,14 @@ The tool reads its telemetry backend config from a single `PAPERHANGER_TELEMETRY
 environment variable — the whole `source`-discriminated config, serialized as
 JSON (set by the parent repo's sidecar when it spawns this process; see
 `buildSpawnEnv` in `src/agent/sidecar.ts`) — rather than from the
-per-invocation `telemetry` field on the workflow input. This is a deliberate
-choice, not an oversight: `defineAgent()`'s initializer — where `tools` is
-assigned — only receives `{ id, env }`, not the workflow's `input`, so a tool
-list cannot be conditioned on a specific invocation's payload. Since one
-agent-host process serves one paperhanger deployment with one fixed telemetry
-backend, env-var presence is an equivalent, always-correct signal for "is
-telemetry configured for this deployment" — tool registration is skipped
-entirely (`createTelemetryTools()` returns `[]`) when that env var is absent
-or fails to parse.
+per-invocation `telemetry` field on the agent input. Under the beta SDK this
+was forced (`defineAgent()`'s initializer never saw the run input); at Flue 2
+the agent function could read it via `useInitialData()`, but the env var is
+kept because one agent-host process serves one paperhanger deployment with
+one fixed telemetry backend, so env-var presence is an equivalent,
+always-correct signal for "is telemetry configured for this deployment" —
+tool registration is skipped entirely (`createTelemetryTools()` returns `[]`)
+when that env var is absent or fails to parse.
 
 `createTelemetryTools()` `switch`es on `config.source` to build the
 source-appropriate tool set (today: `query_telemetry` for `"greptimedb"`,
@@ -210,17 +217,16 @@ the parent repo's `src/telemetry/factory.ts`, and nowhere else.
 ## Sandbox
 
 Uses `local()` from `@flue/runtime/node` — direct host filesystem/shell
-access, `cwd` set to a fresh temp directory per workflow run (keyed by the
-run id, so concurrent incidents never collide). `local()` provides **no
-isolation of its own**; the agent-host container itself is the isolation
-boundary (per `docs/architecture.md`).
+access, `cwd` set to a fresh temp directory per conversation (keyed by the
+conversation id, so concurrent incidents never collide). `local()` provides
+**no isolation of its own**; the agent-host container itself is the
+isolation boundary (per `docs/architecture.md`).
 
 ### Env sanitization for model-facing shells (investigated, already enforced)
 
-Every command the model runs — via its own bash-like tool, or via
-`session.shell()` — and every out-of-band `harness.shell()` call this
-workflow makes, goes through the same `local()`-provided `exec()`. Reading
-the installed `@flue/runtime` package
+Every command the model runs via its bash-like tool, and every out-of-band
+`sandbox.exec()` call the host makes, goes through the same
+`local()`-provided `exec()`. Reading the installed `@flue/runtime` package
 (`node_modules/@flue/runtime/dist/node/index.mjs`, confirmed against the
 bundled `guide/sandboxes` doc), per-command env sanitization is not just
 *possible* — it's `local()`'s enforced default behavior:
@@ -256,10 +262,9 @@ bundled `guide/sandboxes` doc), per-command env sanitization is not just
   `PROVIDER_API_KEY_ENV_VARS`), so it's absent from this process's
   environment entirely, not merely kept off model-facing shells by the
   allowlist.
-- Per-call `ShellOptions.env` (available to both `harness.shell()` and
-  `session.shell()`) layers further on top of that same base for one
-  command, which is what this workflow's own out-of-band git commands use
-  for timeouts, not additional env exposure.
+- Per-call `exec()` options layer further on top of that same base for one
+  command, which is what the host's own out-of-band git commands use for
+  timeouts, not additional env exposure.
 
 **Residual risk** (documented, not fixed by env sanitization): `local()`
 still provides **no isolation boundary** beyond the env allowlist. A
@@ -306,9 +311,9 @@ export default postgres({
 ```
 
 `@flue/postgres`'s `postgres()` adapter is driver-agnostic (`{ query,
-transaction, close }`), not bundled with a driver — see
-`docs/research/flue.md` section 5 for the verified `.d.ts` shape. Pin it to
-the same `1.0.0-beta.9` as the other `@flue/*` packages here.
+transaction, close }`), not bundled with a driver — the `.d.ts` shape
+verified in `docs/research/flue.md` section 5 still holds at 2.x. Pin it to
+the same `2.0.1` as the other `@flue/*` packages here.
 
 ## Model
 
@@ -327,14 +332,14 @@ full env-var-to-prefix mapping.
 
 ```bash
 bun install                       # or npm/pnpm install -- this is a plain Node package
-ANTHROPIC_API_KEY=... bun run --bun flue build --target node   # or: bunx flue build --target node
+ANTHROPIC_API_KEY=... bun run build   # vite build (see package.json scripts)
 node dist/server.mjs              # PORT env var, default 3000
 curl localhost:3000/healthz       # -> {"ok":true}
 ```
 
-Requires Node >= 22.19 to *run* the built server (`node:sqlite`); `flue
-build` itself works fine under Bun since building doesn't touch the Node-only
-runtime path. Verified against Node 22.22.3 and 26.5.0.
+Requires Node >= 22.19 to *run* the built server (`node:sqlite`); `vite
+build` itself works fine under Bun since building doesn't touch the
+Node-only runtime path. Verified against Node 22.22.3 and 26.5.0.
 
 ## Smoke test
 
@@ -342,12 +347,14 @@ runtime path. Verified against Node 22.22.3 and 26.5.0.
 node scripts/smoke.mjs
 ```
 
-Imports `src/contract.ts` and `src/workflows/fix-incident.ts` directly (no
-build step) and asserts the input/output schemas parse example payloads as
-expected, and that the discovered workflow module has a well-formed
-`defineWorkflow()` default export. This does **not** exercise the sandbox or
-call a real model — it is a fast, no-network structural check, meant to catch
-contract drift and import/wiring errors, not full pipeline behavior.
+Imports `src/contract.ts` and `src/fix-agent.ts` directly and asserts the
+input/output schemas parse example payloads as expected and that
+`FixIncidentAgent` is well-formed (`agentName`, `initialData`). It then boots
+the built `dist/server.mjs` (run `bun run build` first) and checks `/healthz`
+plus route admission (invalid `initialData` -> 400, valid -> 202). This does
+**not** exercise the sandbox or call a real model — it is a fast, no-network
+structural check, meant to catch contract drift and import/wiring errors, not
+full pipeline behavior.
 
 ## Unit tests (`src/lib/`)
 
@@ -362,14 +369,17 @@ cd .. && bun run test   # -> bun test src agent-host/src
 Every `src/lib/*.ts` module is colocated with a `*.test.ts` suite runnable
 directly by **Bun**, unlike `scripts/smoke.mjs` (Node-only, see "Layout"
 above) or the rest of this package (which needs `agent-host`'s own
-`node_modules`/`flue build` cycle). This is the primary coverage for the
+`node_modules`/`vite build` cycle). This is the primary coverage for the
 security-relevant deterministic logic described under "Secret handling" and
 "Env sanitization" above: token extraction/redaction, the read-only SQL
 guard, test-command detection, and the remote/branch tamper check.
 
 ## Version pinning
 
-All `@flue/*` packages are pinned to the exact version `1.0.0-beta.9`
+All `@flue/*` packages are pinned to the exact version `2.0.1`
 (`@flue/github` is not used anywhere in this app — see
-`docs/research/flue.md` section 9). Flue is pre-1.0 beta software with an
-explicitly reset-only persisted schema; do not float these to a semver range.
+`docs/research/flue.md` section 9). Flue is no longer pre-1.0 beta, but do
+not float these to a semver range: the beta -> 2.0.1 upgrade was a breaking
+redesign that required a code migration (PR #8), and a persisted database
+written by an incompatible Flue version refuses to start rather than
+migrating in place. Upgrades stay deliberate, tested changes.

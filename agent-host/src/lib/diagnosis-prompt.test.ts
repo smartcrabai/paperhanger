@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import type { WorkflowInput } from "../contract.ts";
+import type { FixIncidentInput } from "../contract.ts";
 import { buildDiagnosisPrompt } from "./diagnosis-prompt.ts";
 
-function makeInput(overrides: Partial<WorkflowInput> = {}): WorkflowInput {
+function makeInput(
+	overrides: Partial<FixIncidentInput> = {},
+): FixIncidentInput {
 	return {
 		incidentId: "incident-1",
 		contextMarkdown: "### Alert\nSomething broke.",
@@ -19,6 +21,7 @@ function makeInput(overrides: Partial<WorkflowInput> = {}): WorkflowInput {
 			cloneUrl: "https://x-access-token:secret@github.com/acme/widgets.git",
 			defaultBranch: "main",
 			branchName: "fix/incident-1",
+			setupScripts: [],
 		},
 		limits: { timeoutMinutes: 10, maxDiffLines: 200, maxFixAttempts: 2 },
 		forbiddenPaths: [],

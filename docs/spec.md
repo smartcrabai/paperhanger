@@ -140,7 +140,7 @@ interface TelemetrySource {
 
 ### 3.6 Fix Agent(Flue エージェント)
 
-- Flue の `defineAgent` + Workflow で実装。**Durable Execution** により中断・障害から再開可能
+- Flue のエージェント関数(`"use agent"`)+ Hooks で実装。**Durable Execution** により中断・障害から再開可能
 - モデルは Flue の model 指定子を設定で切替(デフォルト: Anthropic Claude)
 - 実行手順:
   1. `IncidentContext`(アラート + 収集済みテレメトリ)を入力
@@ -160,7 +160,7 @@ interface TelemetrySource {
   - 変更可能行数の上限(設定可。push 後に GitHub compare API で実差分を検証し、エージェントの自己申告は信用しない)
   - 変更禁止パス(`.github/workflows/`、secrets、CI 設定等)。違反時はリモートブランチを削除して `failed`
   - テストが通らない場合は PR を出さず `failed`(診断レポートは通知)。修正試行回数は `maxFixAttempts`(デフォルト 3)で上限
-  - 1 インシデントあたりのタイムアウト(注: タイムアウト時に agent-host 側の実行を取り消す API が Flue SDK に存在しないため、サーバー側で実行が継続し得ることを failureReason に明記する)
+  - 1 インシデントあたりのタイムアウト(注: タイムアウト時は Flue SDK の `client.abort()` で agent-host 側の実行の取り消しを要求し、その成否を failureReason に明記する)
   - トークン/コスト予算の直接制御は SDK がワークフロー単位の使用量を公開するまで**未実装**。コスト抑制はタイムアウト+試行回数上限+同時実行上限+クールダウンの組合せで行う
   - PR は draft として作成するオプション
 - **セキュリティ対策**(プロンプトインジェクション経由の資格情報悪用への防御):
@@ -270,7 +270,7 @@ notifiers:
 - Bun + TypeScript(リポジトリ方針に準拠)、`Bun.serve` / `bun:sqlite` / `Bun.sql`
 - Flue Framework(エージェント実行・Sandbox・Durable Execution)
   - **検証結果(2026-07-17)**: Flue の本番サーバーは `node:sqlite` 依存のため Bun では起動不可(Node >= 22.19 必須)。エージェントは `agent-host/` の **Node サイドカープロセス** として分離し、本体(Bun)から `@flue/sdk` の HTTP クライアントで駆動する。単一コンテナ配布は維持(イメージに Bun + Node を同梱し、本体が子プロセスとして起動。設定で外部 URL への接続にも切替可)。詳細は `docs/architecture.md` と `docs/research/flue.md`
-  - バージョンは `1.0.0-beta.9` に固定(pre-1.0 のため破壊的変更に注意)
+  - バージョンは `2.0.1` に固定(2026-08 に `1.0.0-beta.9` から移行済み・PR #8。pre-1.0 ではなくなったが、アップグレードは破壊的変更を伴いうるため semver 範囲には広げず、検証を伴う個別の変更として扱う)
 - lint/format: oxlint + biome(既存設定)
 
 ## 5. マイルストーン
