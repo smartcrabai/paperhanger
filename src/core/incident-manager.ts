@@ -355,10 +355,14 @@ export class IncidentManager {
 	 * silently deduping every future firing of that fingerprint with no
 	 * notification.
 	 *
-	 * Recovered incidents restart their pipeline run from the top (the
-	 * pipeline is idempotent about persisting the same transitions again), so
-	 * a duplicate `diagnosis_started` notification for an incident that was
-	 * already mid-flight before the crash is an accepted trade-off.
+	 * Recovered incidents resume from their last completed pipeline stage
+	 * rather than restarting from the top -- see `IncidentPipeline.process`
+	 * and its `loadResumePlan`/`ResumePlan` in `core/pipeline.ts`, and
+	 * `IncidentStore.getIncidentCheckpoint`/`saveIncidentCheckpoint` in
+	 * `storage/types.ts`. A duplicate `diagnosis_started` notification is
+	 * still possible, but only for the narrow crash window before telemetry
+	 * collection finishes (before that stage's checkpoint is saved); once a
+	 * checkpoint exists, resuming past it skips re-notifying entirely.
 	 */
 	async recoverOpenIncidents(): Promise<void> {
 		const { store, logger } = this.deps;

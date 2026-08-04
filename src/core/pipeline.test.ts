@@ -11,7 +11,11 @@ import { createLogger } from "../observability/logger";
 import type { ResolvedRepo, ResolveRepoInput } from "../repo/resolver";
 import type { NotificationEvent, Notifier } from "../notify/types";
 import { SqliteIncidentStore } from "../storage/sqlite";
-import type { IncidentStore, UpdateIncidentInput } from "../storage/types";
+import type {
+	IncidentCheckpoint,
+	IncidentStore,
+	UpdateIncidentInput,
+} from "../storage/types";
 import type { ContextBuilderConfig } from "../telemetry/context-builder";
 import type { IncidentContext, TelemetrySource } from "../telemetry/types";
 import type { Incident, IncidentEvent } from "./types";
@@ -1158,5 +1162,435 @@ describe("IncidentPipeline - OTel span tree (design section 5+6)", () => {
 		await pipeline.process(incident);
 
 		expect(transitions).toEqual(["collecting", "resolving_repo", "pr_created"]);
+	});
+});
+
+describe("IncidentPipeline - restart resume (checkpoint-driven, stage-transition matrix)", () => {
+	/** Builds a minimal, valid `IncidentContext` for seeding a checkpoint directly, bypassing `buildContext`. */
+	async function seedContext(
+		store: IncidentStore,
+		incident: Incident,
+	): Promise<IncidentContext> {
+		const events = await store.listEvents(incident.id);
+		const alert = events[0]?.event;
+		if (!alert) throw new Error("expected a seeded firing event");
+		return {
+			incident,
+			alert,
+			window: {
+				from: "2024-01-01T00:00:00.000Z",
+				to: "2024-01-01T01:00:00.000Z",
+			},
+			telemetry: { logs: [], traces: [], metrics: [] },
+			notes: [],
+		};
+	}
+
+	function countingTelemetrySource(): {
+		source: TelemetrySource;
+		callCount: () => number;
+	} {
+		let calls = 0;
+		const source = fakeTelemetrySource({
+			queryLogs: async () => {
+				calls++;
+				return [];
+			},
+		});
+		return { source, callCount: () => calls };
+	}
+
+	/**
+	 * Runs a fresh incident through the pipeline, optionally seeding a
+	 * checkpoint first to simulate a crash after a given stage, and reports
+	 * how many times each skippable stage actually ran.
+	 */
+	async function runScenario(
+		seedCheckpoint?: (
+			store: IncidentStore,
+			incident: Incident,
+		) => Promise<void>,
+	) {
+		const { store, incident } = await setup();
+		if (seedCheckpoint) {
+			await seedCheckpoint(store, incident);
+		}
+		const notifier = new RecordingNotifier();
+		const { source: telemetrySource, callCount: telemetryCalls } =
+			countingTelemetrySource();
+		let resolverCalls = 0;
+		const resolved: ResolvedRepo = {
+			owner: "acme",
+			repo: "widgets",
+			method: "attribute",
+			confidence: "high",
+		};
+		const resolver: PipelineResolver = {
+			async resolve() {
+				resolverCalls++;
+				return resolved;
+			},
+		};
+		const agentCalls: {
+			incident: Incident;
+			context: IncidentContext;
+			repo: ResolvedRepo;
+		}[] = [];
+
+		const pipeline = makePipeline({
+			store,
+			notifier,
+			telemetrySource,
+			resolver,
+			agentRunner: fakeAgentRunner(
+				{
+					status: "pr_created",
+					prUrl: "https://github.com/acme/widgets/pull/1",
+					diagnosis: "d",
+					report: "r",
+				},
+				agentCalls,
+			),
+		});
+
+		await pipeline.process(incident);
+
+		return {
+			telemetryCalls: telemetryCalls(),
+			resolverCalls,
+			agentCalls,
+			notifiedDiagnosisStarted: notifier.events.some(
+				(e) => e.kind === "diagnosis_started",
+			),
+			finalStatus: (await store.getIncident(incident.id))?.status,
+			checkpointAfter: await store.getIncidentCheckpoint(incident.id),
+			resolvedRepo: resolved,
+		};
+	}
+
+	test("crash before telemetry collection finishes (no checkpoint) resumes with a full run: notifies diagnosis_started, collects telemetry, and resolves the repo", async () => {
+		const result = await runScenario();
+
+		expect(result.telemetryCalls).toBe(1);
+		expect(result.resolverCalls).toBe(1);
+		expect(result.agentCalls.length).toBe(1);
+		expect(result.notifiedDiagnosisStarted).toBe(true);
+		expect(result.finalStatus).toBe("pr_created");
+		expect(result.checkpointAfter).toBeUndefined();
+	});
+
+	test("crash during resolving_repo, after telemetry collection completed (context-only checkpoint) resumes at repo resolution: skips telemetry collection and the diagnosis_started notification, but still resolves the repo", async () => {
+		const result = await runScenario(async (store, incident) => {
+			await store.saveIncidentCheckpoint(incident.id, {
+				incidentContext: await seedContext(store, incident),
+			});
+		});
+
+		expect(result.telemetryCalls).toBe(0);
+		expect(result.resolverCalls).toBe(1);
+		expect(result.agentCalls.length).toBe(1);
+		expect(result.notifiedDiagnosisStarted).toBe(false);
+		expect(result.finalStatus).toBe("pr_created");
+		expect(result.checkpointAfter).toBeUndefined();
+	});
+
+	test("crash during diagnosing or fixing (context + resolvedRepo checkpoint) resumes straight at the agent stage: skips telemetry collection AND repo resolution", async () => {
+		const result = await runScenario(async (store, incident) => {
+			await store.saveIncidentCheckpoint(incident.id, {
+				incidentContext: await seedContext(store, incident),
+				resolvedRepo: {
+					owner: "acme",
+					repo: "widgets",
+					method: "attribute",
+					confidence: "high",
+				},
+			});
+		});
+
+		expect(result.telemetryCalls).toBe(0);
+		expect(result.resolverCalls).toBe(0);
+		expect(result.agentCalls.length).toBe(1);
+		expect(result.agentCalls[0]?.repo).toEqual(result.resolvedRepo);
+		expect(result.notifiedDiagnosisStarted).toBe(false);
+		expect(result.finalStatus).toBe("pr_created");
+		expect(result.checkpointAfter).toBeUndefined();
+	});
+
+	test("saves the checkpoint with the built incidentContext right after telemetry collection, before repo resolution runs", async () => {
+		const { store, incident } = await setup();
+		let checkpointDuringResolve: IncidentCheckpoint | undefined;
+		const resolver: PipelineResolver = {
+			async resolve() {
+				checkpointDuringResolve = await store.getIncidentCheckpoint(
+					incident.id,
+				);
+				return null;
+			},
+		};
+
+		const pipeline = makePipeline({ store, resolver });
+		await pipeline.process(incident);
+
+		expect(checkpointDuringResolve?.incidentContext).toBeTruthy();
+		expect(checkpointDuringResolve?.resolvedRepo).toBeUndefined();
+	});
+
+	test("upgrades the checkpoint with the resolvedRepo right after repo resolution succeeds, before the agent run starts", async () => {
+		const { store, incident } = await setup();
+		const resolved: ResolvedRepo = {
+			owner: "acme",
+			repo: "widgets",
+			method: "attribute",
+			confidence: "high",
+		};
+		let checkpointDuringAgentRun: IncidentCheckpoint | undefined;
+		const agentRunner: PipelineAgentRunner = {
+			async run() {
+				checkpointDuringAgentRun = await store.getIncidentCheckpoint(
+					incident.id,
+				);
+				return { status: "report_only", diagnosis: "d", report: "r" };
+			},
+		};
+
+		const pipeline = makePipeline({
+			store,
+			resolver: fakeResolver(resolved),
+			agentRunner,
+		});
+		await pipeline.process(incident);
+
+		expect(checkpointDuringAgentRun?.resolvedRepo).toEqual(resolved);
+	});
+
+	test("a low-confidence resolution never upgrades the checkpoint with a resolvedRepo (report_only never resumes past collection)", async () => {
+		const { store, incident } = await setup();
+		const lowConfidence: ResolvedRepo = {
+			owner: "acme",
+			repo: "maybe-widgets",
+			method: "org-search",
+			confidence: "low",
+		};
+		let checkpointBeforeCleanup: IncidentCheckpoint | undefined;
+		const pipeline = makePipeline({
+			store,
+			resolver: {
+				async resolve() {
+					return lowConfidence;
+				},
+			},
+		});
+		// Peek at the checkpoint store's own write behavior by wrapping
+		// saveIncidentCheckpoint before it's (correctly) never called with a
+		// resolvedRepo for a low-confidence result.
+		const original = store.saveIncidentCheckpoint.bind(store);
+		store.saveIncidentCheckpoint = async (id, input) => {
+			checkpointBeforeCleanup = await original(id, input);
+			return checkpointBeforeCleanup;
+		};
+
+		await pipeline.process(incident);
+
+		expect(checkpointBeforeCleanup?.resolvedRepo).toBeUndefined();
+		expect((await store.getIncident(incident.id))?.status).toBe("report_only");
+	});
+});
+
+describe("IncidentPipeline - stale-checkpoint guards", () => {
+	test("a checkpoint missing its incidentContext (corrupt/partial row) is treated as absent, falling back to a full run rather than resuming from an undefined context", async () => {
+		const { store, incident } = await setup();
+		const notifier = new RecordingNotifier();
+		const resolved: ResolvedRepo = {
+			owner: "acme",
+			repo: "widgets",
+			method: "attribute",
+			confidence: "high",
+		};
+		// `saveIncidentCheckpoint` never persists a `resolvedRepo` without an
+		// `incidentContext` (see storage/types.ts) -- this simulates a
+		// corrupted/hand-edited row to exercise `loadResumePlan`'s own
+		// defensive fallback rather than trusting the row blindly.
+		store.getIncidentCheckpoint = async () =>
+			({
+				incidentId: incident.id,
+				resolvedRepo: resolved,
+				createdAt: new Date().toISOString(),
+				updatedAt: new Date().toISOString(),
+			}) as unknown as IncidentCheckpoint;
+
+		let telemetryCalls = 0;
+		const telemetrySource = fakeTelemetrySource({
+			queryLogs: async () => {
+				telemetryCalls++;
+				return [];
+			},
+		});
+		let resolverCalls = 0;
+		const resolver: PipelineResolver = {
+			async resolve() {
+				resolverCalls++;
+				return resolved;
+			},
+		};
+
+		const pipeline = makePipeline({
+			store,
+			notifier,
+			telemetrySource,
+			resolver,
+			agentRunner: fakeAgentRunner({
+				status: "pr_created",
+				prUrl: "https://github.com/acme/widgets/pull/1",
+				diagnosis: "d",
+				report: "r",
+			}),
+		});
+
+		await pipeline.process(incident);
+
+		// A full run: telemetry collection and repo resolution both ran, and
+		// diagnosis_started fired -- the corrupt checkpoint was never trusted.
+		expect(telemetryCalls).toBe(1);
+		expect(resolverCalls).toBe(1);
+		expect(notifier.events.map((e) => e.kind)).toEqual([
+			"diagnosis_started",
+			"pr_created",
+		]);
+	});
+
+	test("a checkpoint-cleanup failure is logged, not thrown, and never blocks the terminal transition or notification", async () => {
+		const { store, incident } = await setup();
+		const notifier = new RecordingNotifier();
+		const lines: string[] = [];
+		const logger = createLogger({ sink: (line) => lines.push(line) });
+		const resolved: ResolvedRepo = {
+			owner: "acme",
+			repo: "widgets",
+			method: "attribute",
+			confidence: "high",
+		};
+		store.deleteIncidentCheckpoint = async () => {
+			throw new Error("db unavailable during checkpoint cleanup");
+		};
+
+		const pipeline = makePipeline({
+			store,
+			notifier,
+			logger,
+			resolver: fakeResolver(resolved),
+			agentRunner: fakeAgentRunner({
+				status: "pr_created",
+				prUrl: "https://github.com/acme/widgets/pull/1",
+				diagnosis: "d",
+				report: "r",
+			}),
+		});
+
+		await expect(pipeline.process(incident)).resolves.toBeUndefined();
+
+		expect((await store.getIncident(incident.id))?.status).toBe("pr_created");
+		expect(notifier.events.map((e) => e.kind)).toEqual([
+			"diagnosis_started",
+			"pr_created",
+		]);
+		expect(
+			lines.some((line) => line.includes("pipeline.checkpoint_cleanup_failed")),
+		).toBe(true);
+	});
+});
+
+describe("IncidentPipeline - checkpoint cleanup on every terminal path", () => {
+	test("deletes the checkpoint once the incident reaches report_only via an unresolved repo", async () => {
+		const { store, incident } = await setup();
+		const pipeline = makePipeline({ store, resolver: fakeResolver(null) });
+
+		await pipeline.process(incident);
+
+		expect((await store.getIncident(incident.id))?.status).toBe("report_only");
+		expect(await store.getIncidentCheckpoint(incident.id)).toBeUndefined();
+	});
+
+	test("deletes the checkpoint once the incident reaches report_only via the agent", async () => {
+		const { store, incident } = await setup();
+		const resolved: ResolvedRepo = {
+			owner: "acme",
+			repo: "widgets",
+			method: "attribute",
+			confidence: "high",
+		};
+		const pipeline = makePipeline({
+			store,
+			resolver: fakeResolver(resolved),
+			agentRunner: fakeAgentRunner({
+				status: "report_only",
+				diagnosis: "d",
+				report: "r",
+			}),
+		});
+
+		await pipeline.process(incident);
+
+		expect(await store.getIncidentCheckpoint(incident.id)).toBeUndefined();
+	});
+
+	test("deletes the checkpoint once the incident reaches failed via the agent", async () => {
+		const { store, incident } = await setup();
+		const resolved: ResolvedRepo = {
+			owner: "acme",
+			repo: "widgets",
+			method: "attribute",
+			confidence: "high",
+		};
+		const pipeline = makePipeline({
+			store,
+			resolver: fakeResolver(resolved),
+			agentRunner: fakeAgentRunner({
+				status: "failed",
+				failureReason: "boom",
+			}),
+		});
+
+		await pipeline.process(incident);
+
+		expect(await store.getIncidentCheckpoint(incident.id)).toBeUndefined();
+	});
+
+	test("deletes the checkpoint once the incident reaches pr_created via the agent", async () => {
+		const { store, incident } = await setup();
+		const resolved: ResolvedRepo = {
+			owner: "acme",
+			repo: "widgets",
+			method: "attribute",
+			confidence: "high",
+		};
+		const pipeline = makePipeline({
+			store,
+			resolver: fakeResolver(resolved),
+			agentRunner: fakeAgentRunner({
+				status: "pr_created",
+				prUrl: "https://github.com/acme/widgets/pull/1",
+				diagnosis: "d",
+				report: "r",
+			}),
+		});
+
+		await pipeline.process(incident);
+
+		expect(await store.getIncidentCheckpoint(incident.id)).toBeUndefined();
+	});
+
+	test("deletes the checkpoint once the incident reaches failed via an unexpected pipeline exception", async () => {
+		const { store, incident } = await setup();
+		const resolver: PipelineResolver = {
+			async resolve() {
+				throw new Error("resolver blew up");
+			},
+		};
+		const pipeline = makePipeline({ store, resolver });
+
+		await pipeline.process(incident);
+
+		expect((await store.getIncident(incident.id))?.status).toBe("failed");
+		expect(await store.getIncidentCheckpoint(incident.id)).toBeUndefined();
 	});
 });

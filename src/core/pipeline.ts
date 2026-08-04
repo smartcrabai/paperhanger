@@ -8,15 +8,31 @@
  *   1. Notify `diagnosis_started`, then persist the `collecting` transition.
  *   2. Build an `IncidentContext` from the latest firing event for this
  *      incident. Telemetry absence/failure degrades to an empty-telemetry
- *      context (with an explanatory note) rather than aborting the run.
+ *      context (with an explanatory note) rather than aborting the run. Save
+ *      an `IncidentCheckpoint` (`IncidentStore.saveIncidentCheckpoint`) with
+ *      this context once it's built.
  *   3. Persist the `resolving_repo` transition, then resolve the target
  *      repository (attribute -> mapping -> org-search, per spec 3.5),
  *      deriving resource-attribute hints from whatever telemetry was
  *      collected. A `null` result or a "low" confidence result is a terminal
- *      `report_only` (never guess at a fix target).
+ *      `report_only` (never guess at a fix target). A usable resolution
+ *      upgrades the checkpoint with the resolved repo.
  *   4. Otherwise, hand off to `FixAgentRunner.run()`, which manages its own
  *      `diagnosing`/`fixing` transitions, and map its outcome to a terminal
- *      incident status.
+ *      incident status. The checkpoint is deleted once any terminal status is
+ *      reached (see `cleanupCheckpoint`).
+ *
+ * Restart resume (docs/spec.md section 3.2 and 3.10, docs/architecture.md
+ * "Incident state machine"): `process()` starts by loading this incident's
+ * checkpoint, if any (`loadResumePlan`), and skips whichever of steps 2-3
+ * that checkpoint proves already completed before a prior crash/restart --
+ * see `ResumePlan` below for the three possible outcomes. A fresh,
+ * never-crashed incident has no checkpoint yet, so it always takes the full
+ * `"collect"` plan; this is what makes checkpointing purely additive to the
+ * existing behavior below. Resuming past step 2 also skips its
+ * `diagnosis_started` notification, since it already fired before the crash
+ * -- see `ResumePlan`'s doc comment for exactly which crash window still
+ * produces a duplicate.
  *
  * Crash-observability (docs/architecture.md): every transition is persisted
  * through `IncidentStore` before the next stage starts, so a restart can
@@ -163,6 +179,40 @@ function deriveResourceAttributes(
 	return Object.keys(merged).length > 0 ? merged : undefined;
 }
 
+/**
+ * How much of the pipeline `process()` can skip for a given run, decided by
+ * `loadResumePlan` from this incident's checkpoint (if any):
+ *
+ * - `"collect"`: no usable checkpoint. Either a fresh incident, or a crash
+ *   before telemetry collection finished (i.e. before step 2's
+ *   `saveIncidentCheckpoint` call). Runs every stage, identical to
+ *   pre-checkpoint behavior -- including firing `diagnosis_started`, so a
+ *   crash in this narrow window is the one case that can still produce a
+ *   duplicate notification on resume.
+ * - `"resolve"`: telemetry collection completed (checkpoint has an
+ *   `incidentContext`) but repo resolution had not yet succeeded with usable
+ *   confidence before the crash. Skips notifying `diagnosis_started` again
+ *   and re-collecting telemetry; resumes at the `resolving_repo` transition
+ *   using the checkpointed context.
+ * - `"agent"`: repo resolution also completed (checkpoint additionally has a
+ *   `resolvedRepo`) before the crash -- this is the only way `diagnosing`/
+ *   `fixing` are ever reached, so a crash at either of those statuses always
+ *   produces this plan. Skips straight to `runAgent`, re-invoking
+ *   `FixAgentRunner.run()` from scratch: it has no resumable checkpoint of
+ *   its own here, so this is the practical limit of how far resume goes --
+ *   the agent run itself (clone, diagnose, fix, test) always restarts, with
+ *   its own fresh `agent.timeoutMinutes`/`maxFixAttempts` budget, exactly as
+ *   a full pipeline restart already did before this change.
+ */
+type ResumePlan =
+	| { resumeAt: "collect" }
+	| { resumeAt: "resolve"; incidentContext: IncidentContext }
+	| {
+			resumeAt: "agent";
+			incidentContext: IncidentContext;
+			resolvedRepo: ResolvedRepo;
+	  };
+
 export class IncidentPipeline implements IncidentProcessor {
 	private readonly logger: Logger;
 	private readonly tracer: Tracer;
@@ -191,7 +241,57 @@ export class IncidentPipeline implements IncidentProcessor {
 			?.addEvent("notify", { "paperhanger.notify.kind": kind });
 	}
 
+	/**
+	 * Loads this incident's checkpoint (if any) and translates it into a
+	 * `ResumePlan` -- see `ResumePlan`'s doc comment for what each outcome
+	 * means. Re-checks `incidentContext` presence defensively rather than
+	 * trusting a `resolvedRepo`-bearing checkpoint blindly: `saveIncidentCheckpoint`
+	 * never persists one without the other (see `process()` below), but a
+	 * checkpoint row is external state this method did not just write, so a
+	 * corrupted/partial row (e.g. a hand-edited database) falls back to a
+	 * full `"collect"` run instead of resuming from a missing context.
+	 */
+	private async loadResumePlan(incidentId: string): Promise<ResumePlan> {
+		const checkpoint = await this.deps.store.getIncidentCheckpoint(incidentId);
+		if (!checkpoint?.incidentContext) {
+			return { resumeAt: "collect" };
+		}
+		if (checkpoint.resolvedRepo) {
+			return {
+				resumeAt: "agent",
+				incidentContext: checkpoint.incidentContext,
+				resolvedRepo: checkpoint.resolvedRepo,
+			};
+		}
+		return { resumeAt: "resolve", incidentContext: checkpoint.incidentContext };
+	}
+
+	/**
+	 * Deletes this incident's checkpoint once it reaches a terminal status
+	 * (called from each `finalize*` method, right after that status is
+	 * confirmed persisted). Never throws: a cleanup hiccup must not turn an
+	 * otherwise-successful terminal transition into an unhandled failure, and
+	 * a leftover checkpoint row is harmless -- incident ids are never reused,
+	 * and `IncidentManager` never re-enqueues a terminal incident -- beyond
+	 * the minor storage cost of an orphaned row. This is also the
+	 * stale-checkpoint guard for the incident's own lifetime: once deleted, a
+	 * checkpoint can never be read back for this incident again, so nothing
+	 * later can accidentally resume from it.
+	 */
+	private async cleanupCheckpoint(incidentId: string): Promise<void> {
+		try {
+			await this.deps.store.deleteIncidentCheckpoint(incidentId);
+		} catch (err) {
+			this.logger.warn("pipeline.checkpoint_cleanup_failed", {
+				incidentId,
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+	}
+
 	async process(incident: Incident): Promise<void> {
+		const plan = await this.loadResumePlan(incident.id);
+
 		const rootSpan = this.tracer.startSpan("incident.process", {
 			root: true,
 			kind: SpanKind.INTERNAL,
@@ -200,6 +300,7 @@ export class IncidentPipeline implements IncidentProcessor {
 				"paperhanger.incident.fingerprint": incident.fingerprint,
 				"paperhanger.incident.source": incident.source,
 				"paperhanger.incident.severity": incident.severity,
+				"paperhanger.incident.resumed_at": plan.resumeAt,
 			},
 		});
 
@@ -207,42 +308,69 @@ export class IncidentPipeline implements IncidentProcessor {
 			let outcome: "pr_created" | "report_only" | "failed" | "unresolved" =
 				"failed";
 			try {
-				this.recordNotifyEvent("diagnosis_started");
-				await this.deps.notifier.notify({
-					kind: "diagnosis_started",
-					incident: incidentSnapshot(incident),
-				});
+				let current = incident;
+				let incidentContext: IncidentContext;
+				let resolved: ResolvedRepo | null;
 
-				const collecting = await this.deps.store.updateIncident(incident.id, {
-					status: "collecting",
-				});
-				const alert = await this.resolveAlertEvent(collecting);
-				const incidentContext = await this.buildContext(collecting, alert);
+				if (plan.resumeAt === "agent") {
+					// Both telemetry collection and repo resolution already
+					// completed before the crash/restart -- skip straight to the
+					// agent stage. `current` keeps whatever status this incident is
+					// already persisted at (`resolving_repo` if the crash landed
+					// between saving this checkpoint and the first agent-run
+					// transition, or `diagnosing`/`fixing` otherwise);
+					// `FixAgentRunner.run()` sets its own `diagnosing` transition
+					// unconditionally, so this is idempotent either way.
+					incidentContext = plan.incidentContext;
+					resolved = plan.resolvedRepo;
+				} else {
+					if (plan.resumeAt === "collect") {
+						this.recordNotifyEvent("diagnosis_started");
+						await this.deps.notifier.notify({
+							kind: "diagnosis_started",
+							incident: incidentSnapshot(current),
+						});
 
-				const resolvingRepo = await this.deps.store.updateIncident(
-					collecting.id,
-					{ status: "resolving_repo" },
-				);
+						current = await this.deps.store.updateIncident(current.id, {
+							status: "collecting",
+						});
+						const alert = await this.resolveAlertEvent(current);
+						incidentContext = await this.buildContext(current, alert);
+						await this.deps.store.saveIncidentCheckpoint(current.id, {
+							incidentContext,
+						});
+					} else {
+						// resumeAt === "resolve": telemetry collection (and its
+						// diagnosis_started notification) already happened before the
+						// crash -- reuse the checkpointed context instead of
+						// re-collecting and re-notifying.
+						incidentContext = plan.incidentContext;
+					}
 
-				const resolved = await this.resolveRepo(alert, incidentContext);
+					current = await this.deps.store.updateIncident(current.id, {
+						status: "resolving_repo",
+					});
+					resolved = await this.resolveRepo(
+						incidentContext.alert,
+						incidentContext,
+					);
+					if (resolved && resolved.confidence !== "low") {
+						await this.deps.store.saveIncidentCheckpoint(current.id, {
+							incidentContext,
+							resolvedRepo: resolved,
+						});
+					}
+				}
 
 				if (!resolved || resolved.confidence === "low") {
-					await this.finalizeUnresolved(
-						resolvingRepo,
-						incidentContext,
-						resolved,
-					);
+					await this.finalizeUnresolved(current, incidentContext, resolved);
 					outcome = "unresolved";
 					return;
 				}
 
-				const result = await this.runAgent(
-					resolvingRepo,
-					incidentContext,
-					resolved,
-				);
+				const result = await this.runAgent(current, incidentContext, resolved);
 				outcome = result.status;
-				await this.finalizeAgentResult(resolvingRepo, result);
+				await this.finalizeAgentResult(current, result);
 			} catch (err) {
 				outcome = "failed";
 				await this.finalizeUnexpectedFailure(incident, err);
@@ -507,6 +635,7 @@ export class IncidentPipeline implements IncidentProcessor {
 			status: "report_only",
 			diagnosis: preamble,
 		});
+		await this.cleanupCheckpoint(incident.id);
 		this.recordNotifyEvent("report_only");
 		await notifier.notify({
 			kind: "report_only",
@@ -528,6 +657,7 @@ export class IncidentPipeline implements IncidentProcessor {
 				prUrl: result.prUrl,
 				diagnosis: result.diagnosis,
 			});
+			await this.cleanupCheckpoint(incident.id);
 			this.recordNotifyEvent("pr_created");
 			await notifier.notify({
 				kind: "pr_created",
@@ -543,6 +673,7 @@ export class IncidentPipeline implements IncidentProcessor {
 				status: "report_only",
 				diagnosis: result.diagnosis,
 			});
+			await this.cleanupCheckpoint(incident.id);
 			this.recordNotifyEvent("report_only");
 			await notifier.notify({
 				kind: "report_only",
@@ -557,6 +688,7 @@ export class IncidentPipeline implements IncidentProcessor {
 			failureReason: result.failureReason,
 			diagnosis: result.diagnosis,
 		});
+		await this.cleanupCheckpoint(incident.id);
 		this.recordNotifyEvent("failed");
 		await notifier.notify({
 			kind: "failed",
@@ -605,6 +737,7 @@ export class IncidentPipeline implements IncidentProcessor {
 				status: "failed",
 				failureReason: message,
 			});
+			await this.cleanupCheckpoint(incident.id);
 			this.recordNotifyEvent("failed");
 			await notifier.notify({
 				kind: "failed",

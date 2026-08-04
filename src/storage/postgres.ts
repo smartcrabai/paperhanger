@@ -26,6 +26,8 @@ import type {
 	UpdateCommonSetupScriptInput,
 	UpdateRepoDefinitionInput,
 } from "../core/types";
+import type { ResolvedRepo } from "../repo/resolver";
+import type { IncidentContext } from "../telemetry/types";
 import {
 	CommonSetupScriptNotFoundError,
 	DuplicateOpenIncidentError,
@@ -35,9 +37,11 @@ import {
 	type CommonSystemPromptStore,
 	type CreateAgentRunInput,
 	type CreateIncidentInput,
+	type IncidentCheckpoint,
 	type IncidentEventRecord,
 	type IncidentStore,
 	type RepoDefinitionStore,
+	type SaveIncidentCheckpointInput,
 	type UpdateAgentRunInput,
 	type UpdateIncidentInput,
 } from "./types";
@@ -50,7 +54,7 @@ import {
  * method (and a version check in `init()`) for future schema changes instead
  * of mutating an already-shipped migration in place.
  */
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 
 /** Primary key pinning `common_system_prompt` to a single row (see `migrateV5`). */
 const COMMON_SYSTEM_PROMPT_ID = "default";
@@ -147,6 +151,14 @@ interface CommonSetupScriptRow {
 interface CommonSystemPromptRow {
 	id: string;
 	prompt: string;
+	created_at: unknown;
+	updated_at: unknown;
+}
+
+interface IncidentCheckpointRow {
+	incident_id: string;
+	incident_context_json: unknown;
+	resolved_repo_json: unknown | null;
 	created_at: unknown;
 	updated_at: unknown;
 }
@@ -255,6 +267,23 @@ export function mapCommonSystemPromptRow(
 	};
 }
 
+export function mapIncidentCheckpointRow(
+	row: IncidentCheckpointRow,
+): IncidentCheckpoint {
+	return {
+		incidentId: row.incident_id,
+		incidentContext: parseJsonColumn<IncidentContext>(
+			row.incident_context_json,
+		),
+		resolvedRepo:
+			row.resolved_repo_json === null || row.resolved_repo_json === undefined
+				? undefined
+				: parseJsonColumn<ResolvedRepo>(row.resolved_repo_json),
+		createdAt: toIso(row.created_at),
+		updatedAt: toIso(row.updated_at),
+	};
+}
+
 export interface PostgresIncidentStoreOptions {
 	/** Injectable clock for `created_at`/`updated_at` stamping. Defaults to the real wall clock; tests use this to pin cooldown-window boundaries deterministically. */
 	now?: () => Date;
@@ -320,6 +349,11 @@ export class PostgresIncidentStore
 		if (version < 6) {
 			await this.migrateV6();
 			version = 6;
+			await this.setSchemaVersion(version);
+		}
+		if (version < 7) {
+			await this.migrateV7();
+			version = 7;
 			await this.setSchemaVersion(version);
 		}
 		if (version !== SCHEMA_VERSION) {
@@ -454,6 +488,28 @@ export class PostgresIncidentStore
 	private async migrateV6(): Promise<void> {
 		await this.sql`
 			ALTER TABLE repo_definitions ADD COLUMN system_prompt TEXT
+		`;
+	}
+
+	/**
+	 * Adds `incident_checkpoints`, one row per incident holding enough state
+	 * (`IncidentPipeline`'s built `IncidentContext` and, once resolved, the
+	 * `ResolvedRepo`) to resume that incident from its last completed stage
+	 * after a crash/restart, instead of re-running telemetry collection and
+	 * repo resolution (docs/spec.md section 3.2, 3.10). `incident_id` is the
+	 * primary key -- exactly one checkpoint per incident, upserted in place --
+	 * rather than a separate surrogate id, mirroring `common_system_prompt`'s
+	 * single-row-per-key shape.
+	 */
+	private async migrateV7(): Promise<void> {
+		await this.sql`
+			CREATE TABLE IF NOT EXISTS incident_checkpoints (
+				incident_id TEXT PRIMARY KEY REFERENCES incidents (id),
+				incident_context_json JSONB NOT NULL,
+				resolved_repo_json JSONB,
+				created_at TIMESTAMPTZ NOT NULL,
+				updated_at TIMESTAMPTZ NOT NULL
+			)
 		`;
 	}
 
@@ -652,6 +708,53 @@ export class PostgresIncidentStore
 			WHERE id = ${id}
 		`;
 		return next;
+	}
+
+	async saveIncidentCheckpoint(
+		incidentId: string,
+		input: SaveIncidentCheckpointInput,
+	): Promise<IncidentCheckpoint> {
+		const now = this.now().toISOString();
+		const resolvedRepoJson = input.resolvedRepo
+			? JSON.stringify(input.resolvedRepo)
+			: null;
+		// No special-cased error translation on a foreign key violation here,
+		// matching `appendEvent`/`createAgentRun`: the raw `SQL.PostgresError`
+		// propagates as-is (see docs/architecture.md "Errors").
+		const rows = await this.sql<IncidentCheckpointRow[]>`
+			INSERT INTO incident_checkpoints
+				(incident_id, incident_context_json, resolved_repo_json, created_at, updated_at)
+			VALUES
+				(${incidentId}, ${JSON.stringify(input.incidentContext)}::jsonb,
+				 ${resolvedRepoJson}::jsonb, ${now}, ${now})
+			ON CONFLICT (incident_id) DO UPDATE SET
+				incident_context_json = excluded.incident_context_json,
+				resolved_repo_json = excluded.resolved_repo_json,
+				updated_at = excluded.updated_at
+			RETURNING *
+		`;
+		const row = rows[0];
+		if (!row) {
+			throw new Error(
+				`Failed to read back upserted incident checkpoint for ${incidentId}`,
+			);
+		}
+		return mapIncidentCheckpointRow(row);
+	}
+
+	async getIncidentCheckpoint(
+		incidentId: string,
+	): Promise<IncidentCheckpoint | undefined> {
+		const rows = await this.sql<IncidentCheckpointRow[]>`
+			SELECT * FROM incident_checkpoints WHERE incident_id = ${incidentId}
+		`;
+		return rows[0] ? mapIncidentCheckpointRow(rows[0]) : undefined;
+	}
+
+	async deleteIncidentCheckpoint(incidentId: string): Promise<void> {
+		await this.sql`
+			DELETE FROM incident_checkpoints WHERE incident_id = ${incidentId}
+		`;
 	}
 
 	async createRepoDefinition(

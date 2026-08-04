@@ -202,6 +202,32 @@ received → collecting → resolving_repo → diagnosing → fixing
 Every transition is persisted through `IncidentStore` before the next stage starts, so a
 restart can observe where each incident stopped. Terminal states trigger a notification.
 
+**Restart resume**: `IncidentManager.recoverOpenIncidents()` re-enqueues every non-terminal
+incident at startup, and `IncidentPipeline.process()` (`src/core/pipeline.ts`) resumes each
+one from its last completed stage instead of restarting the whole pipeline. It does this via
+an `IncidentCheckpoint` (`storage/types.ts`: `saveIncidentCheckpoint` /
+`getIncidentCheckpoint` / `deleteIncidentCheckpoint`) -- one row per incident, holding the
+`IncidentContext` built while collecting telemetry and, once resolved, the `ResolvedRepo`.
+`loadResumePlan` reads that checkpoint (if any) and picks one of three resume points:
+
+- No checkpoint (a fresh incident, or a crash before telemetry collection finished): runs
+  every stage, identical to a full restart. This is the one window that can still produce a
+  duplicate `diagnosis_started` notification.
+- Checkpoint has only the `IncidentContext` (telemetry collection completed, repo resolution
+  had not yet succeeded): resumes at repo resolution, skipping telemetry collection and the
+  `diagnosis_started` notification (it already fired).
+- Checkpoint also has a `ResolvedRepo` (repo resolution also completed -- the only way
+  `diagnosing`/`fixing` are ever reached): skips straight to the agent stage, re-invoking
+  `FixAgentRunner.run()` from scratch. The agent run itself has no resumable checkpoint of its
+  own here, so a crash during `diagnosing`/`fixing` always re-runs the clone/diagnose/fix/test
+  cycle in full, with a fresh `agent.timeoutMinutes`/`maxFixAttempts` budget -- exactly as a
+  full pipeline restart already did before checkpointing existed. This is the practical limit
+  of how far resume goes without deeper Flue-level durable-execution integration.
+
+The checkpoint is deleted once the incident reaches any terminal status (`cleanupCheckpoint`
+in `pipeline.ts`), so a stale checkpoint can never be read back for an incident that has
+already finished.
+
 ## Webhook authentication
 
 Each configured source has a shared secret. Requests must present it either as an

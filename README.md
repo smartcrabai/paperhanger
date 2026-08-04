@@ -126,9 +126,17 @@ received → collecting → resolving_repo → diagnosing → fixing
 Every transition is persisted through `IncidentStore` *before* the next
 stage starts (see `src/core/pipeline.ts`), so a restart can always show
 where an incident stopped, even mid-run. Every non-terminal incident is
-automatically re-queued and reprocessed on the next startup, before the
-server accepts webhooks (`IncidentManager.recoverOpenIncidents`) -- see
-"Current limitations" below for what that recovery does not do.
+automatically re-queued on the next startup, before the server accepts
+webhooks (`IncidentManager.recoverOpenIncidents`), and resumes from its last
+completed stage rather than reprocessing from the top: a small
+`IncidentCheckpoint` persisted alongside the incident (the collected
+telemetry context, and once resolved, the target repo) lets a resumed run
+skip telemetry collection and/or repo resolution when they already
+completed before the crash. Resuming past telemetry collection also skips
+re-firing the `diagnosis_started` notification. See "Current limitations"
+below for what still isn't resumable (the agent run itself always restarts
+from scratch) and the narrow window that can still duplicate a
+notification.
 
 ## Quickstart
 
@@ -629,12 +637,24 @@ The agent-host (`agent-host/`) is a separate Node-only package with its own
 - **No auto-merge, ever, by design** (non-goal, spec section 1): every fix
   lands as a normal pull request for human review. paperhanger does not
   merge, deploy, or perform any infrastructure mitigation.
-- **Restart recovery re-runs the whole pipeline, not just the interrupted
-  stage**: on startup, every non-terminal incident is automatically
-  re-queued (`IncidentManager.recoverOpenIncidents`), but the pipeline
-  always restarts from the top (`diagnosis_started` -> `collecting` ->
-  `resolving_repo` -> agent run) rather than resuming from the stage it was
-  interrupted at -- so a crash during, say, `fixing` re-runs telemetry
-  collection and repo resolution too. A duplicate `diagnosis_started`
-  notification for an incident that was already mid-flight before the
-  crash is an accepted trade-off.
+- **Restart recovery resumes from the last completed stage, but the agent
+  run itself always restarts from scratch**: on startup, every non-terminal
+  incident is automatically re-queued (`IncidentManager.recoverOpenIncidents`)
+  and resumed via a per-incident `IncidentCheckpoint` (the collected
+  telemetry context, and once resolved, the target repo -- see
+  `IncidentStore.saveIncidentCheckpoint`/`getIncidentCheckpoint` and
+  `IncidentPipeline.process`'s `loadResumePlan` in `src/core/pipeline.ts`).
+  A crash during `resolving_repo` (after telemetry collection completed)
+  skips straight to repo resolution instead of re-collecting telemetry; a
+  crash during `diagnosing`/`fixing` (after repo resolution also completed)
+  skips both and goes straight back into the agent stage. What resume does
+  *not* do is pick the agent run itself back up mid-flight: `diagnosing`/
+  `fixing` are only ever reached by calling `FixAgentRunner.run()`, which has
+  no resumable checkpoint of its own here, so a crash at either of those
+  statuses re-runs the whole clone/diagnose/fix/test cycle from scratch, with
+  a fresh `agent.timeoutMinutes`/`maxFixAttempts` budget -- exactly as a full
+  pipeline restart already did before this checkpointing existed. A
+  duplicate `diagnosis_started` notification is now only possible for a
+  crash in the narrow window before telemetry collection finishes (before
+  its checkpoint is saved); once a checkpoint exists, resuming past it skips
+  re-firing that notification entirely.

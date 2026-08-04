@@ -77,7 +77,7 @@ interface IncidentEvent {
 - `resolved` イベント: 進行中の処理は中断せず続行し、インシデントに解決時刻を記録(v1)。未着手なら `skipped`
 - **同時実行制御**: エージェント同時実行数の上限(デフォルト 2)。超過分はキューイング
 - **競合安全性**: 同一 fingerprint のイベント処理はプロセス内で直列化し、さらにストア側の部分ユニークインデックス(open インシデント × fingerprint)で二重作成を防止
-- **再起動リカバリ**: 起動時に非終端ステータスのインシデントを再キューする(パイプラインは先頭から再実行。`diagnosis_started` 通知が重複し得ることは許容)
+- **再起動リカバリ**: 起動時に非終端ステータスのインシデントを再キューし、`IncidentCheckpoint`(収集済みテレメトリの `IncidentContext` と、解決済みなら `ResolvedRepo` を保持する 1 インシデント 1 行のチェックポイント。§3.3)に基づいてクラッシュ前に完了していた最後のステージから再開する(先頭からの再実行ではない)。テレメトリ収集が完了済みならその収集と `diagnosis_started` 通知をスキップして repo 解決から再開し、repo 解決も完了済みなら repo 解決もスキップしてエージェント実行(`diagnosing`/`fixing`)へ直接進む。ただしエージェント実行自体(clone → 診断 → 修正 → テスト)は再開不可能なため、この区間でのクラッシュはエージェント実行全体を最初から再実行する(タイムアウト・修正試行回数の予算も新規に確保される点は変わらない)。チェックポイントはインシデントが終端状態に達した時点で削除する。`diagnosis_started` 通知の重複は、テレメトリ収集が完了する前(チェックポイント保存前)にクラッシュした場合にのみ残る
 
 ### 3.3 Storage(永続化・抽象化)
 
@@ -101,6 +101,7 @@ interface RepoDefinitionStore {
 - テーブル `common_setup_scripts`(`seq`, `id`, `trigger_file`, `script`, `created_at`, `updated_at`)。`seq` の昇順を実行順とし、全リポジトリ共通の条件付きセットアップスクリプトを保持する
 - ダッシュボード(§3.11)が管理する全リポジトリ共通のシステムプロンプトは `CommonSystemPromptStore` インターフェースで抽象化する(SCHEMA_VERSION は 4 → 5。新しい `migrateV5()` を各ドライバに追加し、既存の `migrateV1`-`migrateV4` は変更しない)。テーブル `common_system_prompt`(`id`, `prompt`, `created_at`, `updated_at`; 単一行のみ、`id` は `'default'` 固定)を `INSERT ... ON CONFLICT DO UPDATE ... RETURNING *` で upsert し、`createdAt` は更新時も保持する
 - repo definition のリポジトリ個別システムプロンプトは `repo_definitions` テーブルの `system_prompt` 列として保持する(SCHEMA_VERSION は 5 → 6。新しい `migrateV6()` を各ドライバに追加し、既存の `migrateV1`-`migrateV5` は変更しない)。NULL は「未設定」を意味し、更新時に `null` を渡すとクリアされる
+- 再起動リカバリ(§3.2)が利用する `IncidentCheckpoint` は、独立インターフェースを新設せず `IncidentStore` 自身に追加する(`saveIncidentCheckpoint` / `getIncidentCheckpoint` / `deleteIncidentCheckpoint`。インシデントのライフサイクルに内在する状態であり、ダッシュボードが CRUD する独立リソースではないため。SCHEMA_VERSION は 6 → 7。新しい `migrateV7()` を各ドライバに追加し、既存の `migrateV1`-`migrateV6` は変更しない)。テーブル `incident_checkpoints`(`incident_id` を主キーとする 1 インシデント 1 行、`incident_context_json`、`resolved_repo_json`(NULL 可)、`created_at`、`updated_at`)。`incident_id` は `incidents(id)` への外部キーで、インシデントが終端ステータスに達した時点で該当行を削除し、古いチェックポイントが再利用されないようにする
 
 ### 3.4 Telemetry Collector(テレメトリ収集・抽象化)
 
@@ -246,6 +247,7 @@ notifiers:
 ### 3.10 運用
 
 - 配布: 単一コンテナイメージ(既存 Dockerfile を拡張)。SQLite 利用時は `/data` を volume に
+- 再起動時のインシデント再開(§3.2): チェックポイントに基づき最後に完了したステージから再開するため、テレメトリ収集・repo 解決が完了済みの区間でのクラッシュはその再実行コストを避けられる。一方でエージェント実行(`diagnosing`/`fixing`)自体は再開できないため、その区間でクラッシュを繰り返す(クラッシュループする)インシデントは、そのたびにエージェント実行全体(タイムアウト・修正試行回数の予算を含む)を新規に再実行する。これはチェックポイント導入前から変わらない挙動であり、今回の変更で悪化するものではないが、運用上の再実行コストの上限がクラッシュ頻度に依存する点は変わらない
 - エンドポイント: `/healthz`(liveness)、`/readyz`(DB 接続確認)、`GET /incidents` / `GET /incidents/:id` / `GET /incidents/:id/events`(状態確認用。いずれも `server.apiToken` による Bearer/X-Api-Token 認証必須、未設定時は 401)。`GET /incidents` は `?limit=` クエリパラメータで件数を指定可能(デフォルト 100、上限 500)。ダッシュボード(§3.11)の `/repo-definitions` 系ルートも同じ認証ゲートを通る
 - ログ: 構造化 JSON。`observability` 設定時はアクティブな span の `traceId`/`spanId` をログ行に付与し相関可能にする
 - トレース: `observability` 設定時、paperhanger 自身のスパンを OTLP/HTTP でエクスポート(`@opentelemetry/sdk-trace-base` + `exporter-trace-otlp-proto`。§3.9 参照)

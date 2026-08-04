@@ -19,6 +19,17 @@ import type {
 	UpdateCommonSetupScriptInput,
 	UpdateRepoDefinitionInput,
 } from "../core/types";
+// Type-only, so `verbatimModuleSyntax` erases both of these entirely at
+// build time -- there is no runtime import, hence no runtime circularity,
+// even though `repo/resolver.ts` itself imports `RepoDefinitionStore` (below)
+// from this same file. This is the one accepted exception to
+// docs/architecture.md's storage-sits-below-repo/telemetry layering: an
+// `IncidentCheckpoint` is pipeline working state (`ResolvedRepo`,
+// `IncidentContext`) that storage must be able to name in order to persist
+// it, and duplicating those shapes here would drift from the originals
+// instead.
+import type { ResolvedRepo } from "../repo/resolver";
+import type { IncidentContext } from "../telemetry/types";
 
 export interface CreateIncidentInput {
 	fingerprint: string;
@@ -57,6 +68,39 @@ export interface UpdateAgentRunInput {
 	finishedAt?: string;
 	outcome?: AgentRunOutcome;
 	costUsd?: number;
+}
+
+/**
+ * Enough state to resume an incident from its last completed pipeline stage
+ * after a crash/restart, instead of re-running telemetry collection and repo
+ * resolution (docs/spec.md section 3.2 and 3.10; see `IncidentPipeline.process`
+ * in `core/pipeline.ts`). One row per incident: upserted as each stage
+ * completes and deleted once the incident reaches a terminal status -- see
+ * `saveIncidentCheckpoint`/`deleteIncidentCheckpoint` on `IncidentStore` below.
+ *
+ * Deliberately its own small, explicit record rather than repurposing
+ * `Incident`'s own columns: `incidentContext` and `resolvedRepo` are
+ * pipeline-internal working state, not part of the incident's public shape
+ * (docs/spec.md section 3.1), and packing them onto `Incident` would leak
+ * that shape into every reader of `GET /incidents`.
+ */
+export interface IncidentCheckpoint {
+	incidentId: string;
+	/** The `IncidentContext` built while collecting telemetry -- present once that stage has completed. */
+	incidentContext: IncidentContext;
+	/**
+	 * The repo resolved by repo resolution, once it has succeeded with usable
+	 * (non-"low") confidence. `undefined` while the incident has only
+	 * completed telemetry collection.
+	 */
+	resolvedRepo?: ResolvedRepo;
+	createdAt: string;
+	updatedAt: string;
+}
+
+export interface SaveIncidentCheckpointInput {
+	incidentContext: IncidentContext;
+	resolvedRepo?: ResolvedRepo;
 }
 
 export interface IncidentStore {
@@ -108,6 +152,38 @@ export interface IncidentStore {
 
 	createAgentRun(input: CreateAgentRunInput): Promise<AgentRun>;
 	updateAgentRun(id: string, patch: UpdateAgentRunInput): Promise<AgentRun>;
+
+	/**
+	 * Upserts the single checkpoint row for `incidentId`. `IncidentPipeline`
+	 * calls this once telemetry collection completes (`incidentContext` only)
+	 * and again once repo resolution succeeds with usable confidence (adding
+	 * `resolvedRepo`); `createdAt` is preserved across the second call,
+	 * mirroring `setCommonSystemPrompt`'s upsert semantics. Throws if
+	 * `incidentId` does not name an existing incident (foreign key
+	 * enforcement, same convention as `appendEvent`/`createAgentRun`).
+	 */
+	saveIncidentCheckpoint(
+		incidentId: string,
+		input: SaveIncidentCheckpointInput,
+	): Promise<IncidentCheckpoint>;
+	/**
+	 * `undefined` when the incident has never completed telemetry collection,
+	 * or its checkpoint has already been cleaned up (see
+	 * `deleteIncidentCheckpoint`). Read once by `IncidentPipeline.process` at
+	 * the start of every run -- including a fresh, never-crashed one -- to
+	 * decide how much of the pipeline to skip.
+	 */
+	getIncidentCheckpoint(
+		incidentId: string,
+	): Promise<IncidentCheckpoint | undefined>;
+	/**
+	 * Deletes the checkpoint row, if any. Called once an incident reaches a
+	 * terminal status, so a checkpoint can never be read back for an incident
+	 * that has already finished (defense-in-depth against stale-checkpoint
+	 * reuse) and the table doesn't grow unboundedly. A no-op (not an error)
+	 * when no checkpoint row exists.
+	 */
+	deleteIncidentCheckpoint(incidentId: string): Promise<void>;
 }
 
 /**
