@@ -29,18 +29,17 @@ function summarizeMappings(definition: RepoDefinition): string {
 	return `${count} group${count === 1 ? "" : "s"}`;
 }
 
-/** Chars of `setupScript` shown in the "Setup script" cell's title tooltip. */
-const SETUP_SCRIPT_PREVIEW_LENGTH = 200;
+/** Chars of a long text field shown in a table cell's title tooltip. */
+const TEXT_PREVIEW_LENGTH = 200;
 
-/** Native title tooltip preview so the script is inspectable without opening Edit. */
-function setupScriptPreview(definition: RepoDefinition): string | undefined {
-	const script = definition.setupScript;
-	if (!script) {
+/** Native title tooltip preview so the text is inspectable without opening Edit. */
+function textPreview(text: string | undefined): string | undefined {
+	if (!text) {
 		return undefined;
 	}
-	return script.length > SETUP_SCRIPT_PREVIEW_LENGTH
-		? `${script.slice(0, SETUP_SCRIPT_PREVIEW_LENGTH)}...`
-		: script;
+	return text.length > TEXT_PREVIEW_LENGTH
+		? `${text.slice(0, TEXT_PREVIEW_LENGTH)}...`
+		: text;
 }
 
 /** `editingId` is `"new"` for the create form, a definition id for editing it, or `null` when the form is closed. */
@@ -151,6 +150,7 @@ export function RepositoriesView({
 			const repo = draft.repo.trim();
 			const setupScript = draft.setupScript.trim();
 			const testCommand = draft.testCommand.trim();
+			const systemPrompt = draft.systemPrompt.trim();
 			if (editingId === "new") {
 				await createRepoDefinition(
 					token,
@@ -161,6 +161,7 @@ export function RepositoriesView({
 						enabled: draft.enabled,
 						setupScript: setupScript.length > 0 ? setupScript : undefined,
 						testCommand: testCommand.length > 0 ? testCommand : undefined,
+						systemPrompt: systemPrompt.length > 0 ? systemPrompt : undefined,
 					},
 					controller.signal,
 				);
@@ -175,6 +176,7 @@ export function RepositoriesView({
 						enabled: draft.enabled,
 						setupScript: setupScript.length > 0 ? setupScript : null,
 						testCommand: testCommand.length > 0 ? testCommand : null,
+						systemPrompt: systemPrompt.length > 0 ? systemPrompt : null,
 					},
 					controller.signal,
 				);
@@ -249,6 +251,7 @@ export function RepositoriesView({
 								<th>Mappings</th>
 								<th>Setup script</th>
 								<th>Test command</th>
+								<th>System prompt</th>
 								<th>Enabled</th>
 								<th>Updated</th>
 								<th />
@@ -261,10 +264,13 @@ export function RepositoriesView({
 										{definition.owner}/{definition.repo}
 									</td>
 									<td>{summarizeMappings(definition)}</td>
-									<td title={setupScriptPreview(definition)}>
+									<td title={textPreview(definition.setupScript)}>
 										{definition.setupScript ? "yes" : "no"}
 									</td>
 									<td>{definition.testCommand ?? "auto-detect"}</td>
+									<td title={textPreview(definition.systemPrompt)}>
+										{definition.systemPrompt?.trim() ? "override" : "inherit"}
+									</td>
 									<td>{definition.enabled ? "yes" : "no"}</td>
 									<td>{new Date(definition.updatedAt).toLocaleString()}</td>
 									<td className="table-actions">

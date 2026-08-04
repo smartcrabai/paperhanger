@@ -53,6 +53,19 @@ const MappingEntrySchema = z
 
 const SetupScriptSchema = z.string().max(100_000);
 
+/**
+ * Same convention as the common system prompt (see ./system-prompt.ts):
+ * trimmed before the 20,000-character cap is enforced, so a whitespace-only
+ * value normalizes to "" (which the fix-agent runner treats as "no per-repo
+ * override -- inherit the common prompt") instead of being stored as if it
+ * were configured. The cap is lower than `SetupScriptSchema`'s because this
+ * text is sent to the model on every diagnosis and spends context budget.
+ */
+const SystemPromptSchema = z
+	.string()
+	.transform((value) => value.trim())
+	.pipe(z.string().max(20_000));
+
 const TestCommandSchema = z
 	.string()
 	.max(1_000)
@@ -73,6 +86,7 @@ const CreateRepoDefinitionBodySchema = z
 			.optional(),
 		setupScript: SetupScriptSchema.optional(),
 		testCommand: TestCommandSchema.optional(),
+		systemPrompt: SystemPromptSchema.optional(),
 		enabled: z.boolean().optional(),
 	})
 	.strict();
@@ -90,6 +104,7 @@ const UpdateRepoDefinitionBodySchema = z
 		// which both distinguish "key not in patch" from "key set to null").
 		setupScript: SetupScriptSchema.nullable().optional(),
 		testCommand: TestCommandSchema.nullable().optional(),
+		systemPrompt: SystemPromptSchema.nullable().optional(),
 		enabled: z.boolean().optional(),
 	})
 	.strict();

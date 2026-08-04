@@ -50,7 +50,7 @@ import {
  * method (and a version check in `init()`) for future schema changes instead
  * of mutating an already-shipped migration in place.
  */
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 
 /** Primary key pinning `common_system_prompt` to a single row (see `migrateV5`). */
 const COMMON_SYSTEM_PROMPT_ID = "default";
@@ -130,6 +130,7 @@ interface RepoDefinitionRow {
 	mappings: unknown;
 	setup_script: string | null;
 	test_command: string | null;
+	system_prompt: string | null;
 	enabled: boolean;
 	created_at: unknown;
 	updated_at: unknown;
@@ -225,6 +226,7 @@ export function mapRepoDefinitionRow(row: RepoDefinitionRow): RepoDefinition {
 		mappings: parseJsonColumn<Array<Record<string, string>>>(row.mappings),
 		setupScript: row.setup_script ?? undefined,
 		testCommand: row.test_command ?? undefined,
+		systemPrompt: row.system_prompt ?? undefined,
 		enabled: row.enabled,
 		createdAt: toIso(row.created_at),
 		updatedAt: toIso(row.updated_at),
@@ -313,6 +315,11 @@ export class PostgresIncidentStore
 		if (version < 5) {
 			await this.migrateV5();
 			version = 5;
+			await this.setSchemaVersion(version);
+		}
+		if (version < 6) {
+			await this.migrateV6();
+			version = 6;
 			await this.setSchemaVersion(version);
 		}
 		if (version !== SCHEMA_VERSION) {
@@ -436,6 +443,17 @@ export class PostgresIncidentStore
 				created_at TIMESTAMPTZ NOT NULL,
 				updated_at TIMESTAMPTZ NOT NULL
 			)
+		`;
+	}
+
+	/**
+	 * Adds the per-repository system prompt override to `repo_definitions`
+	 * (docs/spec.md section 3.11). Nullable: NULL means "inherit the common
+	 * system prompt", matching the pre-v6 behavior for every existing row.
+	 */
+	private async migrateV6(): Promise<void> {
+		await this.sql`
+			ALTER TABLE repo_definitions ADD COLUMN system_prompt TEXT
 		`;
 	}
 
@@ -646,10 +664,10 @@ export class PostgresIncidentStore
 		try {
 			await this.sql`
 				INSERT INTO repo_definitions
-					(id, owner, repo, mappings, setup_script, test_command, enabled, created_at, updated_at)
+					(id, owner, repo, mappings, setup_script, test_command, system_prompt, enabled, created_at, updated_at)
 				VALUES
 					(${id}, ${input.owner}, ${input.repo}, ${JSON.stringify(mappings)}::jsonb,
-					 ${input.setupScript ?? null}, ${input.testCommand ?? null}, ${enabled}, ${now}, ${now})
+					 ${input.setupScript ?? null}, ${input.testCommand ?? null}, ${input.systemPrompt ?? null}, ${enabled}, ${now}, ${now})
 			`;
 		} catch (err) {
 			if (isDuplicateRepoDefinitionViolation(err)) {
@@ -717,6 +735,10 @@ export class PostgresIncidentStore
 		if ("testCommand" in patch) {
 			columns.test_command = patch.testCommand ?? null;
 			columnNames.push("test_command");
+		}
+		if ("systemPrompt" in patch) {
+			columns.system_prompt = patch.systemPrompt ?? null;
+			columnNames.push("system_prompt");
 		}
 		if (patch.enabled !== undefined) {
 			columns.enabled = patch.enabled;

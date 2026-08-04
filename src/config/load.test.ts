@@ -500,3 +500,70 @@ github:
 		await expect(loadConfig(path)).rejects.toThrow(ConfigError);
 	});
 });
+
+describe("loadConfig - operator system prompts", () => {
+	async function loadWith(extraYaml: string) {
+		process.env.GRAFANA_WEBHOOK_SECRET = "grafana-secret";
+		process.env.GREPTIMEDB_URL = "http://greptimedb:4000";
+		process.env.GITHUB_APP_ID = "12345";
+		process.env.GITHUB_APP_PRIVATE_KEY = "-----BEGIN KEY-----";
+
+		return loadConfig(await writeFixture(MINIMAL_YAML + extraYaml));
+	}
+
+	test("both prompt fields default to unset", async () => {
+		const config = await loadWith("");
+
+		expect(config.agent.systemPrompt).toBeUndefined();
+		expect(config.repos.systemPrompts).toEqual({});
+	});
+
+	test("agent.systemPrompt round-trips, including multiline blocks", async () => {
+		const config = await loadWith(`
+agent:
+  systemPrompt: |
+    Always run the linter.
+    Never touch generated files.
+`);
+
+		expect(config.agent.systemPrompt).toBe(
+			"Always run the linter.\nNever touch generated files.\n",
+		);
+	});
+
+	test("repos.systemPrompts round-trips keyed by owner/repo", async () => {
+		const config = await loadWith(`
+repos:
+  systemPrompts:
+    acme/widgets: Prefer minimal diffs here.
+    acme/gadgets: |
+      Run the integration suite too.
+`);
+
+		expect(config.repos.systemPrompts).toEqual({
+			"acme/widgets": "Prefer minimal diffs here.",
+			"acme/gadgets": "Run the integration suite too.\n",
+		});
+	});
+
+	test("prompt values expand ${ENV_VAR} references like every other field", async () => {
+		process.env.OTEL_EXPORTER_HEADER_VALUE = "from-the-environment";
+
+		const config = await loadWith(`
+agent:
+  systemPrompt: \${OTEL_EXPORTER_HEADER_VALUE}
+`);
+
+		expect(config.agent.systemPrompt).toBe("from-the-environment");
+	});
+
+	test("rejects a non-string prompt value", async () => {
+		await expect(
+			loadWith(`
+repos:
+  systemPrompts:
+    acme/widgets: 42
+`),
+		).rejects.toThrow(ConfigError);
+	});
+});

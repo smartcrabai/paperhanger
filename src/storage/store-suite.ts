@@ -508,6 +508,7 @@ export function runRepoDefinitionStoreSuite(
 					mappings: [{ service: "api" }],
 					setupScript: "npm ci",
 					testCommand: "npm test",
+					systemPrompt: "Repo-specific operator instructions.",
 					enabled: false,
 				}),
 			);
@@ -657,6 +658,33 @@ export function runRepoDefinitionStoreSuite(
 
 			expect(updated.setupScript).toBeUndefined();
 			expect(updated.testCommand).toBeUndefined();
+		});
+
+		test("systemPrompt defaults to unset, round-trips, and clears when patched with null", async () => {
+			const created = await store.createRepoDefinition(
+				makeRepoDefinitionInput({ owner: "acme", repo: "prompt-me" }),
+			);
+			expect(created.systemPrompt).toBeUndefined();
+
+			const prompt =
+				"Always run the repo's own linter before proposing a fix.\nNever touch `deploy/**`.";
+			const updated = await store.updateRepoDefinition(created.id, {
+				systemPrompt: prompt,
+			});
+			expect(updated.systemPrompt).toBe(prompt);
+			// Fields not in the patch are preserved.
+			expect(updated.owner).toBe(created.owner);
+			expect((await store.getRepoDefinition(created.id))?.systemPrompt).toBe(
+				prompt,
+			);
+
+			const cleared = await store.updateRepoDefinition(created.id, {
+				systemPrompt: null,
+			});
+			expect(cleared.systemPrompt).toBeUndefined();
+			expect(
+				(await store.getRepoDefinition(created.id))?.systemPrompt,
+			).toBeUndefined();
 		});
 
 		test("updateRepoDefinition throws RepoDefinitionNotFoundError for unknown id", async () => {

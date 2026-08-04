@@ -8,7 +8,7 @@
  */
 
 import type { FixIncidentInput } from "../contract.ts";
-import { renderCommonSystemPromptSection } from "./system-prompt.ts";
+import { renderEffectiveSystemPromptSection } from "./system-prompt.ts";
 
 export function buildDiagnosisPrompt(input: FixIncidentInput): string {
 	const forbidden =
@@ -21,9 +21,7 @@ export function buildDiagnosisPrompt(input: FixIncidentInput): string {
 	// the parent repo's compare-API check (src/agent/runner.ts) regardless of
 	// what the model is told. Not repeated in buildRetryPrompt: retries reuse
 	// the same session/conversation, so it's already in context.
-	const systemPromptSection = renderCommonSystemPromptSection(
-		input.systemPrompt,
-	);
+	const systemPromptSection = renderEffectiveSystemPromptSection(input);
 	return [
 		...systemPromptSection,
 		...(systemPromptSection.length > 0 ? [""] : []),

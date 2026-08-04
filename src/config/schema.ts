@@ -84,6 +84,16 @@ const ReposSchema = z.object({
 	attributeKeys: z.array(z.string()).default([]),
 	mappings: z.array(RepoMappingSchema).default([]),
 	orgSearch: OrgSearchSchema.default({ enabled: false }),
+	/**
+	 * Config-file per-repository operator instructions, keyed by "owner/repo"
+	 * (matched case-insensitively). Precedence mirrors the repo-resolution
+	 * chain (dashboard-managed definitions beat this file): an enabled
+	 * RepoDefinition's own `systemPrompt` wins over the entry here, and either
+	 * one replaces the common system prompt for that repository. Blank values
+	 * are treated as unset. Read live per fix run by
+	 * `FixAgentRunner.resolveRepoSystemPrompt` -- never seeded into the DB.
+	 */
+	systemPrompts: z.record(z.string(), z.string()).default({}),
 });
 
 const AgentSchema = z.object({
@@ -112,6 +122,16 @@ const AgentSchema = z.object({
 	 * limitations").
 	 */
 	maxFixAttempts: z.number().int().positive().default(3),
+	/**
+	 * Config-file fallback for the common system prompt (operator instructions
+	 * shared by every repository). The dashboard-managed common prompt
+	 * (GET/PUT /system-prompt) takes precedence when set; a blank value here
+	 * is treated as unset. Unlike the dashboard/API surface there is no length
+	 * cap -- consistent with every other free-text field in this file -- but
+	 * the same context-budget consideration applies (see docs/spec.md section
+	 * 3.11).
+	 */
+	systemPrompt: z.string().optional(),
 });
 
 const GitHubSchema = z.object({
@@ -203,6 +223,7 @@ export const ConfigSchema = z.object({
 		attributeKeys: [],
 		mappings: [],
 		orgSearch: { enabled: false },
+		systemPrompts: {},
 	}),
 	agent: AgentSchema.default({
 		model: "anthropic/claude-sonnet-4-6",

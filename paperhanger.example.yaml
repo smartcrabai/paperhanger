@@ -89,6 +89,14 @@ repos:
   orgSearch:
     enabled: true
     org: my-org
+  # Per-repository operator instructions, keyed by "owner/repo" (matched
+  # case-insensitively). Replaces the common prompt below for that repository
+  # rather than stacking on top of it. A dashboard-managed repo definition's
+  # own systemPrompt takes precedence over the entry here.
+  # systemPrompts:
+  #   my-org/my-api: |
+  #     This service owns the payment ledger -- never widen a transaction
+  #     boundary to make a test pass.
 
 agent:
   model: anthropic/claude-sonnet-4-6
@@ -98,6 +106,13 @@ agent:
   draftPr: false
   forbiddenPaths:
     - ".github/workflows/**"
+  # Config-file fallback for the operator instructions shared by every
+  # repository. The dashboard-managed prompt (PUT /system-prompt) wins when
+  # set. Sent to the model on every diagnosis, so it spends context budget --
+  # and it never relaxes the guardrails below.
+  # systemPrompt: |
+  #   Prefer the smallest change that makes the failing behavior correct.
+  #   Never disable or weaken an existing test to make the suite pass.
   # Guardrail: reject a fix whose diff (additions + deletions) exceeds this.
   maxDiffLines: 500
   # Guardrail: max fix attempts (initial + test-failure retries) per incident

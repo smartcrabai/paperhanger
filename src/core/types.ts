@@ -115,6 +115,13 @@ export interface RepoDefinition {
 	setupScript?: string;
 	/** Overrides agent-host test auto-detection. */
 	testCommand?: string;
+	/**
+	 * Per-repository operator instructions prepended to this repo's fix-agent
+	 * runs. When set (non-blank), it replaces the common system prompt for
+	 * this repository; unset/blank inherits the common prompt (docs/spec.md
+	 * section 3.11).
+	 */
+	systemPrompt?: string;
 	/** Disabled definitions are ignored by resolver AND runner lookup. */
 	enabled: boolean;
 	/** ISO 8601 timestamp. */
@@ -130,18 +137,20 @@ export interface CreateRepoDefinitionInput {
 	mappings?: Array<Record<string, string>>;
 	setupScript?: string;
 	testCommand?: string;
+	systemPrompt?: string;
 	/** Defaults to `true`. */
 	enabled?: boolean;
 }
 
 /** Partial patch, same semantics as UpdateIncidentInput. Optional string fields
- *  accept null to clear (setupScript/testCommand). */
+ *  accept null to clear (setupScript/testCommand/systemPrompt). */
 export interface UpdateRepoDefinitionInput {
 	owner?: string;
 	repo?: string;
 	mappings?: Array<Record<string, string>>;
 	setupScript?: string | null;
 	testCommand?: string | null;
+	systemPrompt?: string | null;
 	enabled?: boolean;
 }
 
