@@ -7,9 +7,12 @@
       "dependencies": {
         "@flue/sdk": "2.0.1",
         "@opentelemetry/api": "^1.9.1",
+        "@opentelemetry/api-logs": "^0.220.0",
         "@opentelemetry/context-async-hooks": "^2.9.0",
+        "@opentelemetry/exporter-logs-otlp-proto": "^0.220.0",
         "@opentelemetry/exporter-trace-otlp-proto": "^0.220.0",
         "@opentelemetry/resources": "^2.9.0",
+        "@opentelemetry/sdk-logs": "^0.220.0",
         "@opentelemetry/sdk-trace-base": "^2.9.0",
         "@typescript/native-preview": "^7.0.0-dev.20260707.2",
         "react": "^19.2.8",
@@ -18,9 +21,6 @@
       },
       "devDependencies": {
         "@biomejs/biome": "2.5.4",
-        "@opentelemetry/api-logs": "^0.220.0",
-        "@opentelemetry/exporter-logs-otlp-proto": "^0.220.0",
-        "@opentelemetry/sdk-logs": "^0.220.0",
         "@types/bun": "latest",
         "@types/react": "^19.2.17",
         "@types/react-dom": "^19.2.3",

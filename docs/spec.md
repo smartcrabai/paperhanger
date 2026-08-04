@@ -104,7 +104,7 @@ interface RepoDefinitionStore {
 
 ### 3.4 Telemetry Collector(テレメトリ収集・抽象化)
 
-- `TelemetrySource` インターフェースで抽象化。**初期実装は GreptimeDB 直クエリのみ**
+- `TelemetrySource` インターフェースで抽象化。実装は GreptimeDB 直クエリに加え、Grafana OSS スタック向けの Loki/Tempo/Prometheus(いずれも単一シグナル専用。詳細は後述)
 
 ```ts
 interface TelemetryQuery {
@@ -121,14 +121,19 @@ interface TelemetrySource {
 }
 ```
 
-- GreptimeDB 実装: HTTP SQL API(logs/traces)+ PromQL 互換 API(metrics)
+- GreptimeDB 実装: HTTP SQL API(logs/traces)+ PromQL 互換 API(metrics)。1 バックエンドで 3 シグナルすべてを担う
+- Loki/Tempo/Prometheus 実装(Grafana OSS スタック向け): それぞれ 1 シグナルのみを担う単機能バックエンドとして実装(Loki は logs のみ、Tempo は traces のみ、Prometheus は metrics のみ)。`telemetry.source` は 4 択の排他選択であり、複数バックエンドを同時設定する仕組みは持たない。担当外のシグナルへのクエリは失敗させず、警告ログを出して空配列を返す(後述の「収集戦略」を止めない)
+  - Loki: `GET /loki/api/v1/query_range` に LogQL を渡す。ラベルセレクタは `service.name` 等から解決し、`severity` 規約は `severity_number >= 17`(ERROR 相当)にマッピング
+  - Tempo: `trace_id` 指定時は `GET /api/traces/{traceID}` で完全な OTLP 形式のトレースを取得し、未指定時は `GET /api/search` に TraceQL(`status=error || duration>50ms` 相当)を渡して代表スパンを取得。ただし `/api/search` はスパンの一部フィールド(name/kind/parentSpanId 等)を返さないため、トレース単位のフォールバック値で補う
+  - Prometheus: `GET /api/v1/query_range` に PromQL を渡す。GreptimeDB 実装と同じ契約(後述の手順 3 で `promql`/`metric` ヒントがある場合のみ実行)を踏襲
+  - いずれも Flue の追加クエリ Tool(後述)には未接続。追加クエリ Tool は現時点で GreptimeDB のみ対応
 - **収集戦略**(自動収集フェーズ):
   1. アラートのラベルから `service.name` 等を特定し、時間窓内のエラーログを取得(特定できない場合は時間窓のみで件数を絞って取得)
   2. エラーログに紐づく `trace_id` から代表トレースを取得。加えてサービスの代表的なスパンもサンプリング取得
   3. **メトリクスはアラートの `annotations` に `promql` または `metric` キーがある場合のみ取得**。無ければ取得自体を行わず、その旨を notes に記録するのみ
   4. 収集結果がトークン予算を超える場合、優先度の低いものから順に削減(メトリクス→トレース→非例外ログ→例外/スタックトレースを含むログ)。スタックトレース・例外メッセージらしさの判定は独立した抽出ステップではなく、この削減時の優先度判定にのみ使う
 - 収集結果はトークン予算内に収まるようサンプリング・要約して `IncidentContext` に整形
-- さらに **Flue の Tool としても公開**し、エージェントが診断中に追加クエリを発行できるようにする(将来: Loki/Tempo/Prometheus 実装を追加)
+- さらに **Flue の Tool としても公開**し、エージェントが診断中に追加クエリを発行できるようにする(現時点では GreptimeDB のみ対応。Loki/Tempo/Prometheus をこの Tool に接続するのは将来課題)
 
 ### 3.5 Repo Resolver(修正対象リポジトリの解決)
 

@@ -38,9 +38,12 @@ sources:
   # sentry:
   #   secret: ${SENTRY_WEBHOOK_SECRET}
 
-# Discriminated union on `source` (like `storage`/`notifiers` above); "greptimedb"
-# is the only backend today. Omit the whole `telemetry` section to run without
-# one (see the config reference below).
+# Discriminated union on `source` (like `storage`/`notifiers` above); exactly
+# one of "greptimedb", "loki", "tempo", "prometheus" is active at a time. Omit
+# the whole `telemetry` section to run without one (see the config reference
+# below). "loki"/"tempo"/"prometheus" are single-signal sources -- pick this
+# one if you run a Grafana OSS stack with those three as separate backends,
+# rather than GreptimeDB's single do-everything endpoint.
 telemetry:
   source: greptimedb
   url: ${GREPTIMEDB_URL}
@@ -51,6 +54,32 @@ telemetry:
   # logsTable: opentelemetry_logs
   # tracesTable: opentelemetry_traces
   # timeoutMs: 30000
+
+# Alternative telemetry sources for a Grafana OSS stack (Loki/Tempo/
+# Prometheus), each single-signal: queries for the other two signals log a
+# warning and return no results rather than failing. Only one `telemetry`
+# section may be active -- these are mutually exclusive with the block above
+# and with each other.
+#
+# telemetry:
+#   source: loki
+#   url: ${LOKI_URL}
+#   auth: ${LOKI_AUTH}
+#   # Optional: `X-Scope-OrgID` tenant header, for multi-tenant deployments.
+#   # orgId: ${LOKI_ORG_ID}
+#   # timeoutMs: 30000
+#
+# telemetry:
+#   source: tempo
+#   url: ${TEMPO_URL}
+#   auth: ${TEMPO_AUTH}
+#   # timeoutMs: 30000
+#
+# telemetry:
+#   source: prometheus
+#   url: ${PROMETHEUS_URL}
+#   auth: ${PROMETHEUS_AUTH}
+#   # timeoutMs: 30000
 
 # Self-instrumentation: where paperhanger exports ITS OWN OTLP traces (see
 # src/observability/tracing.ts). Distinct from `telemetry` above, which is

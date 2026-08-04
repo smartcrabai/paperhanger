@@ -186,6 +186,62 @@ github:
 		expect(config.github.privateKey).toBe("private-key-value");
 	});
 
+	async function loadSingleSignalTelemetryFixture(
+		source: "loki" | "tempo" | "prometheus",
+		host: string,
+	) {
+		process.env.GRAFANA_WEBHOOK_SECRET = "grafana-secret";
+		process.env.GITHUB_APP_ID = "app-id-value";
+		process.env.GITHUB_APP_PRIVATE_KEY = "private-key-value";
+
+		const yaml = `
+storage:
+  driver: sqlite
+  path: /data/paperhanger.db
+sources:
+  grafana:
+    secret: \${GRAFANA_WEBHOOK_SECRET}
+telemetry:
+  source: ${source}
+  url: http://${host}
+github:
+  appId: \${GITHUB_APP_ID}
+  privateKey: \${GITHUB_APP_PRIVATE_KEY}
+`;
+		const path = await writeFixture(yaml);
+		return loadConfig(path);
+	}
+
+	test("loads a loki telemetry section (single-signal Grafana OSS source)", async () => {
+		const config = await loadSingleSignalTelemetryFixture("loki", "loki:3100");
+		expect(config.telemetry?.source).toBe("loki");
+		if (config.telemetry?.source === "loki") {
+			expect(config.telemetry.url).toBe("http://loki:3100");
+		}
+	});
+
+	test("loads a tempo telemetry section (single-signal Grafana OSS source)", async () => {
+		const config = await loadSingleSignalTelemetryFixture(
+			"tempo",
+			"tempo:3200",
+		);
+		expect(config.telemetry?.source).toBe("tempo");
+		if (config.telemetry?.source === "tempo") {
+			expect(config.telemetry.url).toBe("http://tempo:3200");
+		}
+	});
+
+	test("loads a prometheus telemetry section (single-signal Grafana OSS source)", async () => {
+		const config = await loadSingleSignalTelemetryFixture(
+			"prometheus",
+			"prometheus:9090",
+		);
+		expect(config.telemetry?.source).toBe("prometheus");
+		if (config.telemetry?.source === "prometheus") {
+			expect(config.telemetry.url).toBe("http://prometheus:9090");
+		}
+	});
+
 	test("throws when a referenced environment variable is unset", async () => {
 		// Intentionally leave GRAFANA_WEBHOOK_SECRET etc. unset.
 		const path = await writeFixture(MINIMAL_YAML);

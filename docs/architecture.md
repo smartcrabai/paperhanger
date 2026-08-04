@@ -58,7 +58,11 @@ src/
     postgres.ts            # Bun.sql implementation (all interfaces)
   telemetry/
     types.ts               # TelemetrySource, LogRecord, TraceRecord, MetricSeries
-    greptimedb.ts          # HTTP SQL + PromQL-compatible API client
+    greptimedb.ts          # HTTP SQL + PromQL-compatible API client (logs+traces+metrics)
+    loki.ts                # LogQL HTTP client (logs only; Grafana OSS stack)
+    tempo.ts               # TraceQL search + trace-by-id HTTP client (traces only; Grafana OSS stack)
+    prometheus.ts          # PromQL HTTP client (metrics only; Grafana OSS stack)
+    factory.ts             # Dispatches config.telemetry.source -> concrete TelemetrySource
     context-builder.ts     # Collection strategy → token-budget-aware IncidentContext
   repo/
     resolver.ts            # attribute → mapping → org-search resolution chain
