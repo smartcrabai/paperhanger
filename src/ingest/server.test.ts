@@ -27,6 +27,7 @@ import {
 	type IncidentStore,
 	type RepoDefinitionStore,
 } from "../storage/types";
+import type { LogRecord, TelemetrySource } from "../telemetry/types";
 import type { SourceAdapter } from "./adapters/types";
 import { createServer, parseListLimit } from "./server";
 
@@ -366,6 +367,19 @@ function bearerHeaders(token: string): Record<string, string> {
 	return { authorization: `Bearer ${token}` };
 }
 
+/** Minimal `TelemetrySource` stub for exercising `POST /telemetry/query` -- see `../telemetry/followup.test.ts` for dispatcher-logic coverage; this file only needs the route/auth wiring around it. */
+function fakeTelemetrySource(
+	overrides: Partial<TelemetrySource> = {},
+): TelemetrySource {
+	return {
+		name: "fake",
+		queryLogs: async () => [],
+		queryTraces: async () => [],
+		queryMetrics: async () => [],
+		...overrides,
+	};
+}
+
 describe("ingest server", () => {
 	let server: ReturnType<typeof createServer>;
 	let baseUrl: string;
@@ -381,6 +395,8 @@ describe("ingest server", () => {
 		repoDefinitions?: RepoDefinitionStore;
 		commonSetupScripts?: CommonSetupScriptStore;
 		commonSystemPrompt?: CommonSystemPromptStore;
+		telemetrySource?: TelemetrySource;
+		telemetryCallbackToken?: string;
 		tracer?: Tracer;
 		manager?: IncidentManager;
 		logger?: Logger;
@@ -407,6 +423,8 @@ describe("ingest server", () => {
 				options?.commonSetupScripts ?? fakeCommonSetupScriptStore(),
 			commonSystemPrompt:
 				options?.commonSystemPrompt ?? fakeCommonSystemPromptStore(),
+			telemetrySource: options?.telemetrySource,
+			telemetryCallbackToken: options?.telemetryCallbackToken,
 			tracer: options?.tracer,
 		});
 		baseUrl = `http://localhost:${server.port}`;
@@ -1600,6 +1618,219 @@ describe("ingest server", () => {
 				const res = await fetch(`${baseUrl}${path}`, init);
 				expect(res.status).toBe(401);
 			}
+		});
+	});
+
+	describe("POST /telemetry/query", () => {
+		const CALLBACK_TOKEN = "telemetry-callback-token";
+		const VALID_BODY = {
+			signal: "logs",
+			timeRange: { from: "2026-01-01T00:00:00Z", to: "2026-01-01T00:05:00Z" },
+		};
+
+		test("returns 503 when no telemetry source is configured", async () => {
+			server.stop(true);
+			startServer({ telemetryCallbackToken: CALLBACK_TOKEN });
+
+			const res = await fetch(`${baseUrl}/telemetry/query`, {
+				method: "POST",
+				headers: bearerHeaders(CALLBACK_TOKEN),
+				body: JSON.stringify(VALID_BODY),
+			});
+			expect(res.status).toBe(503);
+		});
+
+		test("returns 503 when a telemetry source is configured but no callback token is", async () => {
+			server.stop(true);
+			startServer({ telemetrySource: fakeTelemetrySource() });
+
+			const res = await fetch(`${baseUrl}/telemetry/query`, {
+				method: "POST",
+				headers: bearerHeaders("anything"),
+				body: JSON.stringify(VALID_BODY),
+			});
+			expect(res.status).toBe(503);
+		});
+
+		test("returns 401 when the callback token is missing or wrong", async () => {
+			server.stop(true);
+			startServer({
+				telemetrySource: fakeTelemetrySource(),
+				telemetryCallbackToken: CALLBACK_TOKEN,
+			});
+
+			const noToken = await fetch(`${baseUrl}/telemetry/query`, {
+				method: "POST",
+				body: JSON.stringify(VALID_BODY),
+			});
+			expect(noToken.status).toBe(401);
+
+			const wrongToken = await fetch(`${baseUrl}/telemetry/query`, {
+				method: "POST",
+				headers: bearerHeaders("wrong-token"),
+				body: JSON.stringify(VALID_BODY),
+			});
+			expect(wrongToken.status).toBe(401);
+		});
+
+		test("rejects server.apiToken -- the two tokens are deliberately separate grants", async () => {
+			server.stop(true);
+			startServer({
+				telemetrySource: fakeTelemetrySource(),
+				telemetryCallbackToken: CALLBACK_TOKEN,
+			});
+
+			const res = await fetch(`${baseUrl}/telemetry/query`, {
+				method: "POST",
+				headers: bearerHeaders(API_TOKEN),
+				body: JSON.stringify(VALID_BODY),
+			});
+			expect(res.status).toBe(401);
+		});
+
+		test("accepts the correct callback token and dispatches to the configured telemetry source", async () => {
+			server.stop(true);
+			startServer({
+				telemetrySource: fakeTelemetrySource({
+					// Widened intentionally: this test only cares that the route's
+					// JSON response round-trips whatever the source returns, not
+					// that it's a fully-shaped `LogRecord`.
+					queryLogs: async () => [{ body: "boom" }] as unknown as LogRecord[],
+				}),
+				telemetryCallbackToken: CALLBACK_TOKEN,
+			});
+
+			const res = await fetch(`${baseUrl}/telemetry/query`, {
+				method: "POST",
+				headers: bearerHeaders(CALLBACK_TOKEN),
+				body: JSON.stringify(VALID_BODY),
+			});
+			expect(res.status).toBe(200);
+			expect(await res.json()).toEqual({
+				logs: [{ body: "boom" }],
+				truncated: false,
+				notes: [],
+			});
+		});
+
+		test("also accepts the token via X-Api-Token, matching the checkApiToken convention", async () => {
+			server.stop(true);
+			startServer({
+				telemetrySource: fakeTelemetrySource(),
+				telemetryCallbackToken: CALLBACK_TOKEN,
+			});
+
+			const res = await fetch(`${baseUrl}/telemetry/query`, {
+				method: "POST",
+				headers: { "x-api-token": CALLBACK_TOKEN },
+				body: JSON.stringify(VALID_BODY),
+			});
+			expect(res.status).toBe(200);
+		});
+
+		test("rejects GET with 405 (POST only)", async () => {
+			server.stop(true);
+			startServer({
+				telemetrySource: fakeTelemetrySource(),
+				telemetryCallbackToken: CALLBACK_TOKEN,
+			});
+
+			const res = await fetch(`${baseUrl}/telemetry/query`, {
+				method: "GET",
+				headers: bearerHeaders(CALLBACK_TOKEN),
+			});
+			expect(res.status).toBe(405);
+		});
+
+		test("returns 400 on unparseable JSON", async () => {
+			server.stop(true);
+			startServer({
+				telemetrySource: fakeTelemetrySource(),
+				telemetryCallbackToken: CALLBACK_TOKEN,
+			});
+
+			const res = await fetch(`${baseUrl}/telemetry/query`, {
+				method: "POST",
+				headers: bearerHeaders(CALLBACK_TOKEN),
+				body: "not json",
+			});
+			expect(res.status).toBe(400);
+		});
+
+		test("returns 400 on a body that fails schema validation (bad signal)", async () => {
+			server.stop(true);
+			startServer({
+				telemetrySource: fakeTelemetrySource(),
+				telemetryCallbackToken: CALLBACK_TOKEN,
+			});
+
+			const res = await fetch(`${baseUrl}/telemetry/query`, {
+				method: "POST",
+				headers: bearerHeaders(CALLBACK_TOKEN),
+				body: JSON.stringify({ ...VALID_BODY, signal: "not-a-signal" }),
+			});
+			expect(res.status).toBe(400);
+		});
+
+		test("returns 400 when the sql-guard rejects an `expression`", async () => {
+			server.stop(true);
+			startServer({
+				telemetrySource: fakeTelemetrySource({
+					name: "greptimedb",
+					runRawSql: async () => [],
+				}),
+				telemetryCallbackToken: CALLBACK_TOKEN,
+			});
+
+			const res = await fetch(`${baseUrl}/telemetry/query`, {
+				method: "POST",
+				headers: bearerHeaders(CALLBACK_TOKEN),
+				body: JSON.stringify({
+					...VALID_BODY,
+					expression: "DELETE FROM opentelemetry_logs",
+				}),
+			});
+			expect(res.status).toBe(400);
+		});
+
+		test("returns 502 when the telemetry source throws (backend failure)", async () => {
+			server.stop(true);
+			startServer({
+				telemetrySource: fakeTelemetrySource({
+					queryLogs: async () => {
+						throw new Error("upstream timed out");
+					},
+				}),
+				telemetryCallbackToken: CALLBACK_TOKEN,
+			});
+
+			const res = await fetch(`${baseUrl}/telemetry/query`, {
+				method: "POST",
+				headers: bearerHeaders(CALLBACK_TOKEN),
+				body: JSON.stringify(VALID_BODY),
+			});
+			expect(res.status).toBe(502);
+			expect(await res.text()).toContain("upstream timed out");
+		});
+
+		test("resolves structurally-unsupported queries (metrics without expression) as 200 with a note, not a failure", async () => {
+			server.stop(true);
+			startServer({
+				telemetrySource: fakeTelemetrySource(),
+				telemetryCallbackToken: CALLBACK_TOKEN,
+			});
+
+			const res = await fetch(`${baseUrl}/telemetry/query`, {
+				method: "POST",
+				headers: bearerHeaders(CALLBACK_TOKEN),
+				body: JSON.stringify({
+					signal: "metrics",
+					timeRange: VALID_BODY.timeRange,
+				}),
+			});
+			expect(res.status).toBe(200);
+			const body = (await res.json()) as { notes: string[] };
+			expect(body.notes.length).toBeGreaterThan(0);
 		});
 	});
 

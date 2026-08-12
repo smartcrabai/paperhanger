@@ -47,24 +47,6 @@ export const LimitsSchema = v.object({
 	maxFixAttempts: v.number(),
 });
 
-/**
- * `telemetry` is a discriminated union on `source`, mirroring the parent
- * repo's `src/config/schema.ts` `TelemetrySchema` -- `greptimedb` is the
- * only member today. Keep this and the parent repo's
- * `src/agent/contract.ts` `FixAgentTelemetryConfigSchema` in sync when a new
- * source is added.
- */
-export const GreptimeDbTelemetryConfigSchema = v.object({
-	source: v.literal("greptimedb"),
-	url: v.string(),
-	database: v.string(),
-	auth: v.optional(v.string()),
-});
-
-export const TelemetryConfigSchema = v.variant("source", [
-	GreptimeDbTelemetryConfigSchema,
-]);
-
 export const FixIncidentInputSchema = v.object({
 	incidentId: v.string(),
 	contextMarkdown: v.string(),
@@ -72,7 +54,6 @@ export const FixIncidentInputSchema = v.object({
 	repo: RepoInputSchema,
 	limits: LimitsSchema,
 	forbiddenPaths: v.array(v.string()),
-	telemetry: v.optional(TelemetryConfigSchema),
 	/** Dashboard-managed operator instructions shared by every repository. */
 	systemPrompt: v.optional(v.string()),
 	/**
@@ -103,7 +84,6 @@ export const FixIncidentOutputSchema = v.object({
 export type Alert = v.InferOutput<typeof AlertSchema>;
 export type RepoInput = v.InferOutput<typeof RepoInputSchema>;
 export type Limits = v.InferOutput<typeof LimitsSchema>;
-export type TelemetryConfig = v.InferOutput<typeof TelemetryConfigSchema>;
 export type FixIncidentInput = v.InferOutput<typeof FixIncidentInputSchema>;
 export type Fix = v.InferOutput<typeof FixSchema>;
 export type FixIncidentOutput = v.InferOutput<typeof FixIncidentOutputSchema>;

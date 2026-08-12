@@ -421,7 +421,7 @@ export class GreptimeDbSource implements TelemetrySource {
 	 */
 	private async withQuerySpan<T>(
 		spanName: string,
-		kind: "logs" | "traces" | "metrics",
+		kind: "logs" | "traces" | "metrics" | "raw",
 		attributes: Attributes,
 		fn: (span: Span) => Promise<T>,
 	): Promise<T> {
@@ -647,6 +647,26 @@ export class GreptimeDbSource implements TelemetrySource {
 				}
 				return parsePrometheusResponse(parsed);
 			},
+		);
+	}
+
+	/**
+	 * Native-expression escape hatch for the `query_telemetry` follow-up
+	 * tool's `expression` field (see `TelemetrySource.runRawSql`'s doc
+	 * comment in types.ts and `src/telemetry/followup.ts`). The caller
+	 * (`followup.ts`) is responsible for applying
+	 * `agent-host/src/lib/sql-guard.ts`'s single-statement, read-only check
+	 * before calling this -- this method itself does not re-validate `sql`,
+	 * matching `runSql`'s existing contract for the initial-collection
+	 * queries above (whose SQL text this class builds itself and never needs
+	 * guarding).
+	 */
+	async runRawSql(sql: string): Promise<Record<string, unknown>[]> {
+		return this.withQuerySpan(
+			"greptimedb.run_raw_sql",
+			"raw",
+			{ "db.collection.name": this.database },
+			() => this.runSql(sql),
 		);
 	}
 

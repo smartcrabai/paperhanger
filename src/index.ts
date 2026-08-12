@@ -81,6 +81,55 @@ function buildNotifier(
 	}
 }
 
+/**
+ * Generates a random per-boot bearer token for the internal-mode telemetry
+ * follow-up-query callback (see `buildTelemetryCallback` below). Two
+ * concatenated UUIDs for a comfortable entropy margin over a single one;
+ * this never needs to be persisted or remembered across restarts, so a
+ * fresh value every boot is fine.
+ */
+function randomCallbackToken(): string {
+	return `${crypto.randomUUID()}${crypto.randomUUID()}`.replace(/-/g, "");
+}
+
+/**
+ * Builds the agent-host sidecar's telemetry follow-up-query callback config
+ * (see `AgentHostSidecarConfig.telemetryCallback`'s doc comment in
+ * `src/agent/sidecar.ts`), or `undefined` when follow-up telemetry queries
+ * aren't available for this deployment:
+ *
+ * - No `telemetry` backend configured at all -- nothing to dispatch to.
+ * - External agent-host mode (`agent.hostUrl` set) with no
+ *   `agent.telemetryCallbackToken` configured -- there is no spawn env to
+ *   carry a locally generated token to a separately deployed process, so the
+ *   operator must supply one explicitly (see that config field's doc
+ *   comment); absent that, `query_telemetry` degrades to unavailable rather
+ *   than serving the callback route unauthenticated.
+ *
+ * In internal (spawned-child) mode, by contrast, a random per-boot token
+ * needs no configuration at all: it's generated here and handed to the
+ * child through its own spawn env, never persisted.
+ */
+function buildTelemetryCallback(
+	config: Config,
+	isExternalAgentHost: boolean,
+): { url: string; token: string; source: string } | undefined {
+	if (!config.telemetry) {
+		return undefined;
+	}
+	const token = isExternalAgentHost
+		? config.agent.telemetryCallbackToken
+		: randomCallbackToken();
+	if (!token) {
+		return undefined;
+	}
+	return {
+		url: `http://127.0.0.1:${config.server.port}/telemetry/query`,
+		token,
+		source: config.telemetry.source,
+	};
+}
+
 async function main(): Promise<void> {
 	const config = await loadConfig();
 
@@ -134,11 +183,14 @@ async function main(): Promise<void> {
 		store,
 	);
 
+	const isExternalAgentHost = Boolean(config.agent.hostUrl);
+	const telemetryCallback = buildTelemetryCallback(config, isExternalAgentHost);
+
 	// `AgentHostSidecar` handles both modes itself: `start()` spawns the Node
 	// child process in the default (internal) mode, and is a no-op when
 	// `agent.hostUrl` points at an externally deployed agent-host instead.
 	const sidecar = new AgentHostSidecar({
-		config: { agent: config.agent, telemetry: config.telemetry },
+		config: { agent: config.agent, telemetryCallback },
 		logger: logger.child({ component: "agent-host-sidecar" }),
 		serverPath: Bun.env.AGENT_HOST_SERVER_PATH,
 		nodeBinPath: Bun.env.AGENT_HOST_NODE_PATH,
@@ -161,7 +213,7 @@ async function main(): Promise<void> {
 		repoDefinitions: store,
 		commonSetupScripts: store,
 		commonSystemPrompt: store,
-		config: { agent: config.agent, telemetry: config.telemetry },
+		config: { agent: config.agent },
 		logger: logger.child({ component: "fix-agent-runner" }),
 		tracer: tracing.getTracer("fix-agent-runner"),
 	});
@@ -214,6 +266,8 @@ async function main(): Promise<void> {
 		repoDefinitions: store,
 		commonSetupScripts: store,
 		commonSystemPrompt: store,
+		telemetrySource,
+		telemetryCallbackToken: telemetryCallback?.token,
 		tracer: tracing.getTracer("server"),
 		htmlRoutes: { "/": dashboard, "/dashboard": dashboard },
 	});
@@ -222,6 +276,7 @@ async function main(): Promise<void> {
 		port: server.port,
 		storageDriver: config.storage.driver,
 		telemetryConfigured: telemetrySource !== undefined,
+		telemetryFollowUpAvailable: telemetryCallback !== undefined,
 		agentHostMode: sidecar.isExternal ? "external" : "internal",
 		notifierCount: config.notifiers.length,
 		tracingEnabled: config.observability !== undefined,

@@ -110,6 +110,24 @@ export interface TelemetrySource {
 	queryMetrics(
 		query: TelemetryQuery & { promql?: string },
 	): Promise<MetricSeries[]>;
+	/**
+	 * Optional native-expression escape hatch for the `query_telemetry`
+	 * follow-up tool's logs/traces `expression` field (see
+	 * `src/telemetry/followup.ts` and docs/spec.md section 3.4). Runs a single
+	 * read-only statement and returns raw rows -- unlike `queryLogs`/
+	 * `queryTraces`, the result shape is whatever the statement projects, not
+	 * a normalized `LogRecord`/`TraceRecord`.
+	 *
+	 * Only `GreptimeDbSource` implements this today: its SQL text carries real
+	 * expressive power beyond the flat `TelemetryQuery` label-filter shape,
+	 * and `agent-host/src/lib/sql-guard.ts` already guards single-statement,
+	 * read-only SQL for it. Sources that don't implement this leave it
+	 * `undefined`; `followup.ts` degrades to a "structurally unsupported"
+	 * note rather than crashing or asserting on that absence -- this also
+	 * covers a future `composite` source transparently, whether or not it
+	 * chooses to implement raw SQL itself.
+	 */
+	runRawSql?(sql: string): Promise<Record<string, unknown>[]>;
 }
 
 /** Collected telemetry for a single incident/alert. */

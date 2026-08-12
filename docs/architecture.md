@@ -42,7 +42,7 @@ src/
     incident-manager.ts    # Dedup, cooldown, lifecycle, concurrency-limited queue
     pipeline.ts            # Stage orchestration: collect → resolve → agent → notify
   ingest/
-    server.ts              # Bun.serve routes: POST /webhooks/:source, /healthz, /readyz, GET /incidents(+:id, +:id/events), /repo-definitions + /setup-scripts + /system-prompt CRUD, GET / + /dashboard (htmlRoutes passthrough)
+    server.ts              # Bun.serve routes: POST /webhooks/:source, /healthz, /readyz, GET /incidents(+:id, +:id/events), /repo-definitions + /setup-scripts + /system-prompt CRUD, POST /telemetry/query (agent-host's query_telemetry callback), GET / + /dashboard (htmlRoutes passthrough)
     repo-definitions.ts    # Zod validation + route handlers for the /repo-definitions CRUD routes (split out to keep server.ts readable)
     common-setup-scripts.ts # Zod validation + route handlers for the /setup-scripts CRUD routes
     system-prompt.ts       # Zod validation + route handlers for the single-row GET/PUT /system-prompt routes
@@ -74,6 +74,7 @@ src/
     composite.ts           # Routes logs/traces/metrics each to their own child TelemetrySource (source: composite)
     factory.ts             # Dispatches config.telemetry.source -> concrete TelemetrySource (recurses once for composite)
     context-builder.ts     # Collection strategy → token-budget-aware IncidentContext
+    followup.ts            # Dispatcher behind POST /telemetry/query: structured filter / expression escape hatch, clamping, failure semantics
   repo/
     resolver.ts            # attribute → mapping → org-search resolution chain
     github.ts              # GitHub App auth (JWT → installation token), PR client
@@ -113,8 +114,8 @@ agent-host/                # Flue app (Node.js sidecar) — separate package.jso
     fix-agent.ts           # "use agent" agent function: instructions + hooks (model, sandbox, tools, lifecycle)
     fix-incident.ts        # Deterministic host steps: clone → diagnose → fix → test → push branch (PR creation happens back in the parent Bun process)
     tools.ts               # defineTool: query_telemetry follow-up queries
-    telemetry-client.ts    # Minimal GreptimeDB HTTP client used by query_telemetry
-    lib/                   # common-setup-scripts, diagnosis-prompt, fix-attempt-policy, output-sanitizer, redaction, sql-guard, system-prompt, tamper-check, test-detection
+    telemetry-client.ts    # HTTP client for the parent's POST /telemetry/query callback (no direct backend access)
+    lib/                   # common-setup-scripts, diagnosis-prompt, fix-attempt-policy, output-sanitizer, redaction, sql-guard, system-prompt, tamper-check, test-detection, telemetry-descriptions
 tests/
   integration/             # testcontainers-based suites
 docs/
@@ -180,11 +181,13 @@ public HTTP API (docs URLs and verified request/response shapes live in
 each file's module doc comment):
 
 - `greptimedb` (`greptimedb.ts`): direct SQL + PromQL-compatible HTTP APIs.
-  The only backend today with a follow-up `query_telemetry` tool available
-  to the fix agent during diagnosis (`agent-host/src/tools.ts`) -- see the
-  doc comments on `AgentHostSidecarConfig.telemetry` (`src/agent/sidecar.ts`)
-  and `FixAgentRunnerConfig.telemetry` (`src/agent/runner.ts`) for why that
-  stays scoped to GreptimeDB rather than generalizing to every source below.
+  Also the only source implementing `TelemetrySource.runRawSql`, the raw-SQL
+  escape hatch the fix agent's `query_telemetry` follow-up tool can use for
+  `signal: "logs"`/`"traces"` (see `src/telemetry/followup.ts`). Every
+  source below is reachable through that same follow-up tool via the
+  parent's `POST /telemetry/query` callback -- there is no longer a
+  GreptimeDB-only carve-out for the tool itself, just this one
+  GreptimeDB-only capability within it.
 - `loki` / `tempo` / `prometheus` (`loki.ts` / `tempo.ts` / `prometheus.ts`):
   single-signal backends for a Grafana OSS stack that runs those three as
   separate services rather than GreptimeDB's one do-everything endpoint;
@@ -221,8 +224,13 @@ each file's module doc comment):
   deeper than one level. Per-signal error isolation: a slot's query failure
   degrades only that signal to `[]`, unlike the whole-incident degradation
   `src/core/pipeline.ts` applies to a single (non-composite) source's
-  failure. `query_telemetry` stays GreptimeDB-only exactly as above, even
-  when a composite slot happens to be `greptimedb`.
+  failure. A composite is proxied by `query_telemetry` like any other
+  source, and its structured follow-up queries route per signal through the
+  same slot children. It implements no `runRawSql`, though, so the raw-SQL
+  `expression` escape hatch resolves to the "not supported by this source"
+  note rather than reaching a backend -- there is no single SQL backend
+  behind a composite to reach, even when one slot happens to be
+  `greptimedb`.
 
 `src/telemetry/http-client.ts` factors the per-request timeout
 (`AbortController`-based) and OTel CLIENT span wrapping the `datadog`/
@@ -238,6 +246,49 @@ instance was available) -- their query construction and response mapping
 are verified against public API docs and covered by unit tests with a
 stubbed `fetch`, but not against real traffic. See each PR that introduced
 them for the equivalent caveat.
+
+### Follow-up telemetry queries (the `query_telemetry` proxy)
+
+The fix agent runs in `agent-host/`, a separate Node process that cannot
+import `src/telemetry/*` (see "Flue agent host" above), so its
+`query_telemetry` tool (`agent-host/src/tools.ts`) makes an HTTP callback
+into the parent's own `POST /telemetry/query` route
+(`src/ingest/server.ts`) instead of talking to any backend directly. The
+parent dispatches the request to whichever `TelemetrySource` `src/index.ts`
+already constructed (`src/telemetry/followup.ts`), reusing that source's
+existing escaping/validation rather than opening a second injection surface
+per backend. Structured `filter` (mapped onto `TelemetryQuery.labels`) is
+the main path; `expression` is a narrow escape hatch -- the backend-specific
+metric query for `signal: "metrics"`, or (GreptimeDB only) a single
+read-only SQL statement for `signal: "logs"/"traces"`, guarded by
+`agent-host/src/lib/sql-guard.ts` imported directly into `followup.ts` as
+the single canonical guard. A structurally unsupported query (a missing
+required hint, or `expression` against a source without `runRawSql`)
+resolves normally with an empty array and an explanatory note; a backend
+failure/timeout throws, surfacing as a tool error to the model.
+
+The callback route is gated by a DEDICATED bearer token, separate from
+`server.apiToken`, so telemetry-read permission is not the same grant as
+dashboard/incident CRUD. In the default internal (spawned-child) sidecar
+mode, `src/index.ts` generates a random per-boot token and passes it (plus
+the callback URL and configured source name) through the child's spawn env
+as three separate vars (`PAPERHANGER_TELEMETRY_CALLBACK_URL`/`_TOKEN`/
+`_SOURCE`) -- no persisted secret, no new configuration. This is also why
+the sidecar no longer forwards any backend URL/database/auth value to the
+agent-host process at all: the parent proxies every query itself. In
+external agent-host mode (`agent.hostUrl` set) there is no spawn env to use
+-- `src/index.ts` never spawns that process, so it never sets any env var on
+it -- so the operator must set `agent.telemetryCallbackToken` here AND
+configure all three env vars on the externally deployed agent-host's own
+environment themselves: `PAPERHANGER_TELEMETRY_CALLBACK_TOKEN` (matching
+this config's value), `PAPERHANGER_TELEMETRY_CALLBACK_URL` (this
+deployment's own externally-reachable `/telemetry/query` URL -- the internal
+`http://127.0.0.1:<server.port>/telemetry/query` default only works if that
+process shares this one's network namespace), and
+`PAPERHANGER_TELEMETRY_CALLBACK_SOURCE` (matching `config.telemetry.source`).
+Missing any of the three there, or the token here, degrades
+`query_telemetry` to unavailable rather than serving the route
+unauthenticated.
 
 ## Dashboard (repo definitions + incident browser)
 

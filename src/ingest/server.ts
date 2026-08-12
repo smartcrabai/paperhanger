@@ -22,6 +22,12 @@ import type {
 	IncidentStore,
 	RepoDefinitionStore,
 } from "../storage/types";
+import {
+	FollowUpTelemetryQueryRequestSchema,
+	FollowUpTelemetryQueryValidationError,
+	runFollowUpTelemetryQuery,
+} from "../telemetry/followup";
+import type { TelemetrySource } from "../telemetry/types";
 import type { SourceAdapter } from "./adapters/types";
 import {
 	handleCreateCommonSetupScript,
@@ -49,6 +55,7 @@ const REPO_DEFINITIONS_PATH_PREFIX = "/repo-definitions/";
 const COMMON_SETUP_SCRIPTS_PATH = "/setup-scripts";
 const COMMON_SETUP_SCRIPTS_PATH_PREFIX = "/setup-scripts/";
 const SYSTEM_PROMPT_PATH = "/system-prompt";
+const TELEMETRY_QUERY_PATH = "/telemetry/query";
 /** Cap on `GET /incidents` regardless of what a caller asks for via `?limit=`. */
 const MAX_INCIDENTS_LIST_LIMIT = 500;
 const DEFAULT_INCIDENTS_LIST_LIMIT = 100;
@@ -79,6 +86,22 @@ export interface ServerDeps {
 	commonSetupScripts: CommonSetupScriptStore;
 	/** Backs the dashboard's single GET/PUT `/system-prompt` operator-instruction editor. */
 	commonSystemPrompt: CommonSystemPromptStore;
+	/**
+	 * Backs `POST /telemetry/query` (the agent-host sidecar's `query_telemetry`
+	 * follow-up-query callback; see `../telemetry/followup.ts`). Undefined when
+	 * no telemetry backend is configured, in which case that route always
+	 * responds 503 -- there is nothing to dispatch to.
+	 */
+	telemetrySource?: TelemetrySource;
+	/**
+	 * Dedicated bearer token gating `POST /telemetry/query`, deliberately
+	 * separate from `config.server.apiToken` so that telemetry-read permission
+	 * is not the same grant as dashboard/incident CRUD (see `checkCallbackToken`
+	 * below). Undefined disables the route (503), matching `telemetrySource`'s
+	 * "nothing configured" case -- there is no unauthenticated fallback, the
+	 * same secure-by-default posture as `checkApiToken`.
+	 */
+	telemetryCallbackToken?: string;
 	/** Falls back to a no-op tracer (no global provider registered) when omitted. See docs/spec.md section 3.9. */
 	tracer?: Tracer;
 	/**
@@ -106,6 +129,7 @@ type RouteTemplate =
 	| "/setup-scripts"
 	| "/setup-scripts/:id"
 	| "/system-prompt"
+	| "/telemetry/query"
 	| "unmatched";
 
 /**
@@ -178,6 +202,9 @@ function deriveRouteTemplate(url: URL): RouteTemplate {
 	}
 	if (url.pathname === SYSTEM_PROMPT_PATH) {
 		return "/system-prompt";
+	}
+	if (url.pathname === TELEMETRY_QUERY_PATH) {
+		return "/telemetry/query";
 	}
 	if (incidentEventsIdFromPath(url.pathname) !== undefined) {
 		return "/incidents/:id/events";
@@ -264,6 +291,31 @@ function checkApiToken(
 	return undefined;
 }
 
+const TELEMETRY_QUERY_UNAVAILABLE_MESSAGE =
+	"telemetry follow-up queries are not available: no telemetry backend is configured, or (external agent-host mode) agent.telemetryCallbackToken is not set. See README.md's config reference.";
+
+/**
+ * Guards `POST /telemetry/query`. Deliberately a SEPARATE token from
+ * `checkApiToken`'s `config.server.apiToken` -- see `ServerDeps
+ * .telemetryCallbackToken`'s doc comment for why telemetry-read permission
+ * must not be the same grant as dashboard/incident CRUD. Returns a `Response`
+ * when the request should be rejected (503 when the route isn't configured at
+ * all, 401 on a missing/wrong token), or `undefined` when it may proceed.
+ */
+function checkCallbackToken(
+	deps: Pick<ServerDeps, "telemetrySource" | "telemetryCallbackToken">,
+	req: Request,
+): Response | undefined {
+	if (!deps.telemetrySource || !deps.telemetryCallbackToken) {
+		return new Response(TELEMETRY_QUERY_UNAVAILABLE_MESSAGE, { status: 503 });
+	}
+	const provided = extractApiToken(req);
+	if (!provided || !safeCompare(provided, deps.telemetryCallbackToken)) {
+		return new Response("unauthorized", { status: 401 });
+	}
+	return undefined;
+}
+
 export function createServer(deps: ServerDeps): ReturnType<typeof Bun.serve> {
 	const {
 		config,
@@ -338,6 +390,53 @@ export function createServer(deps: ServerDeps): ReturnType<typeof Bun.serve> {
 		span?.setAttribute("paperhanger.ingest.event_count", events.length);
 
 		return Response.json({ accepted: events.length }, { status: 202 });
+	}
+
+	/**
+	 * Handles the agent-host sidecar's `query_telemetry` follow-up-query
+	 * callback (see `../telemetry/followup.ts`'s module doc comment for the
+	 * full design). Auth (`checkCallbackToken`) and availability (503 when no
+	 * telemetry source/token is configured) are checked by the caller before
+	 * this runs.
+	 */
+	async function handleTelemetryQuery(req: Request): Promise<Response> {
+		let body: unknown;
+		try {
+			body = await req.json();
+		} catch {
+			return new Response("invalid JSON body", { status: 400 });
+		}
+		const parsed = FollowUpTelemetryQueryRequestSchema.safeParse(body);
+		if (!parsed.success) {
+			return new Response(
+				`invalid telemetry query request: ${parsed.error.message}`,
+				{ status: 400 },
+			);
+		}
+		// `telemetrySource` is guaranteed defined here: `checkCallbackToken`
+		// already 503'd when it was undefined, before this function is called.
+		const source = deps.telemetrySource as NonNullable<
+			ServerDeps["telemetrySource"]
+		>;
+		try {
+			const result = await runFollowUpTelemetryQuery(source, parsed.data);
+			return Response.json(result);
+		} catch (err) {
+			if (err instanceof FollowUpTelemetryQueryValidationError) {
+				return new Response(err.message, { status: 400 });
+			}
+			// Backend failure/timeout/HTTP error: never swallowed into an empty
+			// result (see the module doc comment's failure-semantics note).
+			// `err.message` here comes only from whatever the `TelemetrySource`
+			// itself threw -- none of those implementations place a
+			// credential/Authorization-header value into a thrown Error message
+			// (see src/telemetry/http-client.ts's doc comment) -- and this
+			// handler never appends anything from the inbound request's own
+			// auth headers to it.
+			const message = err instanceof Error ? err.message : String(err);
+			logger.warn("telemetry_query.backend_failed", { error: message });
+			return new Response(message, { status: 502 });
+		}
 	}
 
 	async function route(req: Request, url: URL): Promise<Response> {
@@ -415,6 +514,17 @@ export function createServer(deps: ServerDeps): ReturnType<typeof Bun.serve> {
 			if (req.method === "PUT") {
 				return handleSetCommonSystemPrompt(commonSystemPrompt, req);
 			}
+		}
+
+		if (url.pathname === TELEMETRY_QUERY_PATH) {
+			if (req.method !== "POST") {
+				return new Response("method not allowed", { status: 405 });
+			}
+			const authError = checkCallbackToken(deps, req);
+			if (authError) {
+				return authError;
+			}
+			return handleTelemetryQuery(req);
 		}
 
 		const repoDefinitionId = repoDefinitionIdFromPath(url.pathname);

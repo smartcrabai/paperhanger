@@ -24,13 +24,15 @@
  * a deliberate behavior difference from the single-source path, which is
  * unchanged.
  *
- * **Out of scope**: the agent-host follow-up `query_telemetry` tool stays
- * scoped to `source: "greptimedb"` (see the doc comment on `TelemetrySchema`
- * in `src/config/schema.ts`). `src/agent/sidecar.ts` and
- * `src/agent/runner.ts` narrow on `config.telemetry?.source === "greptimedb"`,
- * so `source: "composite"` always falls through to that tool being omitted
- * -- even when one of its slots happens to be greptimedb. This class plays
- * no part in that decision and does not attempt to special-case it.
+ * **Follow-up queries**: a composite is proxied by the agent-host's
+ * `query_telemetry` tool like any other source -- the parent dispatches each
+ * follow-up query to whichever `TelemetrySource` it constructed
+ * (`src/telemetry/followup.ts`), so structured queries route per signal
+ * through the same slot children as the initial collection does. This class
+ * deliberately implements no `runRawSql`, so the raw-SQL `expression`
+ * escape hatch resolves to that path's "not supported by this source" note:
+ * there is no single SQL backend behind a composite to run it against, even
+ * when one of its slots happens to be greptimedb.
  *
  * **Operational caveat -- cross-backend trace correlation**:
  * `context-builder.ts` pulls `trace_id` out of collected logs and uses it to
