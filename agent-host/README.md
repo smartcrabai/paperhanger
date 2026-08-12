@@ -35,12 +35,13 @@ agent-host/
     fix-agent.ts              # "use agent" agent function: instructions + hooks
     fix-incident.ts           # deterministic host steps: diagnose -> fix -> test -> push
     tools.ts                  # defineTool: query_telemetry
-    telemetry-client.ts        # minimal read-only GreptimeDB HTTP client
+    telemetry-client.ts        # HTTP client for the parent's POST /telemetry/query callback (no direct backend access, no backend credentials)
     lib/                       # pure, @flue/*-free modules -- unit tested by the
                                 # main repo's `bun test` (root package.json "test")
       redaction.ts              # clone-token extraction + multi-secret redaction
       output-sanitizer.ts        # central FixIncidentOutput redaction (collectSecrets/sanitizeOutput)
-      sql-guard.ts               # read-only single-statement SQL guard (telemetry-client.ts)
+      sql-guard.ts               # read-only single-statement SQL guard (imported by the PARENT's src/telemetry/followup.ts; see "The query_telemetry tool" below)
+      telemetry-descriptions.ts  # per-source query_telemetry tool description, with a safe default for an unrecognized source name
       test-detection.ts          # test-command selection from a file-existence probe
       fix-attempt-policy.ts       # pure retry/give-up/commit decision for the fix-retry loop
       tamper-check.ts            # remote/branch tamper-check comparison
@@ -97,12 +98,15 @@ cannot import this package directly):
   };
   limits: { timeoutMinutes: number; maxDiffLines: number; maxFixAttempts: number };
   forbiddenPaths: string[];
-  // Discriminated union on `source`; "greptimedb" is the only backend today
-  // (mirrors the parent repo's `src/config/schema.ts` `TelemetrySchema`).
-  telemetry?: { source: "greptimedb"; url: string; database: string; auth?: string };
   systemPrompt?: string;          // dashboard-managed operator instructions (all repos)
 }
 ```
+
+Note there is no `telemetry` field: the fix agent's `query_telemetry` tool
+gets its backend access through an env-configured HTTP callback into the
+parent process, not through the agent input -- see "The `query_telemetry`
+tool" below. This process never holds a telemetry backend's URL, database
+name, or auth value at all.
 
 Output (`FixIncidentOutputSchema`):
 
@@ -160,13 +164,15 @@ otherwise, and defends in depth at every stage:
    through a single `sanitizeOutput()` (`src/lib/output-sanitizer.ts`) right
    before `run()` returns, which redacts both the clone token — derived
    deterministically from `input.repo.cloneUrl` via `extractCloneToken`,
-   never by pattern-matching arbitrary text — and the telemetry backend's
-   auth value (`input.telemetry.auth`, for the current "greptimedb" source),
-   when configured. This replaces the
-   old approach of only redacting the workflow's own catch-block error
-   message: a model-authored `report`/`commitMessage` could in principle echo
-   either secret back (e.g. a `query_telemetry` tool result, or the model
-   deciding to `cat` something it shouldn't).
+   never by pattern-matching arbitrary text — and this process's own
+   telemetry callback token (`PAPERHANGER_TELEMETRY_CALLBACK_TOKEN`), when
+   set. This replaces the old approach of only redacting the workflow's own
+   catch-block error message: a model-authored `report`/`commitMessage`
+   could in principle echo either secret back (e.g. a `query_telemetry`
+   tool result, or the model deciding to `cat` something it shouldn't).
+   Note there is no telemetry backend URL/database/auth value to redact
+   here anymore -- this process never receives one; see "The
+   `query_telemetry` tool" below.
 5. **Named timeouts on every out-of-band git command** (`CLONE_SHELL_TIMEOUT_MS`
    = 5 min, `LOCAL_GIT_SHELL_TIMEOUT_MS` = 1 min, `PUSH_SHELL_TIMEOUT_MS` =
    2 min), so a hung `git` process can't stall an incident indefinitely the
@@ -190,29 +196,44 @@ agent-host/src`).
 
 `src/tools.ts` defines a `query_telemetry` tool so the model can run follow-up
 log/trace/metric queries during diagnosis, beyond what was already collected
-into `contextMarkdown`. `kind: "sql"` accepts only a single `SELECT`/`SHOW`/
-`DESC` statement (rejects writes and multi-statement input); `kind: "promql"`
-runs an instant or range query against GreptimeDB's Prometheus-compatible API.
+into `contextMarkdown`. Unlike the tool's original design, this process never
+talks to a telemetry backend directly: `run()` POSTs the request
+(`src/telemetry-client.ts`) to the parent repo's own `POST /telemetry/query`
+route, which dispatches it to whichever `TelemetrySource` the parent already
+constructed (`src/telemetry/followup.ts` in the parent repo) and reuses that
+source's existing escaping/validation. This works against every telemetry
+source the parent supports, not just GreptimeDB.
 
-The tool reads its telemetry backend config from a single `PAPERHANGER_TELEMETRY`
-environment variable — the whole `source`-discriminated config, serialized as
-JSON (set by the parent repo's sidecar when it spawns this process; see
-`buildSpawnEnv` in `src/agent/sidecar.ts`) — rather than from the
-per-invocation `telemetry` field on the agent input. Under the beta SDK this
-was forced (`defineAgent()`'s initializer never saw the run input); at Flue 2
-the agent function could read it via `useInitialData()`, but the env var is
-kept because one agent-host process serves one paperhanger deployment with
-one fixed telemetry backend, so env-var presence is an equivalent,
-always-correct signal for "is telemetry configured for this deployment" —
-tool registration is skipped entirely (`createTelemetryTools()` returns `[]`)
-when that env var is absent or fails to parse.
+The request shape is `{ signal: "logs"|"traces"|"metrics", timeRange, filter?,
+expression?, limit? }`. `filter` (structured label equality) is the main path;
+`expression` is a narrow escape hatch -- the backend-specific metric query for
+`signal: "metrics"`, or (GreptimeDB only) a single read-only SQL statement for
+`signal: "logs"`/`"traces"`. A query outside the configured source's
+capabilities (a missing required hint, or `expression` against a non-GreptimeDB
+source) comes back as an empty result with an explanatory `notes` entry rather
+than failing; a genuine backend failure/timeout throws, which `run()`
+propagates unchanged so Flue surfaces it to the model as a tool error for a
+retry-or-rephrase decision.
 
-`createTelemetryTools()` `switch`es on `config.source` to build the
-source-appropriate tool set (today: `query_telemetry` for `"greptimedb"`,
-backed by `src/telemetry-client.ts`). This `switch` is the single dispatch
-point in agent-host for telemetry backend kind — a future source (Loki,
-Tempo, ...) registers its own query kinds by adding a `case` here, mirroring
-the parent repo's `src/telemetry/factory.ts`, and nowhere else.
+The tool reads its callback config from three environment variables --
+`PAPERHANGER_TELEMETRY_CALLBACK_URL`, `_TOKEN`, and `_SOURCE` -- set by the
+parent repo's sidecar when it spawns this process (see `buildSpawnEnv` in
+`src/agent/sidecar.ts`). `_TOKEN` is a DEDICATED bearer token for that one
+route, deliberately separate from the parent's dashboard/incident-CRUD
+`server.apiToken`. Tool registration is skipped entirely
+(`createTelemetryTools()` returns `[]`) when any of the three is absent --
+covering both "no telemetry backend configured" and, in external agent-host
+mode, "the operator didn't set `agent.telemetryCallbackToken`" (see the
+parent repo's `src/config/schema.ts` for that config field).
+
+`_SOURCE` (the parent's `config.telemetry.source`) is used only to build the
+tool's `description` via `describeTelemetrySource`
+(`src/lib/telemetry-descriptions.ts`), so the model is told the real
+per-backend capability limits up front (e.g. Zabbix: logs are problem/event
+history, traces don't exist, metrics need an explicit item key). That lookup
+has a SAFE DEFAULT for a source name it doesn't recognize -- e.g. a future
+`composite` source -- so an unrecognized name degrades to a generic
+description rather than crashing or asserting.
 
 ## Sandbox
 
@@ -252,8 +273,11 @@ bundled `guide/sandboxes` doc), per-command env sanitization is not just
   `HF_TOKEN`, `KIMI_API_KEY`, `MINIMAX_API_KEY`, `MISTRAL_API_KEY`,
   `MOONSHOT_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`,
   `TOGETHER_API_KEY`, `XAI_API_KEY`, `ZAI_API_KEY`), plus
-  `PAPERHANGER_TELEMETRY` (which may carry a telemetry backend auth value),
-  are therefore **never** exposed to any model-facing shell, by construction
+  `PAPERHANGER_TELEMETRY_CALLBACK_TOKEN` (the dedicated bearer token for the
+  `query_telemetry` proxy's callback route -- see "The `query_telemetry`
+  tool" above; this process holds no telemetry backend URL/database/auth
+  value at all anymore), are therefore **never** exposed to any model-facing
+  shell, by construction
   — not because of any code added here, but because `local()` requires them
   to be explicitly opted in via `env`, and nothing in this app does that.
   `GITHUB_APP_PRIVATE_KEY` is a different case, not an example of the same
@@ -356,11 +380,11 @@ plus route admission (invalid `initialData` -> 400, valid -> 202). This does
 structural check, meant to catch contract drift and import/wiring errors, not
 full pipeline behavior.
 
-## Unit tests (`src/lib/`)
+## Unit tests (`src/lib/`, plus `tools.ts`/`telemetry-client.ts`)
 
 ```bash
 # From this directory:
-bun test src/lib
+bun test src
 
 # Or from the main repo root (this is what CI/`bun run test` actually runs):
 cd .. && bun run test   # -> bun test src agent-host/src
@@ -368,11 +392,19 @@ cd .. && bun run test   # -> bun test src agent-host/src
 
 Every `src/lib/*.ts` module is colocated with a `*.test.ts` suite runnable
 directly by **Bun**, unlike `scripts/smoke.mjs` (Node-only, see "Layout"
-above) or the rest of this package (which needs `agent-host`'s own
-`node_modules`/`vite build` cycle). This is the primary coverage for the
+above) or `fix-agent.ts`/`fix-incident.ts` (which import `local` from
+`@flue/runtime/node`, and so need `agent-host`'s own Node-only `bun
+install`/`vite build` cycle). This is the primary coverage for the
 security-relevant deterministic logic described under "Secret handling" and
 "Env sanitization" above: token extraction/redaction, the read-only SQL
 guard, test-command detection, and the remote/branch tamper check.
+
+`tools.ts` and `telemetry-client.ts` are colocated with their own
+`*.test.ts` too: unlike `fix-agent.ts`, they only import the non-Node
+`@flue/runtime` entrypoint (not `@flue/runtime/node`), which has no
+`node:sqlite` dependency and runs fine under Bun -- covering
+`createTelemetryTools()`'s env-var gating, the request/response schema, and
+the callback HTTP client's request/error handling.
 
 ## Version pinning
 

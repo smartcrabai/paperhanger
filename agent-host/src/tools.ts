@@ -2,103 +2,97 @@
  * Flue tool definitions for the fix agent. Currently just `query_telemetry`,
  * the follow-up telemetry query tool described in docs/spec.md section 3.4
  * ("further Tool ... additional queries during diagnosis").
+ *
+ * Unlike the tool's original GreptimeDB-only design, this version works
+ * against whatever telemetry backend the parent paperhanger deployment has
+ * configured (`config.telemetry.source` in the parent repo): the parent
+ * process itself proxies every follow-up query over its own
+ * `POST /telemetry/query` route, dispatching to the already-constructed
+ * `TelemetrySource` (`src/telemetry/followup.ts` in the parent repo) --
+ * agent-host never talks to a telemetry backend directly, and (crucially)
+ * never receives that backend's URL/database/auth at all. This removes
+ * agent-host's ONLY previous need to hold telemetry backend credentials.
  */
 
 import { defineTool } from "@flue/runtime";
 import * as v from "valibot";
-import { queryTelemetry, type TelemetryConfig } from "./telemetry-client.ts";
+import { describeTelemetrySource } from "./lib/telemetry-descriptions.ts";
+import {
+	queryTelemetry,
+	type TelemetryCallbackConfig,
+} from "./telemetry-client.ts";
 
 const QueryTelemetryInputSchema = v.object({
-	kind: v.picklist(["sql", "promql"]),
-	query: v.string(),
-	start: v.optional(v.string()),
-	end: v.optional(v.string()),
-	step: v.optional(v.string()),
+	signal: v.picklist(["logs", "traces", "metrics"]),
+	timeRange: v.object({
+		from: v.string(),
+		to: v.string(),
+	}),
+	filter: v.optional(v.record(v.string(), v.string())),
+	expression: v.optional(v.string()),
+	limit: v.optional(v.number()),
 });
 
 const QueryTelemetryOutputSchema = v.object({
-	kind: v.picklist(["sql", "promql"]),
-	rows: v.optional(v.array(v.record(v.string(), v.unknown()))),
-	series: v.optional(
-		v.array(
-			v.object({
-				metric: v.record(v.string(), v.string()),
-				values: v.array(v.tuple([v.number(), v.string()])),
-			}),
-		),
-	),
+	logs: v.optional(v.array(v.record(v.string(), v.unknown()))),
+	traces: v.optional(v.array(v.record(v.string(), v.unknown()))),
+	metrics: v.optional(v.array(v.record(v.string(), v.unknown()))),
 	truncated: v.boolean(),
+	notes: v.array(v.string()),
 });
 
 /**
- * Reads the telemetry backend config the sidecar passes through as a single
- * serialized JSON env var when it spawns this process (see `buildSpawnEnv`
- * in the parent repo's `src/agent/sidecar.ts`). Tool registration in
- * `../src/fix-agent.ts` is skipped entirely when this returns `undefined`.
- *
- * Note: the per-invocation agent input also carries an optional `telemetry`
- * field (see `contract.ts`) mirroring this same shape. The env var is used
- * here instead of that per-invocation value: under the beta SDK the agent
- * initializer had no access to the run input, and while Flue 2's agent
- * function could read it via `useInitialData()`, the sidecar always spawns
- * one agent-host process per paperhanger deployment with a fixed telemetry
- * backend, so env-var presence is an equivalent, always-correct signal for
- * "is telemetry configured for this deployment".
+ * Reads the telemetry callback config the sidecar passes through as three
+ * separate env vars when it spawns this process (see `buildSpawnEnv` in the
+ * parent repo's `src/agent/sidecar.ts`): the parent's own callback URL, a
+ * dedicated bearer token for it (never the same grant as the parent's
+ * dashboard/incident-CRUD `server.apiToken`), and the configured source name
+ * (used only to build this tool's description below). Tool registration in
+ * `./fix-agent.ts` is skipped entirely when any of the three is absent --
+ * mirroring the old single-env-var design's "no telemetry configured -> no
+ * tool" behavior, now also covering external agent-host mode with no
+ * `agent.telemetryCallbackToken` configured (see that config field's doc
+ * comment in the parent repo's `src/config/schema.ts`).
  */
-function telemetryConfigFromEnv(): TelemetryConfig | undefined {
-	const raw = process.env.PAPERHANGER_TELEMETRY;
-	if (!raw) {
+function telemetryCallbackConfigFromEnv(): TelemetryCallbackConfig | undefined {
+	const url = process.env.PAPERHANGER_TELEMETRY_CALLBACK_URL;
+	const token = process.env.PAPERHANGER_TELEMETRY_CALLBACK_TOKEN;
+	const source = process.env.PAPERHANGER_TELEMETRY_CALLBACK_SOURCE;
+	if (!url || !token || !source) {
 		return undefined;
 	}
-	try {
-		return JSON.parse(raw) as TelemetryConfig;
-	} catch {
-		// Malformed env var should never happen (the sidecar always emits
-		// valid JSON, see `buildSpawnEnv`); fail safe by disabling telemetry
-		// tools rather than crashing the whole agent-host process over a tool
-		// that's an enrichment, not a hard requirement, for diagnosis.
-		return undefined;
-	}
+	return { url, token, source };
 }
 
 /**
- * Returns `[query_telemetry]`, or `[]` when no telemetry backend is
- * configured. The `switch` below is the only place agent-host dispatches on
- * telemetry backend kind: a future source (e.g. Loki, Tempo) registers its
- * own query kinds by adding a `case` here, mirroring
- * `src/telemetry/factory.ts` in the parent repo.
+ * Returns `[query_telemetry]`, or `[]` when no telemetry callback is
+ * configured for this deployment. Unlike the previous design, there is no
+ * `switch` on backend kind here at all -- every source speaks the same
+ * request/response shape through the parent's callback route, so the only
+ * per-source variation left on this side is the tool's own `description`
+ * (`describeTelemetrySource`, `./lib/telemetry-descriptions.ts`), which
+ * degrades safely for a source name it doesn't specifically recognize.
  */
 export function createTelemetryTools() {
-	const config = telemetryConfigFromEnv();
+	const config = telemetryCallbackConfigFromEnv();
 	if (!config) {
 		return [];
 	}
 
-	switch (config.source) {
-		case "greptimedb":
-			return [
-				defineTool({
-					name: "query_telemetry",
-					description:
-						'Run a read-only follow-up query against the telemetry backend (GreptimeDB). For kind "sql", ' +
-						"only a single SELECT/SHOW/DESC statement is allowed (no writes, no multiple statements). " +
-						'For kind "promql", provide a PromQL expression; pass start/end (unix seconds) and step ' +
-						"for a range query, or omit them for an instant query. Use this to confirm or refute a " +
-						"root-cause hypothesis with additional evidence beyond what was already collected.",
-					input: QueryTelemetryInputSchema,
-					output: QueryTelemetryOutputSchema,
-					async run({ data }) {
-						return { output: await queryTelemetry(config, data) };
-					},
-				}),
-			];
-		default:
-			// Defensive only: `config.source` is typed as the literal
-			// "greptimedb" today, so this is unreachable through normal
-			// TypeScript-checked code paths. It's still reachable at runtime
-			// because `config` comes from `JSON.parse()`-ing an env var (a
-			// process boundary, not a type-checked in-memory value) -- fail
-			// safe with no tools rather than crashing the agent-host process.
-			return [];
-	}
+	return [
+		defineTool({
+			name: "query_telemetry",
+			description: describeTelemetrySource(config.source),
+			input: QueryTelemetryInputSchema,
+			output: QueryTelemetryOutputSchema,
+			async run({ data }) {
+				// Propagates unchanged on a backend failure/timeout/HTTP error --
+				// this is a tool error, which Flue surfaces to the model for a
+				// retry-or-rephrase decision. Telemetry follow-up is enrichment,
+				// not a hard requirement, so this must never fail the whole agent
+				// run (see `../fix-agent.ts`'s and this file's own callers).
+				return { output: await queryTelemetry(config, data) };
+			},
+		}),
+	];
 }

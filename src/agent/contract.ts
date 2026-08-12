@@ -45,23 +45,6 @@ export const FixAgentLimitsSchema = z.object({
 	maxFixAttempts: z.number().positive(),
 });
 
-/**
- * `telemetry` is a discriminated union on `source`, mirroring
- * `src/config/schema.ts`'s `TelemetrySchema` -- `greptimedb` is the only
- * member today. Keep this and `agent-host/src/contract.ts`'s
- * `TelemetryConfigSchema` in sync when a new source is added.
- */
-export const FixAgentGreptimeDbTelemetryConfigSchema = z.object({
-	source: z.literal("greptimedb"),
-	url: z.string().min(1),
-	database: z.string().min(1),
-	auth: z.string().optional(),
-});
-
-export const FixAgentTelemetryConfigSchema = z.discriminatedUnion("source", [
-	FixAgentGreptimeDbTelemetryConfigSchema,
-]);
-
 export const FixAgentInputSchema = z.object({
 	incidentId: z.string().min(1),
 	contextMarkdown: z.string(),
@@ -69,7 +52,6 @@ export const FixAgentInputSchema = z.object({
 	repo: FixAgentRepoInputSchema,
 	limits: FixAgentLimitsSchema,
 	forbiddenPaths: z.array(z.string()),
-	telemetry: FixAgentTelemetryConfigSchema.optional(),
 	/** Dashboard-managed operator instructions shared by every repository. */
 	systemPrompt: z.string().optional(),
 	/**
@@ -115,9 +97,6 @@ export const FixAgentOutputSchema = z
 export type FixAgentAlert = z.infer<typeof FixAgentAlertSchema>;
 export type FixAgentRepoInput = z.infer<typeof FixAgentRepoInputSchema>;
 export type FixAgentLimits = z.infer<typeof FixAgentLimitsSchema>;
-export type FixAgentTelemetryConfig = z.infer<
-	typeof FixAgentTelemetryConfigSchema
->;
 export type FixAgentInput = z.infer<typeof FixAgentInputSchema>;
 export type FixAgentFix = z.infer<typeof FixAgentFixSchema>;
 export type FixAgentOutput = z.infer<typeof FixAgentOutputSchema>;

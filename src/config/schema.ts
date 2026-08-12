@@ -44,23 +44,23 @@ const SourcesSchema = z.record(z.string(), SourceConfigSchema).default({});
  * `telemetry` is a discriminated union on `source`, mirroring `storage` and
  * `notifiers` below -- adding a future backend means adding one more member
  * here plus a `case` in `src/telemetry/factory.ts` (the initial-collection
- * path every backend must support). Wiring a backend into the fix agent's
- * *follow-up* query tool is a separate, optional step -- a `case` in
- * `agent-host/src/tools.ts` plus the two contract mirrors
- * (`src/agent/contract.ts` / `agent-host/src/contract.ts`). This tool is
- * SQL/PromQL-shaped and stays scoped to `greptimedb` only -- `src/index.ts`
- * narrows `config.telemetry` to that one member before passing it through to
- * the agent-host sidecar/runner (see also the doc comments on
- * `AgentHostSidecarConfig.telemetry` (`src/agent/sidecar.ts`) and
- * `FixAgentRunnerConfig.telemetry` (`src/agent/runner.ts`) for why every
- * other source below is collection-only, no follow-up query tool). This
- * holds for `source: "composite"` too: a composite's slots are never
- * greptimedb-narrowed for the follow-up tool, even when a slot happens to be
- * greptimedb -- see `src/telemetry/composite.ts`'s module doc comment.
- * `greptimedb`, `loki`, `tempo`, `prometheus`, `clickstack`, `signoz`,
- * `openobserve`, `datadog`, `newrelic`, `grafana`, `zabbix`, and `mackerel`
- * are the single-backend members; `composite` (below) routes each signal to
- * its own single-backend member instead of picking just one.
+ * path every backend must support). The fix agent's *follow-up*
+ * `query_telemetry` tool (agent-host/src/tools.ts) works against every
+ * source listed here -- the parent process itself proxies each follow-up
+ * query over `POST /telemetry/query` (`src/telemetry/followup.ts`,
+ * `src/ingest/server.ts`) and dispatches to whichever `TelemetrySource` was
+ * constructed from this config, so no backend-specific wiring is needed on
+ * the agent-host side beyond the per-source tool description
+ * (`agent-host/src/tools.ts`). `greptimedb`, `loki`, `tempo`, `prometheus`,
+ * `clickstack`, `signoz`, `openobserve`, `datadog`, `newrelic`, `grafana`,
+ * `zabbix`, and `mackerel` are the single-backend members; `composite`
+ * (below) routes each signal to its own single-backend member instead of
+ * picking just one. A composite is proxied like any other source -- its
+ * structured follow-up queries route per signal through
+ * `CompositeTelemetrySource` -- but it implements no `runRawSql`, so the
+ * raw-SQL `expression` escape hatch resolves to the "not supported by this
+ * source" note rather than reaching a backend (there is no single SQL
+ * backend behind a composite to reach).
  */
 const GreptimeDbTelemetrySchema = z.object({
 	source: z.literal("greptimedb"),
@@ -299,6 +299,23 @@ const AgentSchema = z.object({
 	hostUrl: z.string().min(1).optional(),
 	/** Port the spawned agent-host server listens on. Ignored in external-host mode. */
 	hostPort: z.number().int().positive().default(8700),
+	/**
+	 * Bearer token an EXTERNALLY deployed agent-host (`agent.hostUrl` set)
+	 * must present to this deployment's `POST /telemetry/query` callback
+	 * route (see `src/ingest/server.ts`'s `ServerDeps.telemetryCallbackToken`
+	 * doc comment and `src/telemetry/followup.ts`). Ignored in the default
+	 * internal (spawned-child) mode, where the sidecar instead generates a
+	 * random per-boot token and passes it through the spawn env -- no
+	 * configuration or persisted secret needed there. In external mode there
+	 * is no spawn env to carry that generated token to a separate process, so
+	 * the operator must set this AND configure the same value on the external
+	 * agent-host deployment's own `PAPERHANGER_TELEMETRY_CALLBACK_TOKEN` env
+	 * var (out of band; paperhanger has no way to reach that deployment's
+	 * configuration itself). Leaving this unset in external mode disables
+	 * follow-up telemetry queries -- `query_telemetry` degrades to
+	 * unavailable rather than serving the route unauthenticated.
+	 */
+	telemetryCallbackToken: z.string().min(1).optional(),
 	/** Guardrail: max total changed lines (additions + deletions) before a fix is rejected. */
 	maxDiffLines: z.number().int().positive().default(500),
 	/**

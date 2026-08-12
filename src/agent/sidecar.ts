@@ -17,7 +17,6 @@
  *   serving webhooks vs. exit), while the sidecar keeps trying to recover.
  */
 
-import type { TelemetryConfig } from "../config/schema";
 import type { Logger } from "../observability/logger";
 
 /** Structural subset of `Bun.Subprocess` this module depends on. */
@@ -55,16 +54,25 @@ export interface AgentHostSidecarConfig {
 		model: string;
 	};
 	/**
-	 * The full `Config["telemetry"]` union (see `src/config/schema.ts`). Only
-	 * ever forwarded to the agent-host process when `source === "greptimedb"`
-	 * (see `buildSpawnEnv` below) -- agent-host's `query_telemetry` follow-up
-	 * tool (agent-host/src/tools.ts, agent-host/README.md) is SQL/PromQL-
-	 * shaped and stays scoped to GreptimeDB. The other telemetry sources
-	 * (Datadog, New Relic, Grafana, Zabbix, Mackerel) are collection-only:
-	 * they feed the initial `IncidentContext` (see `telemetry/factory.ts`)
-	 * but have no follow-up query tool in the fix agent.
+	 * Callback config for the agent-host sidecar's `query_telemetry` follow-up
+	 * tool (see `../telemetry/followup.ts` and `agent-host/README.md`'s
+	 * "query_telemetry" section). The parent process itself proxies every
+	 * follow-up query -- dispatching to whichever `TelemetrySource` it already
+	 * constructed for `config.telemetry` -- so this is the ONLY telemetry-
+	 * related value the sidecar forwards to the spawned agent-host process; no
+	 * backend URL, database name, or auth value is ever forwarded (see
+	 * `buildSpawnEnv` below). Undefined when no telemetry backend is
+	 * configured, in which case `query_telemetry` tool registration is skipped
+	 * entirely (agent-host's `createTelemetryTools()`).
 	 */
-	telemetry?: TelemetryConfig;
+	telemetryCallback?: {
+		/** This paperhanger deployment's own `POST /telemetry/query` URL. */
+		url: string;
+		/** Dedicated bearer token for that route -- see `ServerDeps.telemetryCallbackToken`'s doc comment in `src/ingest/server.ts`. */
+		token: string;
+		/** `config.telemetry.source`, used to generate a per-source tool description on the agent-host side. */
+		source: string;
+	};
 }
 
 /**
@@ -424,14 +432,17 @@ function buildSpawnEnv(
 			env[key] = value;
 		}
 	}
-	if (config.telemetry?.source === "greptimedb") {
-		// A single serialized JSON env var carries the whole telemetry config,
-		// rather than one bespoke env var per field (the previous GREPTIMEDB_*
-		// vars): agent-host/src/tools.ts parses this and dispatches on
-		// `source`. Only forwarded for "greptimedb" -- see the doc comment on
-		// `AgentHostSidecarConfig.telemetry` above for why the other sources
-		// have no follow-up query tool in agent-host.
-		env.PAPERHANGER_TELEMETRY = JSON.stringify(config.telemetry);
+	if (config.telemetryCallback) {
+		// Three separate env vars (URL, token, source name), NOT a single
+		// serialized-JSON blob like the old PAPERHANGER_TELEMETRY var this
+		// replaces -- there is no backend config left to serialize, since the
+		// parent process itself proxies every follow-up query (see
+		// `AgentHostSidecarConfig.telemetryCallback`'s doc comment above). The
+		// token never appears in `cmd` (process arguments), only here in the
+		// spawned child's environment.
+		env.PAPERHANGER_TELEMETRY_CALLBACK_URL = config.telemetryCallback.url;
+		env.PAPERHANGER_TELEMETRY_CALLBACK_TOKEN = config.telemetryCallback.token;
+		env.PAPERHANGER_TELEMETRY_CALLBACK_SOURCE = config.telemetryCallback.source;
 	}
 	return env;
 }

@@ -248,6 +248,13 @@ agent:
   # Set to point at an externally deployed agent-host instead of spawning a
   # local child process (see src/agent/sidecar.ts and agent-host/README.md).
   # hostUrl: http://agent-host:8700
+  # Only used alongside hostUrl above: bearer token an externally deployed
+  # agent-host must present to this deployment's POST /telemetry/query
+  # follow-up-telemetry callback route. The internal (default, no hostUrl)
+  # sidecar mode needs none of this -- it generates a random per-boot token
+  # itself. Also set the identical value on the external agent-host's own
+  # PAPERHANGER_TELEMETRY_CALLBACK_TOKEN environment variable.
+  # telemetryCallbackToken: ${TELEMETRY_CALLBACK_TOKEN}
 
 github:
   appId: ${GITHUB_APP_ID}

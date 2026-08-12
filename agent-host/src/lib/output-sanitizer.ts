@@ -8,17 +8,26 @@ import { extractCloneToken, redactSecrets } from "./redaction.ts";
 
 /**
  * Every known secret that could appear in this workflow's output, derived
- * deterministically from the workflow input -- never by pattern-matching
- * arbitrary error/report text (see the redaction module's own note).
+ * deterministically from the workflow input (and, for the telemetry
+ * callback token, this process's own environment) -- never by
+ * pattern-matching arbitrary error/report text (see the redaction module's
+ * own note).
+ *
+ * `env` defaults to `process.env` and is only a parameter for testability.
+ * The telemetry backend itself (URL, database, auth) never reaches this
+ * process at all anymore -- the parent proxies every follow-up query over
+ * HTTP (see `../tools.ts`) -- so the only telemetry-related secret this
+ * workflow could ever echo back is its own callback bearer token, read here
+ * the same way `../tools.ts` reads it.
  */
 export function collectSecrets(
 	input: FixIncidentInput,
+	env: Record<string, string | undefined> = process.env,
 ): ReadonlyArray<string | undefined> {
-	// `input.telemetry` is a discriminated union on `source`; every currently
-	// supported source (just "greptimedb" today) happens to carry its secret
-	// under `auth`. A future source with a differently-named secret field
-	// should collect it via its own arm here rather than assuming `auth`.
-	return [extractCloneToken(input.repo.cloneUrl), input.telemetry?.auth];
+	return [
+		extractCloneToken(input.repo.cloneUrl),
+		env.PAPERHANGER_TELEMETRY_CALLBACK_TOKEN,
+	];
 }
 
 /**

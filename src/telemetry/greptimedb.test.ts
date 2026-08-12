@@ -1250,3 +1250,72 @@ describe("GreptimeDbSource - OpenTelemetry span instrumentation", () => {
 		).resolves.toEqual([]);
 	});
 });
+
+describe("GreptimeDbSource - runRawSql (query_telemetry expression escape hatch)", () => {
+	test("posts the given SQL verbatim and returns the parsed rows", async () => {
+		const { fetchImpl, calls } = stubFetch(() =>
+			sqlSuccessResponse(
+				[
+					{ name: "timestamp", data_type: "TimestampNanosecond" },
+					{ name: "body", data_type: "String" },
+				],
+				[[1735689600000000000, "hello"]],
+			),
+		);
+		const source = new GreptimeDbSource(
+			{ url: "http://greptime.test", database: "public" },
+			silentLogger(),
+			fetchImpl,
+		);
+
+		const rows = await source.runRawSql(
+			"SELECT timestamp, body FROM opentelemetry_logs LIMIT 1",
+		);
+
+		expect(calls.length).toBe(1);
+		expect(calls[0]?.method).toBe("POST");
+		const decoded = decodeURIComponent(
+			(calls[0]?.body ?? "").replace(/^sql=/, "").replace(/\+/g, " "),
+		);
+		expect(decoded).toBe(
+			"SELECT timestamp, body FROM opentelemetry_logs LIMIT 1",
+		);
+		expect(rows).toEqual([{ timestamp: 1735689600000000000, body: "hello" }]);
+	});
+
+	test("propagates a GreptimeDbError on an HTTP failure", async () => {
+		const fetchImpl = (async () =>
+			new Response(JSON.stringify({ error: "boom", code: 42 }), {
+				status: 500,
+			})) as unknown as typeof fetch;
+		const source = new GreptimeDbSource(
+			{ url: "http://greptime.test", database: "public" },
+			silentLogger(),
+			fetchImpl,
+		);
+
+		await expect(source.runRawSql("SELECT 1")).rejects.toThrow(GreptimeDbError);
+	});
+
+	test("creates a CLIENT span named greptimedb.run_raw_sql", async () => {
+		const { fetchImpl } = stubFetch(() =>
+			sqlSuccessResponse(
+				[{ name: "timestamp", data_type: "TimestampNanosecond" }],
+				[],
+			),
+		);
+		const { tracer, exporter } = setupTracing();
+		const source = new GreptimeDbSource(
+			{ url: "http://greptime.test", database: "public" },
+			silentLogger(),
+			fetchImpl,
+			tracer,
+		);
+
+		await source.runRawSql("SELECT 1");
+
+		const span = exporter.getFinishedSpans()[0];
+		expect(span?.name).toBe("greptimedb.run_raw_sql");
+		expect(span?.kind).toBe(SpanKind.CLIENT);
+	});
+});

@@ -11,6 +11,7 @@ import {
 	FixIncidentOutputSchema,
 } from "../src/contract.ts";
 import { FixIncidentAgent } from "../src/fix-agent.ts";
+import { createTelemetryTools } from "../src/tools.ts";
 
 let failures = 0;
 function assert(condition, message) {
@@ -94,6 +95,37 @@ assert(
 	FixIncidentAgent.initialData === FixIncidentInputSchema,
 	"FixIncidentAgent uses FixIncidentInputSchema as initialData",
 );
+
+// query_telemetry now proxies back to the parent's own PAPERHANGER_TELEMETRY
+// callback route (three env vars) instead of taking a whole telemetry
+// backend config through the agent input -- exercise both the "not
+// configured" and "configured" shapes of that env-driven contract.
+const CALLBACK_ENV_KEYS = [
+	"PAPERHANGER_TELEMETRY_CALLBACK_URL",
+	"PAPERHANGER_TELEMETRY_CALLBACK_TOKEN",
+	"PAPERHANGER_TELEMETRY_CALLBACK_SOURCE",
+];
+const savedCallbackEnv = Object.fromEntries(
+	CALLBACK_ENV_KEYS.map((key) => [key, process.env[key]]),
+);
+for (const key of CALLBACK_ENV_KEYS) delete process.env[key];
+assert(
+	createTelemetryTools().length === 0,
+	"createTelemetryTools() returns no tools when the callback env vars are unset",
+);
+process.env.PAPERHANGER_TELEMETRY_CALLBACK_URL =
+	"http://127.0.0.1:0/telemetry/query";
+process.env.PAPERHANGER_TELEMETRY_CALLBACK_TOKEN = "smoke-callback-token";
+process.env.PAPERHANGER_TELEMETRY_CALLBACK_SOURCE = "greptimedb";
+const telemetryTools = createTelemetryTools();
+assert(
+	telemetryTools.length === 1 && telemetryTools[0].name === "query_telemetry",
+	"createTelemetryTools() returns a query_telemetry tool when the callback env vars are set",
+);
+for (const key of CALLBACK_ENV_KEYS) {
+	if (savedCallbackEnv[key] === undefined) delete process.env[key];
+	else process.env[key] = savedCallbackEnv[key];
+}
 
 const portServer = createServer();
 portServer.listen(0, "127.0.0.1");

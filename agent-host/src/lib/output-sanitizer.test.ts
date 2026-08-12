@@ -30,25 +30,18 @@ function baseInput(
 
 describe("collectSecrets", () => {
 	test("includes the clone token extracted from repo.cloneUrl", () => {
-		expect(collectSecrets(baseInput())).toContain("ghs_abc123");
+		expect(collectSecrets(baseInput(), {})).toContain("ghs_abc123");
 	});
 
-	test("includes the GreptimeDB auth value when telemetry is configured", () => {
-		const secrets = collectSecrets(
-			baseInput({
-				telemetry: {
-					source: "greptimedb",
-					url: "http://greptimedb:4000",
-					database: "public",
-					auth: "user:pw",
-				},
-			}),
-		);
-		expect(secrets).toContain("user:pw");
+	test("includes the telemetry callback token from the environment when set", () => {
+		const secrets = collectSecrets(baseInput(), {
+			PAPERHANGER_TELEMETRY_CALLBACK_TOKEN: "cb-secret-token",
+		});
+		expect(secrets).toContain("cb-secret-token");
 	});
 
-	test("omits the GreptimeDB auth entry (as undefined) when telemetry is not configured", () => {
-		const secrets = collectSecrets(baseInput());
+	test("omits the telemetry callback token entry (as undefined) when unset", () => {
+		const secrets = collectSecrets(baseInput(), {});
 		expect(secrets).toContain(undefined);
 	});
 
@@ -63,13 +56,14 @@ describe("collectSecrets", () => {
 					branchName: "paperhanger/incident-1",
 				},
 			}),
+			{},
 		);
 		expect(secrets[0]).toBeUndefined();
 	});
 });
 
 describe("sanitizeOutput", () => {
-	const secrets = ["ghs_abc123", "user:pw"];
+	const secrets = ["ghs_abc123", "cb-secret-token"];
 
 	test("redacts the clone token from diagnosis and report", () => {
 		const output: FixIncidentOutput = {
@@ -83,14 +77,14 @@ describe("sanitizeOutput", () => {
 		expect(sanitized.diagnosis).toContain("***REDACTED***");
 	});
 
-	test("redacts a configured GreptimeDB auth value from the report", () => {
+	test("redacts the telemetry callback token from the report", () => {
 		const output: FixIncidentOutput = {
 			outcome: "report_only",
 			diagnosis: "Root cause analysis.",
-			report: "query_telemetry returned auth user:pw in one row.",
+			report: "query_telemetry returned an error mentioning cb-secret-token.",
 		};
 		const sanitized = sanitizeOutput(output, secrets);
-		expect(sanitized.report).not.toContain("user:pw");
+		expect(sanitized.report).not.toContain("cb-secret-token");
 	});
 
 	test("redacts failureReason when present", () => {

@@ -23,11 +23,10 @@ function baseConfig(
 			model: "anthropic/claude-sonnet-4-6",
 			...overrides,
 		},
-		telemetry: {
+		telemetryCallback: {
+			url: "http://127.0.0.1:8080/telemetry/query",
+			token: "cb-secret-token",
 			source: "greptimedb",
-			url: "http://greptimedb:4000",
-			database: "public",
-			auth: "user:pass",
 		},
 	};
 }
@@ -184,16 +183,16 @@ describe("AgentHostSidecar - internal mode spawn arguments", () => {
 			PATH: "/usr/local/bin:/usr/bin",
 			HOME: "/home/paperhanger",
 			GIT_TERMINAL_PROMPT: "0",
+			// Three separate env vars, never a serialized backend config: the
+			// parent proxies every follow-up query itself (see
+			// `AgentHostSidecarConfig.telemetryCallback`'s doc comment), so no
+			// backend URL/database/auth value is ever forwarded to this child.
+			PAPERHANGER_TELEMETRY_CALLBACK_URL:
+				"http://127.0.0.1:8080/telemetry/query",
+			PAPERHANGER_TELEMETRY_CALLBACK_TOKEN: "cb-secret-token",
+			PAPERHANGER_TELEMETRY_CALLBACK_SOURCE: "greptimedb",
 		});
-		expect(
-			capturedEnv?.PAPERHANGER_TELEMETRY &&
-				JSON.parse(capturedEnv.PAPERHANGER_TELEMETRY),
-		).toEqual({
-			source: "greptimedb",
-			url: "http://greptimedb:4000",
-			database: "public",
-			auth: "user:pass",
-		});
+		expect(capturedEnv?.PAPERHANGER_TELEMETRY).toBeUndefined();
 		expect(capturedEnv?.UNRELATED_VAR).toBeUndefined();
 		expect(capturedEnv?.OPENAI_API_KEY).toBeUndefined();
 
@@ -228,7 +227,7 @@ describe("AgentHostSidecar - internal mode spawn arguments", () => {
 		]);
 	});
 
-	test("omits an unset provider key; serializes telemetry without an auth field when absent", async () => {
+	test("emits the three callback env vars from a custom telemetryCallback config", async () => {
 		const fake = createFakeProcess();
 		let capturedEnv: Record<string, string> | undefined;
 		const spawn: SpawnFn = (_cmd, options) => {
@@ -237,10 +236,10 @@ describe("AgentHostSidecar - internal mode spawn arguments", () => {
 		};
 
 		const config = baseConfig();
-		config.telemetry = {
-			source: "greptimedb",
-			url: "http://greptimedb:4000",
-			database: "public",
+		config.telemetryCallback = {
+			url: "http://127.0.0.1:9090/telemetry/query",
+			token: "another-token",
+			source: "zabbix",
 		};
 		const sidecar = new AgentHostSidecar({
 			config,
@@ -252,20 +251,20 @@ describe("AgentHostSidecar - internal mode spawn arguments", () => {
 
 		await sidecar.start();
 
-		expect(
-			capturedEnv?.PAPERHANGER_TELEMETRY &&
-				JSON.parse(capturedEnv.PAPERHANGER_TELEMETRY),
-		).toEqual({
-			source: "greptimedb",
-			url: "http://greptimedb:4000",
-			database: "public",
-		});
+		expect(capturedEnv?.PAPERHANGER_TELEMETRY_CALLBACK_URL).toBe(
+			"http://127.0.0.1:9090/telemetry/query",
+		);
+		expect(capturedEnv?.PAPERHANGER_TELEMETRY_CALLBACK_TOKEN).toBe(
+			"another-token",
+		);
+		expect(capturedEnv?.PAPERHANGER_TELEMETRY_CALLBACK_SOURCE).toBe("zabbix");
+		expect(capturedEnv?.PAPERHANGER_TELEMETRY).toBeUndefined();
 		expect(capturedEnv?.ANTHROPIC_API_KEY).toBeUndefined();
 
 		await sidecar.stop();
 	});
 
-	test("omits PAPERHANGER_TELEMETRY entirely when no telemetry is configured at all", async () => {
+	test("omits all three callback env vars (and PAPERHANGER_TELEMETRY) when no telemetry callback is configured", async () => {
 		const fake = createFakeProcess();
 		let capturedEnv: Record<string, string> | undefined;
 		const spawn: SpawnFn = (_cmd, options) => {
@@ -274,7 +273,7 @@ describe("AgentHostSidecar - internal mode spawn arguments", () => {
 		};
 
 		const config = baseConfig();
-		config.telemetry = undefined;
+		config.telemetryCallback = undefined;
 		const sidecar = new AgentHostSidecar({
 			config,
 			logger: silentLogger(),
@@ -285,6 +284,9 @@ describe("AgentHostSidecar - internal mode spawn arguments", () => {
 
 		await sidecar.start();
 
+		expect(capturedEnv?.PAPERHANGER_TELEMETRY_CALLBACK_URL).toBeUndefined();
+		expect(capturedEnv?.PAPERHANGER_TELEMETRY_CALLBACK_TOKEN).toBeUndefined();
+		expect(capturedEnv?.PAPERHANGER_TELEMETRY_CALLBACK_SOURCE).toBeUndefined();
 		expect(capturedEnv?.PAPERHANGER_TELEMETRY).toBeUndefined();
 		expect(capturedEnv).toMatchObject({
 			PORT: "8700",
@@ -293,47 +295,6 @@ describe("AgentHostSidecar - internal mode spawn arguments", () => {
 
 		await sidecar.stop();
 	});
-
-	// agent-host's query_telemetry follow-up tool is SQL/PromQL-shaped and only
-	// speaks GreptimeDB, so every other configured source must be dropped here
-	// rather than handed to the sidecar in a shape it cannot use. This guard is
-	// the only thing standing between a non-GreptimeDB config and that tool --
-	// `src/index.ts` passes `config.telemetry` straight through.
-	test.each([
-		["loki", { source: "loki", url: "http://loki:3100" }],
-		[
-			"datadog",
-			{ source: "datadog", site: "datadoghq.com", apiKey: "k", appKey: "a" },
-		],
-	] as const)(
-		"omits PAPERHANGER_TELEMETRY when the configured source is %s, not greptimedb",
-		async (_name, telemetry) => {
-			const fake = createFakeProcess();
-			let capturedEnv: Record<string, string> | undefined;
-			const spawn: SpawnFn = (_cmd, options) => {
-				capturedEnv = options.env;
-				return fake.process;
-			};
-
-			const config = baseConfig();
-			// Cast: these are real TelemetryConfig members, but each carries more
-			// required fields than this test needs to express the guard.
-			config.telemetry = telemetry as unknown as typeof config.telemetry;
-			const sidecar = new AgentHostSidecar({
-				config,
-				logger: silentLogger(),
-				spawn,
-				fetchImpl: okFetch(),
-				env: {},
-			});
-
-			await sidecar.start();
-
-			expect(capturedEnv?.PAPERHANGER_TELEMETRY).toBeUndefined();
-
-			await sidecar.stop();
-		},
-	);
 });
 
 describe("AgentHostSidecar - readiness", () => {

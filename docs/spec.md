@@ -196,11 +196,18 @@ interface TelemetrySource {
   4. 収集結果がトークン予算を超える場合、優先度の低いものから順に削減(メトリクス→トレース→非例外ログ→例外/スタックトレースを含むログ)。スタックトレース・例外メッセージらしさの判定は独立した抽出ステップではなく、この削減時の優先度判定にのみ使う
 - 収集結果はトークン予算内に収まるようサンプリング・要約して `IncidentContext` に整形
 - さらに **Flue の Tool としても公開**し、エージェントが診断中に追加クエリを発行できるように
-  する(`query_telemetry`)。この追加クエリ Tool は現時点では GreptimeDB(SQL /
-  PromQL)専用で、Loki/Tempo/Prometheus/ClickStack/SigNoz/OpenObserve を含む
-  他バックエンドは自動収集フェーズのみをサポートする(`agent-host/src/tools.ts`
-  の dispatch、および `src/agent/sidecar.ts` / `src/agent/runner.ts` の
-  `telemetry` フィールドのコメントを参照)
+  する(`query_telemetry`)。agent-host(Node サイドカー)は本体プロセスに HTTP で
+  コールバックし(`POST /telemetry/query`。dashboard/incident CRUD 用の
+  `server.apiToken` とは別の専用トークンで認証)、本体側の `src/telemetry/followup.ts`
+  が収集フェーズと同じ `TelemetrySource` にディスパッチする -- バックエンド固有の
+  エスケープ処理を二重実装しないため、**全バックエンドが追加クエリに対応**する
+  (以前は GreptimeDB 専用だった)。クエリは構造化フィルタ(`filter`)が基本パスで、
+  `expression` は狭いエスケープハッチ:メトリクスでは各バックエンド固有のクエリ文字列
+  (PromQL 等)、ログ/トレースでは GreptimeDB 限定で単文の読み取り専用 SQL のみ
+  (後述のガードを適用)。対象バックエンドで構造的にサポートされないクエリ(必須
+  ヒント欠落、GreptimeDB 以外への `expression` 指定等)は空配列 + notes で正常終了し、
+  バックエンド障害・タイムアウトはツールエラーとしてモデルに伝える(`src/ingest/server.ts`
+  の `/telemetry/query` ルート、`agent-host/src/tools.ts` を参照)
 
 ### 3.5 Repo Resolver(修正対象リポジトリの解決)
 
@@ -244,8 +251,9 @@ interface TelemetrySource {
 - **セキュリティ対策**(プロンプトインジェクション経由の資格情報悪用への防御):
   - clone 直後(モデルのターン開始前)に origin remote から token を除去。push は token 入り URL を直接引数で渡し、設定に永続化しない
   - commit/push 直前に origin URL・ブランチ名の改ざん検査を行い、不一致は `failed`
-  - モデルが生成する全出力(diagnosis / report / commitMessage / failureReason)に token・テレメトリ認証情報のリダクションを一括適用
-  - `query_telemetry` ツールは単文の SELECT/SHOW/DESC のみ許可
+  - モデルが生成する全出力(diagnosis / report / commitMessage / failureReason)に token・テレメトリコールバックトークンのリダクションを一括適用
+  - `query_telemetry` ツールの `expression`(GreptimeDB 限定のネイティブ SQL エスケープハッチ)は単文の SELECT/SHOW/DESC のみ許可
+  - agent-host はテレメトリバックエンドの URL・認証情報を一切保持しない(本体プロセスが `/telemetry/query` コールバック経由で代理実行するため)。agent-host が保持するのは専用コールバックトークンのみで、内部モード(デフォルト)ではプロセス起動毎のランダム値、外部 agent-host 構成では `agent.telemetryCallbackToken` で明示設定した値
 
 ### 3.7 GitHub Integration
 

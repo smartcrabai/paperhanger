@@ -324,7 +324,7 @@ Every key from `paperhanger.example.yaml`, with its default when omitted
 | `storage.path` | *(required if `sqlite`)* | SQLite file path; mount `/data` as a volume |
 | `storage.url` | *(required if `postgres`)* | `Bun.sql` connection string |
 | `sources.<name>.secret` | `{}` (no sources) | Per-source shared secret, checked via `X-Webhook-Token` header or `?token=` query param. Map key must match an implemented adapter name: `grafana`, `alertmanager`, `sentry`, or `generic`. Sentry cannot set custom headers, so its token rides in the webhook URL's `?token=` query param -- see [Webhook sources](#webhook-sources) |
-| `telemetry.source` | *(the whole `telemetry` section is optional)* | Discriminated union like `storage`/`notifiers`: `greptimedb`, `loki`, `tempo`, `prometheus`, `clickstack`, `signoz`, `openobserve`, `datadog`, `newrelic`, `grafana`, `zabbix`, `mackerel`, or `composite`. Omit `telemetry` entirely to run without one -- the pipeline degrades to an empty-telemetry context (see "Incident state machine") rather than failing. `loki`/`tempo`/`prometheus` are single-signal sources for a Grafana OSS stack: querying the other two signals against them logs a warning and returns no results rather than failing (unlike `greptimedb`, which serves all three signals from one endpoint). `clickstack`/`signoz` have no PromQL-compatible query API, so metrics collection is unsupported for them the same way (see docs/spec.md section 3.4). Only `greptimedb`'s follow-up `query_telemetry` tool is available to the fix agent during diagnosis (see agent-host/README.md); every source here still feeds the initial collection phase. `composite` routes each signal to its own single-backend source instead of picking one for all three -- see the dedicated row below |
+| `telemetry.source` | *(the whole `telemetry` section is optional)* | Discriminated union like `storage`/`notifiers`: `greptimedb`, `loki`, `tempo`, `prometheus`, `clickstack`, `signoz`, `openobserve`, `datadog`, `newrelic`, `grafana`, `zabbix`, `mackerel`, or `composite`. Omit `telemetry` entirely to run without one -- the pipeline degrades to an empty-telemetry context (see "Incident state machine") rather than failing. `loki`/`tempo`/`prometheus` are single-signal sources for a Grafana OSS stack: querying the other two signals against them logs a warning and returns no results rather than failing (unlike `greptimedb`, which serves all three signals from one endpoint). `clickstack`/`signoz` have no PromQL-compatible query API, so metrics collection is unsupported for them the same way (see docs/spec.md section 3.4). Every source here is reachable through the fix agent's follow-up `query_telemetry` tool during diagnosis (the parent proxies each query over `POST /telemetry/query`; see agent-host/README.md and "Security notes" below), in addition to feeding the initial collection phase. `composite` routes each signal to its own single-backend source instead of picking one for all three -- see the dedicated row below |
 | `telemetry.url` | *(required unless `telemetry` is omitted, or `telemetry.source` is `datadog`, `newrelic`, or `mackerel`)* | Backend base URL: GreptimeDB/Loki/Tempo/Prometheus HTTP endpoint, Grafana instance URL, Zabbix frontend URL (without `/api_jsonrpc.php`), ClickHouse HTTP interface (`clickstack`, e.g. `http://localhost:8123`), SigNoz instance URL (`signoz`), or OpenObserve base URL (`openobserve`) |
 | `telemetry.database` | *(required if `telemetry.source` is `greptimedb` or `clickstack`)* | e.g. `public` (GreptimeDB) or `default` (ClickHouse). Not used by any other source |
 | `telemetry.auth` | *(none)* | `username:password`, unencoded (base64-encoded internally as HTTP Basic auth). Used by `greptimedb`/`loki`/`tempo`/`prometheus`/`clickstack`/`openobserve`; the other sources authenticate via the dedicated fields below instead |
@@ -369,6 +369,7 @@ Every key from `paperhanger.example.yaml`, with its default when omitted
 | `agent.maxFixAttempts` | `3` | Guardrail: max fix attempts (initial + test-failure retries) per incident before the agent-host workflow gives up -- see "Current limitations" for why this (plus the timeout, concurrency cap, and cooldown) is the achievable subset of cost containment |
 | `agent.hostUrl` | *(unset -- spawns an internal sidecar)* | Point at an externally-deployed agent-host instead of spawning a child process |
 | `agent.hostPort` | `8700` | Port the spawned agent-host listens on (ignored in external-host mode) |
+| `agent.telemetryCallbackToken` | *(unset)* | Bearer token an EXTERNALLY deployed agent-host (`agent.hostUrl` set) must present to this deployment's `POST /telemetry/query` callback route (see "Security notes" below). Ignored in the default internal mode, where the sidecar generates a random per-boot token itself -- no configuration needed there. Required to enable follow-up telemetry queries in external-host mode; the operator must also configure the same value on the external agent-host's own `PAPERHANGER_TELEMETRY_CALLBACK_TOKEN` env var |
 | `github.appId` | *(required)* | |
 | `github.privateKey` | *(required)* | PEM, PKCS#1 or PKCS#8 |
 | `notifiers` | `[]` | List of `{ type: slack, webhookUrl }` / `{ type: discord, webhookUrl }` / `{ type: webhook, url }`. Empty list is valid -- no notifications are sent, everything else still works |
@@ -506,6 +507,18 @@ The agent-host (`agent-host/`) is a separate Node-only package with its own
   unauthenticated, since it carries no data of its own.
   `/healthz` and `/readyz` are never gated. See `paperhanger.example.yaml`
   and the config reference above.
+- **`POST /telemetry/query`** (the agent-host sidecar's `query_telemetry`
+  follow-up-query callback; see agent-host/README.md) is gated by a
+  DEDICATED bearer token, deliberately separate from `server.apiToken` above
+  -- telemetry-read permission is not the same grant as dashboard/incident
+  CRUD. In the default internal agent-host mode this token is generated
+  randomly per boot and passed to the spawned child through its own
+  environment only, never persisted or logged; there is nothing to
+  configure. In external agent-host mode (`agent.hostUrl` set), set
+  `agent.telemetryCallbackToken` and configure the same value on the
+  external agent-host's own environment, or the route stays disabled
+  (503) -- there is no unauthenticated fallback. The route itself responds
+  503 whenever no telemetry backend is configured at all.
 - **Webhook endpoints (`POST /webhooks/{source}`) all authenticate the same
   way**: a per-source shared secret presented as `X-Webhook-Token` or
   `?token=`, constant-time compared before the body is read. Source-specific
@@ -523,10 +536,13 @@ The agent-host (`agent-host/`) is a separate Node-only package with its own
 - **The fix agent's sandbox (`agent-host`, `local()` from
   `@flue/runtime/node`) has no isolation of its own** -- the agent-host
   container itself is the isolation boundary. Provider API keys
-  (`ANTHROPIC_API_KEY`, etc.) and the GreptimeDB auth value are kept out of
-  every model-facing shell by `local()`'s own env allowlist (see
+  (`ANTHROPIC_API_KEY`, etc.) and the telemetry callback bearer token are
+  kept out of every model-facing shell by `local()`'s own env allowlist (see
   `agent-host/README.md` "Env sanitization for model-facing shells" for the
-  verified mechanism), but the sandbox does **not** isolate the checked-out
+  verified mechanism). The agent-host process now holds fewer secrets than
+  before: it never receives a telemetry backend's URL, database name, or
+  auth value at all -- the parent proxies every follow-up query itself (see
+  `POST /telemetry/query` above). The sandbox does **not** isolate the checked-out
   repository, the container filesystem, or network egress from
   model-directed commands. This is an accepted tradeoff for a single-tenant
   deployment; if paperhanger is ever run against untrusted/adversarial
