@@ -3,7 +3,14 @@ import {
 	FollowUpTelemetryQueryValidationError,
 	runFollowUpTelemetryQuery,
 } from "./followup";
+import { createLogger } from "../observability/logger";
+import { CompositeTelemetrySource } from "./composite";
 import type { TelemetrySource } from "./types";
+
+/** Discards output; the composite logs at construction and on slot failure. */
+function silentLogger() {
+	return createLogger({ sink: () => {} });
+}
 
 const TIME_RANGE = { from: "2026-01-01T00:00:00Z", to: "2026-01-01T00:05:00Z" };
 
@@ -410,5 +417,85 @@ describe("runFollowUpTelemetryQuery - backend failure (thrown, never swallowed)"
 				expression: "up",
 			}),
 		).rejects.toThrow("metrics backend unreachable");
+	});
+});
+
+describe("runFollowUpTelemetryQuery - against a CompositeTelemetrySource", () => {
+	// The integration point between the composite source and this proxy: neither
+	// side's own tests cover it, since each landed independently. A composite
+	// implements TelemetrySource, so it is dispatched like any other source and
+	// routes per signal to its own slot child.
+	function composite(slots: {
+		logs?: TelemetrySource;
+		traces?: TelemetrySource;
+		metrics?: TelemetrySource;
+	}): CompositeTelemetrySource {
+		return new CompositeTelemetrySource(
+			{
+				source: "composite",
+				...(slots.logs ? { logs: { source: "loki", url: "http://loki" } } : {}),
+				...(slots.traces
+					? { traces: { source: "tempo", url: "http://tempo" } }
+					: {}),
+				...(slots.metrics
+					? { metrics: { source: "prometheus", url: "http://prom" } }
+					: {}),
+			} as never,
+			slots,
+			silentLogger(),
+		);
+	}
+
+	test("a structured logs query reaches only the logs slot's child", async () => {
+		const logs = fakeSource({ name: "loki", logs: [{ body: "from loki" }] });
+		const traces = fakeSource({ name: "tempo" });
+		const result = await runFollowUpTelemetryQuery(
+			composite({ logs, traces }),
+			{ signal: "logs", timeRange: TIME_RANGE, filter: { service: "api" } },
+		);
+
+		expect(result.logs).toEqual([{ body: "from loki" }]);
+		expect(logs.calls.map((c) => c.method)).toEqual(["queryLogs"]);
+		expect(traces.calls).toEqual([]);
+	});
+
+	test("an unconfigured slot resolves to an empty result rather than throwing", async () => {
+		const result = await runFollowUpTelemetryQuery(composite({}), {
+			signal: "traces",
+			timeRange: TIME_RANGE,
+		});
+
+		expect(result.traces).toEqual([]);
+		expect(result.truncated).toBe(false);
+	});
+
+	test("a slot child's failure isolates to that signal instead of propagating", async () => {
+		const logs = fakeSource({
+			name: "loki",
+			queryLogsImpl: async () => {
+				throw new Error("loki is down");
+			},
+		});
+
+		// Contrast the non-composite path, which rethrows for server.ts to map to a 502.
+		const result = await runFollowUpTelemetryQuery(composite({ logs }), {
+			signal: "logs",
+			timeRange: TIME_RANGE,
+		});
+		expect(result.logs).toEqual([]);
+	});
+
+	test("the raw-SQL expression escape hatch is unavailable, with an explanatory note", async () => {
+		const logs = fakeSource({ name: "loki" });
+		const result = await runFollowUpTelemetryQuery(composite({ logs }), {
+			signal: "logs",
+			timeRange: TIME_RANGE,
+			expression: "SELECT * FROM opentelemetry_logs",
+		});
+
+		expect(result.logs).toEqual([]);
+		expect(result.notes.length).toBeGreaterThan(0);
+		// It must not have silently fallen back to running the structured query.
+		expect(logs.calls).toEqual([]);
 	});
 });

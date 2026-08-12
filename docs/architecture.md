@@ -224,8 +224,13 @@ each file's module doc comment):
   deeper than one level. Per-signal error isolation: a slot's query failure
   degrades only that signal to `[]`, unlike the whole-incident degradation
   `src/core/pipeline.ts` applies to a single (non-composite) source's
-  failure. `query_telemetry` stays GreptimeDB-only exactly as above, even
-  when a composite slot happens to be `greptimedb`.
+  failure. A composite is proxied by `query_telemetry` like any other
+  source, and its structured follow-up queries route per signal through the
+  same slot children. It implements no `runRawSql`, though, so the raw-SQL
+  `expression` escape hatch resolves to the "not supported by this source"
+  note rather than reaching a backend -- there is no single SQL backend
+  behind a composite to reach, even when one slot happens to be
+  `greptimedb`.
 
 `src/telemetry/http-client.ts` factors the per-request timeout
 (`AbortController`-based) and OTel CLIENT span wrapping the `datadog`/

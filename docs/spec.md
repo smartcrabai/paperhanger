@@ -182,8 +182,11 @@ interface TelemetrySource {
   変わり得るため、hard error ではなく警告に留める(テレメトリは劣化しても
   ブロックしないという本セクション冒頭の方針に従う)。この対応表は
   `composite.ts` に一箇所だけ持ち、各コレクタ実装とのズレを追い続ける前提。
-  なお `query_telemetry`(下記)は GreptimeDB 専用のままで、composite の
-  スロットが GreptimeDB であっても追加クエリ Tool は有効化されない。
+  なお composite も他のソースと同様に `query_telemetry`(下記)のプロキシ対象で、
+  構造化クエリはシグナルごとに各スロットへルーティングされる。ただし composite は
+  `runRawSql` を実装しないため、生 SQL の `expression` エスケープハッチは
+  「このソースでは非対応」の notes を返す(composite の背後に単一の SQL バックエンドは
+  存在しないため。スロットの一つが GreptimeDB であっても同様)。
   また `logs:` に Zabbix/Mackerel のような疑似ログソースを置いた場合、
   `context-builder.ts` はログから `trace_id` を抽出してトレースを取得するため、
   problem/alert 履歴には `trace_id` が存在せず `traces:` 側との紐付けは機能しない
