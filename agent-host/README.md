@@ -208,7 +208,11 @@ The request shape is `{ signal: "logs"|"traces"|"metrics", timeRange, filter?,
 expression?, limit? }`. `filter` (structured label equality) is the main path;
 `expression` is a narrow escape hatch -- the backend-specific metric query for
 `signal: "metrics"`, or (GreptimeDB only) a single read-only SQL statement for
-`signal: "logs"`/`"traces"`. A query outside the configured source's
+`signal: "logs"`/`"traces"`. `limit` is honored for every path, including the
+raw-SQL one: the parent's `followup.ts` appends a `LIMIT` clause to a `SELECT`
+that doesn't already carry a (small enough) one of its own before running it,
+so `expression` can't run fully unbounded against the backend just because it
+bypassed the structured builders. A query outside the configured source's
 capabilities (a missing required hint, or `expression` against a non-GreptimeDB
 source) comes back as an empty result with an explanatory `notes` entry rather
 than failing; a genuine backend failure/timeout throws, which `run()`
@@ -216,15 +220,27 @@ propagates unchanged so Flue surfaces it to the model as a tool error for a
 retry-or-rephrase decision.
 
 The tool reads its callback config from three environment variables --
-`PAPERHANGER_TELEMETRY_CALLBACK_URL`, `_TOKEN`, and `_SOURCE` -- set by the
-parent repo's sidecar when it spawns this process (see `buildSpawnEnv` in
-`src/agent/sidecar.ts`). `_TOKEN` is a DEDICATED bearer token for that one
+`PAPERHANGER_TELEMETRY_CALLBACK_URL`, `_TOKEN`, and `_SOURCE`. In the default
+internal agent-host mode these are set automatically by the parent repo's
+sidecar when it spawns this process (see `buildSpawnEnv` in
+`src/agent/sidecar.ts`); `_TOKEN` is a DEDICATED bearer token for that one
 route, deliberately separate from the parent's dashboard/incident-CRUD
-`server.apiToken`. Tool registration is skipped entirely
-(`createTelemetryTools()` returns `[]`) when any of the three is absent --
-covering both "no telemetry backend configured" and, in external agent-host
-mode, "the operator didn't set `agent.telemetryCallbackToken`" (see the
-parent repo's `src/config/schema.ts` for that config field).
+`server.apiToken`. **In external agent-host mode** (the parent's
+`agent.hostUrl` set), the parent process never spawns this one, so it never
+sets any of the three -- the operator running this process must set all
+three themselves: `PAPERHANGER_TELEMETRY_CALLBACK_URL` to the parent's own,
+externally-reachable `/telemetry/query` endpoint (e.g.
+`https://<paperhanger-host>/telemetry/query` -- NOT the parent's internal
+`http://127.0.0.1:<port>/telemetry/query` default, which is only reachable
+when this process happens to share the parent's network namespace),
+`PAPERHANGER_TELEMETRY_CALLBACK_TOKEN` matching the parent's configured
+`agent.telemetryCallbackToken`, and `PAPERHANGER_TELEMETRY_CALLBACK_SOURCE`
+matching the parent's `config.telemetry.source`. Tool registration is
+skipped entirely (`createTelemetryTools()` returns `[]`) when any of the
+three is absent -- covering "no telemetry backend configured" and, in
+external agent-host mode, "the operator didn't set these three env vars on
+this process" (see the parent repo's `src/config/schema.ts` for the
+`telemetryCallbackToken` config field).
 
 `_SOURCE` (the parent's `config.telemetry.source`) is used only to build the
 tool's `description` via `describeTelemetrySource`

@@ -252,8 +252,18 @@ agent:
   # agent-host must present to this deployment's POST /telemetry/query
   # follow-up-telemetry callback route. The internal (default, no hostUrl)
   # sidecar mode needs none of this -- it generates a random per-boot token
-  # itself. Also set the identical value on the external agent-host's own
-  # PAPERHANGER_TELEMETRY_CALLBACK_TOKEN environment variable.
+  # itself and passes it (plus the callback URL/source) through its own
+  # spawn env automatically.
+  #
+  # In external-host mode this process never spawns the agent-host, so it
+  # cannot set anything on it -- the operator must ALSO set, on the external
+  # agent-host's own environment: PAPERHANGER_TELEMETRY_CALLBACK_TOKEN
+  # (identical to the value below), PAPERHANGER_TELEMETRY_CALLBACK_URL (this
+  # deployment's own externally-reachable .../telemetry/query URL -- NOT
+  # http://127.0.0.1:<port>/telemetry/query, which only works if the
+  # external agent-host shares this process's network namespace), and
+  # PAPERHANGER_TELEMETRY_CALLBACK_SOURCE (matching telemetry.source above).
+  # Missing any of the three there leaves query_telemetry unavailable.
   # telemetryCallbackToken: ${TELEMETRY_CALLBACK_TOKEN}
 
 github:

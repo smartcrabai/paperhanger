@@ -194,6 +194,98 @@ describe("runFollowUpTelemetryQuery - the `expression` escape hatch (GreptimeDB-
 			}),
 		).rejects.toBeInstanceOf(FollowUpTelemetryQueryValidationError);
 	});
+
+	test("appends the default LIMIT to a SELECT with no LIMIT clause of its own", async () => {
+		const source = fakeSource({
+			name: "greptimedb",
+			runRawSql: async () => [],
+		});
+		await runFollowUpTelemetryQuery(source, {
+			signal: "logs",
+			timeRange: TIME_RANGE,
+			expression: "SELECT * FROM opentelemetry_logs",
+		});
+		expect(source.calls).toEqual([
+			{
+				method: "runRawSql",
+				args: "SELECT * FROM opentelemetry_logs LIMIT 100",
+			},
+		]);
+	});
+
+	test("appends the caller's requested (clamped) LIMIT, not just the default", async () => {
+		const source = fakeSource({
+			name: "greptimedb",
+			runRawSql: async () => [],
+		});
+		await runFollowUpTelemetryQuery(source, {
+			signal: "traces",
+			timeRange: TIME_RANGE,
+			expression: "SELECT * FROM opentelemetry_traces",
+			limit: 10_000,
+		});
+		expect(source.calls[0]?.args).toBe(
+			"SELECT * FROM opentelemetry_traces LIMIT 200",
+		);
+	});
+
+	test("replaces an explicit LIMIT that exceeds the clamped cap, rather than leaving it unbounded", async () => {
+		const source = fakeSource({
+			name: "greptimedb",
+			runRawSql: async () => [],
+		});
+		await runFollowUpTelemetryQuery(source, {
+			signal: "logs",
+			timeRange: TIME_RANGE,
+			expression: "SELECT * FROM opentelemetry_logs LIMIT 999999",
+		});
+		expect(source.calls[0]?.args).toBe(
+			"SELECT * FROM opentelemetry_logs LIMIT 100",
+		);
+	});
+
+	test("leaves an explicit LIMIT already within the cap untouched", async () => {
+		const source = fakeSource({
+			name: "greptimedb",
+			runRawSql: async () => [],
+		});
+		await runFollowUpTelemetryQuery(source, {
+			signal: "logs",
+			timeRange: TIME_RANGE,
+			expression: "SELECT * FROM opentelemetry_logs LIMIT 5",
+		});
+		expect(source.calls[0]?.args).toBe(
+			"SELECT * FROM opentelemetry_logs LIMIT 5",
+		);
+	});
+
+	test("does not append a LIMIT to a non-SELECT statement (e.g. SHOW TABLES)", async () => {
+		const source = fakeSource({
+			name: "greptimedb",
+			runRawSql: async () => [],
+		});
+		await runFollowUpTelemetryQuery(source, {
+			signal: "logs",
+			timeRange: TIME_RANGE,
+			expression: "SHOW TABLES",
+		});
+		expect(source.calls[0]?.args).toBe("SHOW TABLES");
+	});
+
+	test("strips a trailing semicolon before deciding whether to append LIMIT", async () => {
+		const source = fakeSource({
+			name: "greptimedb",
+			runRawSql: async () => [],
+		});
+		await runFollowUpTelemetryQuery(source, {
+			signal: "logs",
+			timeRange: TIME_RANGE,
+			expression: "SELECT * FROM opentelemetry_logs;",
+		});
+		expect(source.calls[0]?.args).toBe(
+			"SELECT * FROM opentelemetry_logs LIMIT 100",
+		);
+	});
 });
 
 describe("runFollowUpTelemetryQuery - structurally unsupported (resolves normally with notes)", () => {

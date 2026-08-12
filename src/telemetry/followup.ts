@@ -24,7 +24,12 @@
  *   single read-only SQL statement, guarded by
  *   `agent-host/src/lib/sql-guard.ts` imported from here as the single
  *   canonical guard (dependency-free pure TS, already unit-tested by the
- *   root `bun test`) rather than a duplicated copy.
+ *   root `bun test`) rather than a duplicated copy. `limit` (clamped the
+ *   same way as the structured path) is enforced here too -- a `SELECT`
+ *   without its own trailing `LIMIT` gets one appended, and an explicit
+ *   `LIMIT` larger than the clamped value is replaced, before the SQL ever
+ *   reaches `runRawSql` -- so this escape hatch can't run fully unbounded
+ *   against the backend (see `applyExpressionLimit` below).
  *
  * Failure semantics (see docs/spec.md section 3.4 and the PR description for
  * the full rationale) are deliberately asymmetric:
@@ -143,6 +148,52 @@ function toRecords<T extends object>(items: T[]): Record<string, unknown>[] {
 }
 
 /**
+ * Matches a trailing `LIMIT <n>` (optionally followed by `OFFSET <m>`) at
+ * the very end of a statement -- i.e. the *outer* statement's own row cap,
+ * not one belonging to a nested subquery (which could never be the last
+ * token of the whole statement). Used by {@link applyExpressionLimit}.
+ */
+const TRAILING_LIMIT_RE = /\blimit\s+(\d+)(?:\s+offset\s+\d+)?\s*$/i;
+
+/**
+ * Bounds the raw-SQL `expression` escape hatch's row count the same way the
+ * structured `queryLogs`/`queryTraces` builders already do (each injects a
+ * `LIMIT ${limit}` into the SQL it generates -- see
+ * `src/telemetry/greptimedb.ts`), so this path can't run fully unbounded
+ * against the backend just because the caller wrote raw SQL instead of
+ * using `filter`.
+ *
+ * Only a bare `SELECT` gets a `LIMIT` appended: `SHOW`/`DESC`/`DESCRIBE`
+ * (the other statements `assertReadOnlySingleStatement` allows) return
+ * bounded metadata already, and appending `LIMIT` to them is not valid SQL.
+ * A `SELECT` that already ends in its own trailing `LIMIT` clause is left
+ * untouched as long as it doesn't exceed `limit` -- the caller's explicit
+ * (smaller) bound is honored rather than overridden. An explicit `LIMIT`
+ * larger than `limit` is replaced (dropping any trailing `OFFSET` along
+ * with it) so this can only ever narrow, never widen, the effective cap.
+ */
+function applyExpressionLimit(expression: string, limit: number): string {
+	const trimmed = expression.trim();
+	const withoutSemicolon = trimmed.endsWith(";")
+		? trimmed.slice(0, -1).trimEnd()
+		: trimmed;
+	const firstWord = (withoutSemicolon.split(/\s+/)[0] ?? "").toLowerCase();
+	if (firstWord !== "select") {
+		return withoutSemicolon;
+	}
+	const match = withoutSemicolon.match(TRAILING_LIMIT_RE);
+	if (!match) {
+		return `${withoutSemicolon} LIMIT ${limit}`;
+	}
+	const [, limitText] = match;
+	const existingLimit = Number.parseInt(limitText ?? "", 10);
+	if (Number.isFinite(existingLimit) && existingLimit <= limit) {
+		return withoutSemicolon;
+	}
+	return `${withoutSemicolon.slice(0, match.index)}LIMIT ${limit}`;
+}
+
+/**
  * Dispatches a validated follow-up query to `source`. See the module doc
  * comment for the full structured-filter-vs-expression and failure-semantics
  * design.
@@ -152,10 +203,11 @@ export async function runFollowUpTelemetryQuery(
 	request: FollowUpTelemetryQueryRequest,
 ): Promise<FollowUpTelemetryQueryResponse> {
 	const notes: string[] = [];
+	const limit = clampLimit(request.limit);
 	const query: TelemetryQuery = {
 		timeRange: request.timeRange,
 		labels: request.filter ?? {},
-		limit: clampLimit(request.limit),
+		limit,
 	};
 
 	if (request.signal === "metrics") {
@@ -186,7 +238,9 @@ export async function runFollowUpTelemetryQuery(
 				err instanceof Error ? err.message : String(err),
 			);
 		}
-		const rows = await source.runRawSql(request.expression);
+		const rows = await source.runRawSql(
+			applyExpressionLimit(request.expression, limit),
+		);
 		return buildResponse(request.signal, rows, notes);
 	}
 

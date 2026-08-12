@@ -314,6 +314,19 @@ const AgentSchema = z.object({
 	 * configuration itself). Leaving this unset in external mode disables
 	 * follow-up telemetry queries -- `query_telemetry` degrades to
 	 * unavailable rather than serving the route unauthenticated.
+	 *
+	 * This token is only ONE of three env vars the external agent-host's own
+	 * process needs (see `agent-host/README.md`'s "query_telemetry" section):
+	 * it also needs `PAPERHANGER_TELEMETRY_CALLBACK_URL` (this deployment's
+	 * own externally-reachable `/telemetry/query` URL -- NOT the
+	 * `http://127.0.0.1:<server.port>/telemetry/query` default this process
+	 * uses internally, which is only reachable from a process sharing this
+	 * one's network namespace) and `PAPERHANGER_TELEMETRY_CALLBACK_SOURCE`
+	 * (matching `config.telemetry.source`). All three are set automatically
+	 * in the default internal mode via the spawned child's env; in external
+	 * mode this process has no channel to set any env var on a separately
+	 * deployed process, so the operator must configure all three there
+	 * themselves.
 	 */
 	telemetryCallbackToken: z.string().min(1).optional(),
 	/** Guardrail: max total changed lines (additions + deletions) before a fix is rejected. */

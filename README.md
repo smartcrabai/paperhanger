@@ -369,7 +369,7 @@ Every key from `paperhanger.example.yaml`, with its default when omitted
 | `agent.maxFixAttempts` | `3` | Guardrail: max fix attempts (initial + test-failure retries) per incident before the agent-host workflow gives up -- see "Current limitations" for why this (plus the timeout, concurrency cap, and cooldown) is the achievable subset of cost containment |
 | `agent.hostUrl` | *(unset -- spawns an internal sidecar)* | Point at an externally-deployed agent-host instead of spawning a child process |
 | `agent.hostPort` | `8700` | Port the spawned agent-host listens on (ignored in external-host mode) |
-| `agent.telemetryCallbackToken` | *(unset)* | Bearer token an EXTERNALLY deployed agent-host (`agent.hostUrl` set) must present to this deployment's `POST /telemetry/query` callback route (see "Security notes" below). Ignored in the default internal mode, where the sidecar generates a random per-boot token itself -- no configuration needed there. Required to enable follow-up telemetry queries in external-host mode; the operator must also configure the same value on the external agent-host's own `PAPERHANGER_TELEMETRY_CALLBACK_TOKEN` env var |
+| `agent.telemetryCallbackToken` | *(unset)* | Bearer token an EXTERNALLY deployed agent-host (`agent.hostUrl` set) must present to this deployment's `POST /telemetry/query` callback route (see "Security notes" below). Ignored in the default internal mode, where the sidecar generates a random per-boot token itself -- no configuration needed there. Required to enable follow-up telemetry queries in external-host mode; the operator must ALSO set `PAPERHANGER_TELEMETRY_CALLBACK_URL` (this deployment's own externally-reachable `/telemetry/query` URL) and `PAPERHANGER_TELEMETRY_CALLBACK_SOURCE` (matching `telemetry.source` below) on the external agent-host's own environment, in addition to `PAPERHANGER_TELEMETRY_CALLBACK_TOKEN` matching this value -- this process has no way to set any of the three on a separately deployed process itself |
 | `github.appId` | *(required)* | |
 | `github.privateKey` | *(required)* | PEM, PKCS#1 or PKCS#8 |
 | `notifiers` | `[]` | List of `{ type: slack, webhookUrl }` / `{ type: discord, webhookUrl }` / `{ type: webhook, url }`. Empty list is valid -- no notifications are sent, everything else still works |
@@ -514,11 +514,21 @@ The agent-host (`agent-host/`) is a separate Node-only package with its own
   CRUD. In the default internal agent-host mode this token is generated
   randomly per boot and passed to the spawned child through its own
   environment only, never persisted or logged; there is nothing to
-  configure. In external agent-host mode (`agent.hostUrl` set), set
-  `agent.telemetryCallbackToken` and configure the same value on the
-  external agent-host's own environment, or the route stays disabled
-  (503) -- there is no unauthenticated fallback. The route itself responds
-  503 whenever no telemetry backend is configured at all.
+  configure. In external agent-host mode (`agent.hostUrl` set), this
+  process never spawns the agent-host and so never sets any env var on it:
+  set `agent.telemetryCallbackToken` here AND, on the external agent-host's
+  own environment, all three of `PAPERHANGER_TELEMETRY_CALLBACK_TOKEN`
+  (matching the value configured here), `PAPERHANGER_TELEMETRY_CALLBACK_URL`
+  (this deployment's own externally-reachable `/telemetry/query` URL --
+  NOT the internal `http://127.0.0.1:<port>/telemetry/query` default this
+  process uses for its own spawned-child case, unless the external
+  agent-host happens to share this process's network namespace), and
+  `PAPERHANGER_TELEMETRY_CALLBACK_SOURCE` (matching `telemetry.source`).
+  Missing any of the three degrades `query_telemetry` to unavailable on the
+  agent-host side; missing the token here also leaves the route disabled
+  (503) on this side -- there is no unauthenticated fallback either way. The
+  route itself responds 503 whenever no telemetry backend is configured at
+  all.
 - **Webhook endpoints (`POST /webhooks/{source}`) all authenticate the same
   way**: a per-source shared secret presented as `X-Webhook-Token` or
   `?token=`, constant-time compared before the body is read. Source-specific

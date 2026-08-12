@@ -271,11 +271,19 @@ as three separate vars (`PAPERHANGER_TELEMETRY_CALLBACK_URL`/`_TOKEN`/
 `_SOURCE`) -- no persisted secret, no new configuration. This is also why
 the sidecar no longer forwards any backend URL/database/auth value to the
 agent-host process at all: the parent proxies every query itself. In
-external agent-host mode (`agent.hostUrl` set) there is no spawn env to use,
-so the operator must set `agent.telemetryCallbackToken` and configure the
-same value on the externally deployed agent-host's own environment;
-otherwise `query_telemetry` degrades to unavailable rather than serving the
-route unauthenticated.
+external agent-host mode (`agent.hostUrl` set) there is no spawn env to use
+-- `src/index.ts` never spawns that process, so it never sets any env var on
+it -- so the operator must set `agent.telemetryCallbackToken` here AND
+configure all three env vars on the externally deployed agent-host's own
+environment themselves: `PAPERHANGER_TELEMETRY_CALLBACK_TOKEN` (matching
+this config's value), `PAPERHANGER_TELEMETRY_CALLBACK_URL` (this
+deployment's own externally-reachable `/telemetry/query` URL -- the internal
+`http://127.0.0.1:<server.port>/telemetry/query` default only works if that
+process shares this one's network namespace), and
+`PAPERHANGER_TELEMETRY_CALLBACK_SOURCE` (matching `config.telemetry.source`).
+Missing any of the three there, or the token here, degrades
+`query_telemetry` to unavailable rather than serving the route
+unauthenticated.
 
 ## Dashboard (repo definitions + incident browser)
 
