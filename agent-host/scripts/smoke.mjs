@@ -122,6 +122,81 @@ assert(
 	telemetryTools.length === 1 && telemetryTools[0].name === "query_telemetry",
 	"createTelemetryTools() returns a query_telemetry tool when the callback env vars are set",
 );
+
+// The tool's Valibot schemas and its defineTool wiring are asserted here
+// rather than in a `src/**.test.ts` file because both need agent-host's own
+// dependencies (`valibot`, `@flue/runtime`), which the main repo's `bun test`
+// deliberately does not install -- see agent-host/README.md's note on the
+// dependency-free `src/lib/` tier. The env gate itself and the callback
+// client are pure and stay covered there.
+const telemetryTool = telemetryTools[0];
+const TIME_RANGE = {
+	from: "2026-01-01T00:00:00Z",
+	to: "2026-01-01T00:05:00Z",
+};
+assert(
+	v.safeParse(telemetryTool.input, {
+		signal: "logs",
+		timeRange: TIME_RANGE,
+		filter: { service: "checkout" },
+	}).success,
+	"query_telemetry input schema accepts a minimal structured request",
+);
+assert(
+	!v.safeParse(telemetryTool.input, {
+		signal: "not-a-signal",
+		timeRange: TIME_RANGE,
+	}).success,
+	"query_telemetry input schema rejects an unknown signal",
+);
+// Mirrors FollowUpTelemetryQueryResponse in the parent's
+// src/telemetry/followup.ts -- the two schemas are hand-written mirrors, so
+// this is what catches them drifting apart.
+assert(
+	v.safeParse(telemetryTool.output, {
+		logs: [{ body: "boom" }],
+		truncated: false,
+		notes: [],
+	}).success,
+	"query_telemetry output schema accepts the parent callback route's response shape",
+);
+
+// run() must reach the configured callback URL with the dedicated bearer
+// token -- the wiring between the env gate and the callback client, which
+// neither of their own unit tests can see.
+const originalFetch = globalThis.fetch;
+let capturedUrl;
+let capturedAuth;
+globalThis.fetch = async (url, init) => {
+	capturedUrl = url;
+	capturedAuth = init?.headers?.Authorization;
+	return new Response(
+		JSON.stringify({ logs: [], truncated: false, notes: [] }),
+		{
+			status: 200,
+		},
+	);
+};
+try {
+	const runResult = await telemetryTool.run({
+		toolCallId: "smoke-call",
+		log: () => {},
+		data: { signal: "logs", timeRange: TIME_RANGE },
+	});
+	assert(
+		capturedUrl === "http://127.0.0.1:0/telemetry/query" &&
+			capturedAuth === "Bearer smoke-callback-token",
+		"query_telemetry run() POSTs to the configured callback URL with its bearer token",
+	);
+	assert(
+		JSON.stringify(runResult) ===
+			JSON.stringify({ output: { logs: [], truncated: false, notes: [] } }),
+		"query_telemetry run() returns the callback response as `output`",
+	);
+} finally {
+	globalThis.fetch = originalFetch;
+}
+
 for (const key of CALLBACK_ENV_KEYS) {
 	if (savedCallbackEnv[key] === undefined) delete process.env[key];
 	else process.env[key] = savedCallbackEnv[key];
