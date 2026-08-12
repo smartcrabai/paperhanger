@@ -40,14 +40,16 @@ sources:
 
 # Discriminated union on `source` (like `storage`/`notifiers` above); exactly
 # one of "greptimedb", "loki", "tempo", "prometheus", "clickstack", "signoz",
-# "openobserve", "datadog", "newrelic", "grafana", "zabbix", "mackerel" is
-# active at a time. Omit the whole `telemetry` section to run without one
-# (see the config reference below). "loki"/"tempo"/"prometheus" are
-# single-signal sources -- pick those if you run a Grafana OSS stack with
+# "openobserve", "datadog", "newrelic", "grafana", "zabbix", "mackerel",
+# "composite" is active at a time. Omit the whole `telemetry` section to run
+# without one (see the config reference below). "loki"/"tempo"/"prometheus"
+# are single-signal sources -- pick those if you run a Grafana OSS stack with
 # those three as separate backends, rather than GreptimeDB's single
-# do-everything endpoint. Only "greptimedb" exposes a follow-up
-# query_telemetry tool to the fix agent during diagnosis -- every source
-# here still feeds the initial collection phase. Zabbix and Mackerel are
+# do-everything endpoint; or pick "composite" (see further below) to route
+# all three at once instead of picking just one. Only "greptimedb" exposes a
+# follow-up query_telemetry tool to the fix agent during diagnosis -- every
+# source here still feeds the initial collection phase (composite included,
+# even when one of its slots is "greptimedb"). Zabbix and Mackerel are
 # monitoring systems, not log/trace stores, so their collection is
 # necessarily best-effort (see README.md's config reference and
 # src/telemetry/{zabbix,mackerel}.ts's module doc comments). The
@@ -146,6 +148,33 @@ telemetry:
 #   # logsStream: default
 #   # tracesStream: default
 #   # timeoutMs: 30000
+
+# Composite: routes each signal to its own backend instead of picking one for
+# all three -- the standard Grafana OSS setup (Loki + Tempo + Prometheus) is
+# the motivating case, but any mix of the sources above works (any source
+# except "composite" itself is a valid slot value; nesting is rejected).
+# Only the slot's own query method is ever called (a source in "logs:" never
+# has its queryTraces/queryMetrics invoked, even if it implements them). At
+# least one of logs/traces/metrics is required. An unset slot returns no
+# results (logged once at startup, not per query); a slot whose backend
+# can't structurally serve that signal (e.g. "loki" under traces:) logs a
+# startup warning rather than failing. A slot's query failure degrades only
+# that signal, not the whole incident -- see src/telemetry/composite.ts.
+# Cross-backend trace correlation (matching logs' trace_id against a
+# different traces: backend) is the operator's responsibility, and is
+# meaningless if logs: is zabbix/mackerel (their problem/alert history
+# carries no trace_id at all).
+# telemetry:
+#   source: composite
+#   logs:
+#     source: loki
+#     url: ${LOKI_URL}
+#   traces:
+#     source: tempo
+#     url: ${TEMPO_URL}
+#   metrics:
+#     source: prometheus
+#     url: ${PROMETHEUS_URL}
 
 # Self-instrumentation: where paperhanger exports ITS OWN OTLP traces (see
 # src/observability/tracing.ts). Distinct from `telemetry` above, which is

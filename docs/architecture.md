@@ -71,7 +71,8 @@ src/
     grafana.ts             # Query front-end: /api/ds/query against provisioned Loki/Tempo/Prometheus datasources
     zabbix.ts              # JSON-RPC (problem/event history + item history); monitoring-only, no tracing
     mackerel.ts            # REST (alerts + service metrics); monitoring-only, no tracing
-    factory.ts             # Dispatches config.telemetry.source -> concrete TelemetrySource
+    composite.ts           # Routes logs/traces/metrics each to their own child TelemetrySource (source: composite)
+    factory.ts             # Dispatches config.telemetry.source -> concrete TelemetrySource (recurses once for composite)
     context-builder.ts     # Collection strategy → token-budget-aware IncidentContext
   repo/
     resolver.ts            # attribute → mapping → org-search resolution chain
@@ -212,6 +213,16 @@ each file's module doc comment):
   `queryMetrics` only returns a series when the caller can supply both a
   resolvable host/service label and a metric-name hint. Documented plainly
   here and in README.md's config reference rather than silently degraded.
+- `composite` (`composite.ts`): routes each signal to its own single-backend
+  child instead of picking one backend for all three -- the standard
+  Grafana OSS setup (Loki + Tempo + Prometheus) is the motivating case.
+  `factory.ts` recurses once per configured slot to build each child; the
+  schema forbids nesting `composite` inside a slot, so recursion never goes
+  deeper than one level. Per-signal error isolation: a slot's query failure
+  degrades only that signal to `[]`, unlike the whole-incident degradation
+  `src/core/pipeline.ts` applies to a single (non-composite) source's
+  failure. `query_telemetry` stays GreptimeDB-only exactly as above, even
+  when a composite slot happens to be `greptimedb`.
 
 `src/telemetry/http-client.ts` factors the per-request timeout
 (`AbortController`-based) and OTel CLIENT span wrapping the `datadog`/

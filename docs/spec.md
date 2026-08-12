@@ -109,8 +109,9 @@ interface RepoDefinitionStore {
   現在は Grafana OSS スタック向けの Loki/Tempo/Prometheus(いずれも単一シグナル専用)、
   ClickStack/SigNoz/OpenObserve(いずれも直クエリ)、および Datadog・New Relic・
   Grafana(クエリフロントエンドとして)・Zabbix・Mackerel の実装も追加されている
-  (`config.telemetry.source` の discriminated union で切り替え、同時に有効化できる
-  のは 1 系統のみ。詳細は後述)
+  (`config.telemetry.source` の discriminated union で切り替え、単一バックエンド構成では
+  同時に有効化できるのは 1 系統のみ。詳細は後述)。加えて `source: composite` を選ぶと、
+  `logs:`/`traces:`/`metrics:` それぞれに個別のバックエンドを指定できる(下記参照)
 
 ```ts
 interface TelemetryQuery {
@@ -156,6 +157,38 @@ interface TelemetrySource {
   README.md の設定リファレンスと各実装のコメントに明記している。Zabbix は
   API トークンを `Authorization: Bearer` ヘッダーで送る前提(6.4 以降を想定)、
   Mackerel は `X-Api-Key` ヘッダーで認証する
+- Composite 実装(`src/telemetry/composite.ts`): 単一バックエンドでは全シグナルを
+  カバーできない構成(典型例は Grafana OSS の Loki + Tempo + Prometheus)向けに、
+  `source: composite` でシグナルごとに個別のバックエンドを指定できる。
+  ```yaml
+  telemetry:
+    source: composite
+    logs:    { source: loki, url: ${LOKI_URL} }
+    traces:  { source: tempo, url: ${TEMPO_URL} }
+    metrics: { source: prometheus, url: ${PROMETHEUS_URL} }
+  ```
+  `logs`/`traces`/`metrics` の各スロットには上記 12 バックエンドのいずれか 1 つを
+  指定可能(スロット内で `composite` を入れ子にすることはスキーマ上不可)。
+  `queryLogs`/`queryTraces`/`queryMetrics` はそれぞれ対応するスロットの子
+  `TelemetrySource` だけを呼び出す -- 他スロットのメソッドは、その子が実装していても
+  一切呼ばれない。未設定のスロットへのクエリは常に空配列(構築時に一度だけ info
+  ログでどのシグナルが未設定かを記録する)。子の 1 つがクエリで例外を投げても
+  そのシグナルだけが空配列に縮退し、他シグナルの収集結果には影響しない(単一
+  バックエンド構成では `src/core/pipeline.ts` が例外発生時にインシデント全体を
+  空テレメトリへ縮退させるが、composite ではこの縮退がシグナル単位になる)。
+  さらに、あるバックエンドがそのシグナルを構造的にサポートしない組み合わせ
+  (例: `traces:` に Loki を置く、`metrics:` に ClickStack/SigNoz を置く)は
+  起動時に一度だけ WARNING を出す -- バックエンドの対応シグナルは実装の変化で
+  変わり得るため、hard error ではなく警告に留める(テレメトリは劣化しても
+  ブロックしないという本セクション冒頭の方針に従う)。この対応表は
+  `composite.ts` に一箇所だけ持ち、各コレクタ実装とのズレを追い続ける前提。
+  なお `query_telemetry`(下記)は GreptimeDB 専用のままで、composite の
+  スロットが GreptimeDB であっても追加クエリ Tool は有効化されない。
+  また `logs:` に Zabbix/Mackerel のような疑似ログソースを置いた場合、
+  `context-builder.ts` はログから `trace_id` を抽出してトレースを取得するため、
+  problem/alert 履歴には `trace_id` が存在せず `traces:` 側との紐付けは機能しない
+  (loki+tempo のような正規のペアでも、両バックエンドが一貫した `trace_id` を
+  持つ前提は運用側の責務であることに変わりはない)
 - **収集戦略**(自動収集フェーズ):
   1. アラートのラベルから `service.name` 等を特定し、時間窓内のエラーログを取得(特定できない場合は時間窓のみで件数を絞って取得)
   2. エラーログに紐づく `trace_id` から代表トレースを取得。加えてサービスの代表的なスパンもサンプリング取得
@@ -244,7 +277,7 @@ sources:
   grafana: { secret: ${GRAFANA_WEBHOOK_SECRET} }
   alertmanager: { secret: ${AM_WEBHOOK_SECRET} }
 telemetry:
-  source: greptimedb          # discriminated union; also: loki, tempo, prometheus, clickstack, signoz, openobserve (see section 3.4)
+  source: greptimedb          # discriminated union; also: loki, tempo, prometheus, clickstack, signoz, openobserve, composite (see section 3.4)
   url: ${GREPTIMEDB_URL}
   database: public
   auth: ${GREPTIMEDB_AUTH}
