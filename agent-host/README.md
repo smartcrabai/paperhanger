@@ -212,7 +212,12 @@ expression?, limit? }`. `filter` (structured label equality) is the main path;
 raw-SQL one: the parent's `followup.ts` appends a `LIMIT` clause to a `SELECT`
 that doesn't already carry a (small enough) one of its own before running it,
 so `expression` can't run fully unbounded against the backend just because it
-bypassed the structured builders. A query outside the configured source's
+bypassed the structured builders. For that bound to hold, an `expression`
+containing a SQL comment (`--` or `/*`) is rejected outright: the SQL guard
+only rejects a comment placed *before* the verb, and a trailing comment can
+otherwise defeat the appender in both directions -- a sub-cap number inside the
+comment makes the statement look already-bounded, and an over-cap one makes the
+injected `LIMIT` land inside the comment. A query outside the configured source's
 capabilities (a missing required hint, or `expression` against a non-GreptimeDB
 source) comes back as an empty result with an explanatory `notes` entry rather
 than failing; a genuine backend failure/timeout throws, which `run()`

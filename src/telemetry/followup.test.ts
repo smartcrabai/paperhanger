@@ -181,6 +181,46 @@ describe("runFollowUpTelemetryQuery - the `expression` escape hatch (GreptimeDB-
 		expect(source.calls).toEqual([]);
 	});
 
+	// Regression: `assertReadOnlySingleStatement` only rejects a comment that PRECEDES
+	// the verb, so a trailing comment used to reach `applyExpressionLimit` and defeat it
+	// in both directions -- a sub-cap value inside the comment made the expression look
+	// "already bounded", and an over-cap value made the injected `LIMIT` land inside the
+	// comment. Either way the statement reached the backend with no row cap at all.
+	test.each([
+		[
+			"a sub-cap limit inside a trailing line comment",
+			"SELECT * FROM opentelemetry_logs -- limit 5",
+		],
+		[
+			"an over-cap limit inside a trailing line comment",
+			"SELECT * FROM opentelemetry_logs -- limit 9999",
+		],
+		[
+			"a trailing block comment",
+			"SELECT * FROM opentelemetry_logs /* limit 5 */",
+		],
+		[
+			"a comment in the middle of the statement",
+			"SELECT * -- all\nFROM opentelemetry_logs",
+		],
+	])(
+		"rejects %s with a validation error, without calling runRawSql",
+		async (_name, expression) => {
+			const source = fakeSource({
+				name: "greptimedb",
+				runRawSql: async () => [{ body: "should not run" }],
+			});
+			await expect(
+				runFollowUpTelemetryQuery(source, {
+					signal: "logs",
+					timeRange: TIME_RANGE,
+					expression,
+				}),
+			).rejects.toBeInstanceOf(FollowUpTelemetryQueryValidationError);
+			expect(source.calls).toEqual([]);
+		},
+	);
+
 	test("rejects a write statement with a validation error", async () => {
 		const source = fakeSource({
 			name: "greptimedb",

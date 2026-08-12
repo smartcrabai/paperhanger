@@ -252,7 +252,7 @@ interface TelemetrySource {
   - clone 直後(モデルのターン開始前)に origin remote から token を除去。push は token 入り URL を直接引数で渡し、設定に永続化しない
   - commit/push 直前に origin URL・ブランチ名の改ざん検査を行い、不一致は `failed`
   - モデルが生成する全出力(diagnosis / report / commitMessage / failureReason)に token・テレメトリコールバックトークンのリダクションを一括適用
-  - `query_telemetry` ツールの `expression`(GreptimeDB 限定のネイティブ SQL エスケープハッチ)は単文の SELECT/SHOW/DESC のみ許可。さらに `followup.ts` が `limit`(既定 100、上限 200 にクランプ)を SELECT 文に強制付与する(末尾に自前の LIMIT が無ければ付与、大きすぎる LIMIT は置き換え)ため、この経路も無制限に行を取得することはない
+  - `query_telemetry` ツールの `expression`(GreptimeDB 限定のネイティブ SQL エスケープハッチ)は単文の SELECT/SHOW/DESC のみ許可。さらに `followup.ts` が `limit`(既定 100、上限 200 にクランプ)を SELECT 文に強制付与する(末尾に自前の LIMIT が無ければ付与、大きすぎる LIMIT は置き換え)ため、この経路も無制限に行を取得することはない。**SQL コメント(`--` / `/*`)を含む `expression` は一律で拒否する**: sql-guard が拒否するのは verb より前に置かれたコメントだけで、末尾コメントはこの LIMIT 付与を無効化できてしまうため(上限未満の値をコメント内に書けば「既に上限内」と誤判定され、上限超の値を書けば付与した LIMIT 自体がコメントに飲まれる)。文字列リテラル内のコメント記号も巻き添えで拒否されるが、回避不能な上限を優先する
   - agent-host はテレメトリバックエンドの URL・認証情報を一切保持しない(本体プロセスが `/telemetry/query` コールバック経由で代理実行するため)。agent-host が保持するのは専用コールバックトークンのみで、内部モード(デフォルト)ではプロセス起動毎のランダム値、外部 agent-host 構成では `agent.telemetryCallbackToken` で明示設定した値。外部 agent-host 構成では本体プロセスがその子プロセスを spawn しないため、`PAPERHANGER_TELEMETRY_CALLBACK_URL`/`_TOKEN`/`_SOURCE` の 3 変数を運用者が外部 agent-host 自身の環境に手動設定する必要がある(内部モードは spawn env で自動設定されるため不要)
 
 ### 3.7 GitHub Integration

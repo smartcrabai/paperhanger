@@ -156,6 +156,27 @@ function toRecords<T extends object>(items: T[]): Record<string, unknown>[] {
 const TRAILING_LIMIT_RE = /\blimit\s+(\d+)(?:\s+offset\s+\d+)?\s*$/i;
 
 /**
+ * Matches a SQL comment marker anywhere in a statement. `assertReadOnlySingleStatement`
+ * only rejects a comment that *precedes* the verb (it makes the "first word" the comment
+ * token), so a trailing comment reaches this module -- and it defeats
+ * {@link applyExpressionLimit} in both directions:
+ *
+ * - `SELECT ... -- limit 5` matches {@link TRAILING_LIMIT_RE} with a value under the cap,
+ *   so the expression is passed through as "already bounded" while the real statement
+ *   carries no `LIMIT` at all.
+ * - `SELECT ... -- limit 9999` is "narrowed" by appending after the comment marker,
+ *   producing `SELECT ... -- LIMIT 200` -- the injected cap is itself commented out.
+ *
+ * Rather than teach the appender to parse comments and string literals, this path rejects
+ * any commented expression outright, matching the guard's own deliberately-strict posture
+ * (see `agent-host/src/lib/sql-guard.ts`): the model gets a clear error and rephrases. The
+ * cost is a false positive on a comment marker inside a string literal (e.g.
+ * `WHERE body LIKE '%--%'`), which is an acceptable trade for a bound that cannot be
+ * talked around.
+ */
+const SQL_COMMENT_RE = /--|\/\*/;
+
+/**
  * Bounds the raw-SQL `expression` escape hatch's row count the same way the
  * structured `queryLogs`/`queryTraces` builders already do (each injects a
  * `LIMIT ${limit}` into the SQL it generates -- see
@@ -236,6 +257,12 @@ export async function runFollowUpTelemetryQuery(
 		} catch (err) {
 			throw new FollowUpTelemetryQueryValidationError(
 				err instanceof Error ? err.message : String(err),
+			);
+		}
+		// Must run after the guard and before applyExpressionLimit -- see SQL_COMMENT_RE.
+		if (SQL_COMMENT_RE.test(request.expression)) {
+			throw new FollowUpTelemetryQueryValidationError(
+				"SQL comments are not allowed in `expression`: they defeat the row-count bound this path applies. Remove the comment and retry.",
 			);
 		}
 		const rows = await source.runRawSql(
