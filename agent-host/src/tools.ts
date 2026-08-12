@@ -16,11 +16,9 @@
 
 import { defineTool } from "@flue/runtime";
 import * as v from "valibot";
+import { telemetryCallbackConfigFromEnv } from "./lib/telemetry-callback-config.ts";
+import { queryTelemetry } from "./lib/telemetry-client.ts";
 import { describeTelemetrySource } from "./lib/telemetry-descriptions.ts";
-import {
-	queryTelemetry,
-	type TelemetryCallbackConfig,
-} from "./telemetry-client.ts";
 
 const QueryTelemetryInputSchema = v.object({
 	signal: v.picklist(["logs", "traces", "metrics"]),
@@ -40,29 +38,6 @@ const QueryTelemetryOutputSchema = v.object({
 	truncated: v.boolean(),
 	notes: v.array(v.string()),
 });
-
-/**
- * Reads the telemetry callback config the sidecar passes through as three
- * separate env vars when it spawns this process (see `buildSpawnEnv` in the
- * parent repo's `src/agent/sidecar.ts`): the parent's own callback URL, a
- * dedicated bearer token for it (never the same grant as the parent's
- * dashboard/incident-CRUD `server.apiToken`), and the configured source name
- * (used only to build this tool's description below). Tool registration in
- * `./fix-agent.ts` is skipped entirely when any of the three is absent --
- * mirroring the old single-env-var design's "no telemetry configured -> no
- * tool" behavior, now also covering external agent-host mode with no
- * `agent.telemetryCallbackToken` configured (see that config field's doc
- * comment in the parent repo's `src/config/schema.ts`).
- */
-function telemetryCallbackConfigFromEnv(): TelemetryCallbackConfig | undefined {
-	const url = process.env.PAPERHANGER_TELEMETRY_CALLBACK_URL;
-	const token = process.env.PAPERHANGER_TELEMETRY_CALLBACK_TOKEN;
-	const source = process.env.PAPERHANGER_TELEMETRY_CALLBACK_SOURCE;
-	if (!url || !token || !source) {
-		return undefined;
-	}
-	return { url, token, source };
-}
 
 /**
  * Returns `[query_telemetry]`, or `[]` when no telemetry callback is

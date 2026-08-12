@@ -1,6 +1,6 @@
 /**
  * Read-only, single-statement guard for the `query_telemetry` tool's SQL
- * path (`../telemetry-client.ts`). Pure logic, no `@flue/*` or network
+ * path (`./telemetry-client.ts`). Pure logic, no `@flue/*` or network
  * dependency, so it is unit-testable directly by the main paperhanger
  * repo's `bun test` (see the root `package.json` "test" script).
  */

@@ -34,13 +34,14 @@ agent-host/
     contract.ts              # Valibot schemas for the agent input/output contract
     fix-agent.ts              # "use agent" agent function: instructions + hooks
     fix-incident.ts           # deterministic host steps: diagnose -> fix -> test -> push
-    tools.ts                  # defineTool: query_telemetry
-    telemetry-client.ts        # HTTP client for the parent's POST /telemetry/query callback (no direct backend access, no backend credentials)
-    lib/                       # pure, @flue/*-free modules -- unit tested by the
+    tools.ts                  # defineTool: query_telemetry (Valibot schemas + wiring only)
+    lib/                       # dependency-free modules -- unit tested by the
                                 # main repo's `bun test` (root package.json "test")
       redaction.ts              # clone-token extraction + multi-secret redaction
       output-sanitizer.ts        # central FixIncidentOutput redaction (collectSecrets/sanitizeOutput)
       sql-guard.ts               # read-only single-statement SQL guard (imported by the PARENT's src/telemetry/followup.ts; see "The query_telemetry tool" below)
+      telemetry-callback-config.ts # env gate: no callback token -> no query_telemetry tool at all
+      telemetry-client.ts        # HTTP client for the parent's POST /telemetry/query callback (no direct backend access, no backend credentials; fetch is injectable)
       telemetry-descriptions.ts  # per-source query_telemetry tool description, with a safe default for an unrecognized source name
       test-detection.ts          # test-command selection from a file-existence probe
       fix-attempt-policy.ts       # pure retry/give-up/commit decision for the fix-retry loop
@@ -63,16 +64,29 @@ Relative imports in `src/` use explicit `.ts` extensions so the sources can
 also be loaded directly by plain Node (used by `scripts/smoke.mjs`), not just
 through Flue's bundler.
 
-`src/lib/*.ts` deliberately import nothing from `@flue/*` (not even
-transitively): `src/fix-agent.ts` imports `local` from `@flue/runtime/node`,
-which statically imports `node:sqlite` — a module Bun does not implement (see
-"Why a separate Node app?" above). Since the main repo's `bun test` runs
-under **Bun**, any test file that imports the agent module directly fails
-immediately with `error: No such built-in module: node:sqlite`, regardless of
-what it's actually trying to test. Keeping the security-relevant
-deterministic logic `@flue/*`-free in `lib/` is what makes it possible to
-unit test at all outside of `agent-host`'s own Node-only `bun
-install`/`vite build` cycle.
+`src/lib/*.ts` import **nothing external at all** — no `@flue/*` (not even
+transitively), and no other package either. Two separate constraints force
+this:
+
+- `src/fix-agent.ts` imports `local` from `@flue/runtime/node`, which
+  statically imports `node:sqlite` — a module Bun does not implement (see
+  "Why a separate Node app?" above). Since the main repo's `bun test` runs
+  under **Bun**, any test file reaching that module fails immediately with
+  `error: No such built-in module: node:sqlite`, whatever it was trying to
+  test.
+- The main repo's `bun test` runs from the repo root against
+  `agent-host/src` without installing `agent-host/node_modules`, so a module
+  importing even a Bun-compatible dependency (`valibot`, say) fails there
+  with `Cannot find package`.
+
+Keeping the security-relevant deterministic logic dependency-free in `lib/`
+is what makes it unit-testable at all outside `agent-host`'s own Node-only
+`bun install`/`vite build` cycle. Anything that genuinely needs a dependency
+— the Valibot schemas and `defineTool` wiring in `tools.ts`, the contract
+schemas in `contract.ts` — is asserted by `scripts/smoke.mjs` instead, which
+runs under Node with those dependencies installed (`bun run smoke`, also in
+CI). I/O belongs to callers: `lib/` modules take it as an injected callback
+(`harness.exec`, `fetchImpl`) rather than performing it directly.
 
 ## Agent contract
 
@@ -401,7 +415,7 @@ plus route admission (invalid `initialData` -> 400, valid -> 202). This does
 structural check, meant to catch contract drift and import/wiring errors, not
 full pipeline behavior.
 
-## Unit tests (`src/lib/`, plus `tools.ts`/`telemetry-client.ts`)
+## Unit tests (`src/lib/`)
 
 ```bash
 # From this directory:
@@ -420,12 +434,17 @@ security-relevant deterministic logic described under "Secret handling" and
 "Env sanitization" above: token extraction/redaction, the read-only SQL
 guard, test-command detection, and the remote/branch tamper check.
 
-`tools.ts` and `telemetry-client.ts` are colocated with their own
-`*.test.ts` too: unlike `fix-agent.ts`, they only import the non-Node
-`@flue/runtime` entrypoint (not `@flue/runtime/node`), which has no
-`node:sqlite` dependency and runs fine under Bun -- covering
-`createTelemetryTools()`'s env-var gating, the request/response schema, and
-the callback HTTP client's request/error handling.
+The `query_telemetry` tool is split across both tiers on purpose. Its env
+gate (`lib/telemetry-callback-config.ts` — a missing callback token must
+yield no tool at all) and its callback HTTP client
+(`lib/telemetry-client.ts` — request shape, bearer token, error handling,
+token never leaked into a thrown message) are dependency-free and covered
+here. What is left in `tools.ts` — the Valibot request/response schemas and
+the `defineTool` wiring — needs `valibot` and `@flue/runtime`, so it is
+asserted by `scripts/smoke.mjs` under Node instead. That is also where the
+output schema is checked against the parent's
+`FollowUpTelemetryQueryResponse` shape, since the two are hand-written
+mirrors.
 
 ## Version pinning
 

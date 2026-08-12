@@ -114,8 +114,7 @@ agent-host/                # Flue app (Node.js sidecar) — separate package.jso
     fix-agent.ts           # "use agent" agent function: instructions + hooks (model, sandbox, tools, lifecycle)
     fix-incident.ts        # Deterministic host steps: clone → diagnose → fix → test → push branch (PR creation happens back in the parent Bun process)
     tools.ts               # defineTool: query_telemetry follow-up queries
-    telemetry-client.ts    # HTTP client for the parent's POST /telemetry/query callback (no direct backend access)
-    lib/                   # common-setup-scripts, diagnosis-prompt, fix-attempt-policy, output-sanitizer, redaction, sql-guard, system-prompt, tamper-check, test-detection, telemetry-descriptions
+    lib/                   # dependency-free tier, unit-tested by the root `bun test`: common-setup-scripts, diagnosis-prompt, fix-attempt-policy, output-sanitizer, redaction, sql-guard, system-prompt, tamper-check, test-detection, telemetry-callback-config, telemetry-client, telemetry-descriptions
 tests/
   integration/             # testcontainers-based suites
 docs/
