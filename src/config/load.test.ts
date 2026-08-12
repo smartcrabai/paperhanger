@@ -9,6 +9,7 @@ const ENV_KEYS = [
 	"GITHUB_APP_ID",
 	"GITHUB_APP_PRIVATE_KEY",
 	"OTEL_EXPORTER_HEADER_VALUE",
+	"COMPOSITE_LOKI_URL",
 ] as const;
 
 const MINIMAL_YAML = `
@@ -269,6 +270,131 @@ github:
 		await expect(loadConfig("/nonexistent/paperhanger.yaml")).rejects.toThrow(
 			ConfigError,
 		);
+	});
+
+	test("an existing single-source telemetry config parses byte-identically after adding the composite member", async () => {
+		process.env.GRAFANA_WEBHOOK_SECRET = "grafana-secret";
+		process.env.GREPTIMEDB_URL = "http://greptimedb:4000";
+		process.env.GITHUB_APP_ID = "app-id-value";
+		process.env.GITHUB_APP_PRIVATE_KEY = "private-key-value";
+
+		const path = await writeFixture(MINIMAL_YAML);
+		const config = await loadConfig(path);
+
+		expect(config.telemetry).toEqual({
+			source: "greptimedb",
+			url: "http://greptimedb:4000",
+			database: "public",
+		});
+	});
+});
+
+describe("loadConfig - composite telemetry", () => {
+	function setRequiredEnv(): void {
+		process.env.GRAFANA_WEBHOOK_SECRET = "grafana-secret";
+		process.env.GITHUB_APP_ID = "12345";
+		process.env.GITHUB_APP_PRIVATE_KEY = "-----BEGIN KEY-----";
+	}
+
+	const BASE_YAML_HEADER = `
+storage:
+  driver: sqlite
+  path: /data/paperhanger.db
+sources:
+  grafana:
+    secret: \${GRAFANA_WEBHOOK_SECRET}
+github:
+  appId: \${GITHUB_APP_ID}
+  privateKey: \${GITHUB_APP_PRIVATE_KEY}
+`;
+
+	test("parses a composite telemetry section routing each signal to its own backend", async () => {
+		setRequiredEnv();
+		const yaml = `${BASE_YAML_HEADER}telemetry:
+  source: composite
+  logs:
+    source: loki
+    url: http://loki:3100
+  traces:
+    source: tempo
+    url: http://tempo:3200
+  metrics:
+    source: prometheus
+    url: http://prometheus:9090
+`;
+		const path = await writeFixture(yaml);
+		const config = await loadConfig(path);
+
+		expect(config.telemetry).toEqual({
+			source: "composite",
+			logs: { source: "loki", url: "http://loki:3100" },
+			traces: { source: "tempo", url: "http://tempo:3200" },
+			metrics: { source: "prometheus", url: "http://prometheus:9090" },
+		});
+	});
+
+	test("expands ${ENV_VAR} references inside a composite slot", async () => {
+		setRequiredEnv();
+		process.env.COMPOSITE_LOKI_URL = "http://loki.internal:3100";
+		const yaml = `${BASE_YAML_HEADER}telemetry:
+  source: composite
+  logs:
+    source: loki
+    url: \${COMPOSITE_LOKI_URL}
+`;
+		const path = await writeFixture(yaml);
+		const config = await loadConfig(path);
+
+		expect(config.telemetry?.source).toBe("composite");
+		if (config.telemetry?.source === "composite") {
+			expect(config.telemetry.logs?.source).toBe("loki");
+			if (config.telemetry.logs?.source === "loki") {
+				expect(config.telemetry.logs.url).toBe("http://loki.internal:3100");
+			}
+		}
+	});
+
+	test("a slot missing a required field errors with the precise path", async () => {
+		setRequiredEnv();
+		const yaml = `${BASE_YAML_HEADER}telemetry:
+  source: composite
+  logs:
+    source: loki
+  traces:
+    source: tempo
+    url: http://tempo:3200
+`;
+		const path = await writeFixture(yaml);
+		try {
+			await loadConfig(path);
+			throw new Error("expected loadConfig to throw");
+		} catch (err) {
+			expect(err).toBeInstanceOf(ConfigError);
+			expect((err as ConfigError).message).toContain("logs.url");
+		}
+	});
+
+	test("an empty composite (no logs/traces/metrics slots) hits the at-least-one-slot refine", async () => {
+		setRequiredEnv();
+		const yaml = `${BASE_YAML_HEADER}telemetry:
+  source: composite
+`;
+		const path = await writeFixture(yaml);
+		await expect(loadConfig(path)).rejects.toThrow(ConfigError);
+	});
+
+	test("a composite nested inside a composite slot is rejected", async () => {
+		setRequiredEnv();
+		const yaml = `${BASE_YAML_HEADER}telemetry:
+  source: composite
+  logs:
+    source: composite
+    metrics:
+      source: prometheus
+      url: http://prometheus:9090
+`;
+		const path = await writeFixture(yaml);
+		await expect(loadConfig(path)).rejects.toThrow(ConfigError);
 	});
 });
 

@@ -53,10 +53,14 @@ const SourcesSchema = z.record(z.string(), SourceConfigSchema).default({});
  * the agent-host sidecar/runner (see also the doc comments on
  * `AgentHostSidecarConfig.telemetry` (`src/agent/sidecar.ts`) and
  * `FixAgentRunnerConfig.telemetry` (`src/agent/runner.ts`) for why every
- * other source below is collection-only, no follow-up query tool).
+ * other source below is collection-only, no follow-up query tool). This
+ * holds for `source: "composite"` too: a composite's slots are never
+ * greptimedb-narrowed for the follow-up tool, even when a slot happens to be
+ * greptimedb -- see `src/telemetry/composite.ts`'s module doc comment.
  * `greptimedb`, `loki`, `tempo`, `prometheus`, `clickstack`, `signoz`,
  * `openobserve`, `datadog`, `newrelic`, `grafana`, `zabbix`, and `mackerel`
- * are the members today.
+ * are the single-backend members; `composite` (below) routes each signal to
+ * its own single-backend member instead of picking just one.
  */
 const GreptimeDbTelemetrySchema = z.object({
 	source: z.literal("greptimedb"),
@@ -192,7 +196,13 @@ const MackerelTelemetrySchema = z.object({
 	timeoutMs: z.number().int().positive().optional(),
 });
 
-const TelemetrySchema = z.discriminatedUnion("source", [
+/**
+ * The twelve single-backend telemetry schemas, as a tuple so both
+ * `SignalSourceSchema` below (a composite slot: one backend per signal) and
+ * `TelemetrySchema` (the top-level `telemetry:` config) can share the exact
+ * same member list without drifting out of sync.
+ */
+const signalSourceSchemas = [
 	GreptimeDbTelemetrySchema,
 	LokiTelemetrySchema,
 	TempoTelemetrySchema,
@@ -205,6 +215,41 @@ const TelemetrySchema = z.discriminatedUnion("source", [
 	GrafanaTelemetrySchema,
 	ZabbixTelemetrySchema,
 	MackerelTelemetrySchema,
+] as const;
+
+/**
+ * A single composite slot (`logs:`/`traces:`/`metrics:` under
+ * `source: composite` below): any one of the twelve single-backend
+ * telemetry schemas, but deliberately NOT `CompositeTelemetrySchema` itself
+ * -- nesting a composite inside a composite slot is rejected by this union,
+ * rather than by ad hoc validation, since a slot names exactly one backend
+ * to own that signal.
+ */
+const SignalSourceSchema = z.discriminatedUnion("source", signalSourceSchemas);
+
+/**
+ * Routes each signal to its own backend, for stacks with no single
+ * multi-signal store -- the standard Grafana OSS setup (Loki + Tempo +
+ * Prometheus) is the motivating case (see docs/spec.md section 3.4 and
+ * `src/telemetry/composite.ts`). At least one of `logs`/`traces`/`metrics`
+ * must be set: an all-empty composite configures nothing, which is what
+ * omitting `telemetry` entirely is already for.
+ */
+const CompositeTelemetrySchema = z
+	.object({
+		source: z.literal("composite"),
+		logs: SignalSourceSchema.optional(),
+		traces: SignalSourceSchema.optional(),
+		metrics: SignalSourceSchema.optional(),
+	})
+	.refine((data) => Boolean(data.logs || data.traces || data.metrics), {
+		message:
+			"composite telemetry must configure at least one of logs, traces, or metrics",
+	});
+
+const TelemetrySchema = z.discriminatedUnion("source", [
+	...signalSourceSchemas,
+	CompositeTelemetrySchema,
 ]);
 
 /** Time window (relative to alert time) used when collecting telemetry. See spec section 3.4. */
@@ -410,5 +455,8 @@ export type NewRelicTelemetryConfig = z.infer<typeof NewRelicTelemetrySchema>;
 export type GrafanaTelemetryConfig = z.infer<typeof GrafanaTelemetrySchema>;
 export type ZabbixTelemetryConfig = z.infer<typeof ZabbixTelemetrySchema>;
 export type MackerelTelemetryConfig = z.infer<typeof MackerelTelemetrySchema>;
+/** A single composite slot's config -- any one non-composite telemetry member. */
+export type SignalSourceConfig = z.infer<typeof SignalSourceSchema>;
+export type CompositeTelemetryConfig = z.infer<typeof CompositeTelemetrySchema>;
 export type ObservabilityConfig = z.infer<typeof ObservabilitySchema>;
 export type ObservabilityLogsConfig = z.infer<typeof ObservabilityLogsSchema>;

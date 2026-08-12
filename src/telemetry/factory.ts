@@ -9,11 +9,22 @@
  * are single-signal sources (see their respective files); only `greptimedb`
  * is wired into the agent-host sidecar's follow-up query tool so far -- see
  * the doc comment on `createTelemetryTools()` in `agent-host/src/tools.ts`.
+ *
+ * `composite` recurses: it calls this same function once per configured
+ * slot (`logs`/`traces`/`metrics`) to build that slot's child, then wraps
+ * them in a `CompositeTelemetrySource` (see `composite.ts`). The schema
+ * stops this from recursing more than one level deep -- a composite slot's
+ * type (`SignalSourceSchema` in `src/config/schema.ts`) excludes `composite`
+ * itself, so no `case "composite"` can ever appear in a recursive call here.
  */
 
 import type { Tracer } from "@opentelemetry/api";
 import type { TelemetryConfig } from "../config/schema";
 import { ClickStackSource } from "./clickstack";
+import {
+	CompositeTelemetrySource,
+	type CompositeTelemetrySourceSlots,
+} from "./composite";
 import { DatadogSource } from "./datadog";
 import { GrafanaSource } from "./grafana";
 import { GreptimeDbSource } from "./greptimedb";
@@ -58,5 +69,30 @@ export function createTelemetrySource(
 			return new ZabbixSource(config, logger, undefined, tracer);
 		case "mackerel":
 			return new MackerelSource(config, logger, undefined, tracer);
+		case "composite": {
+			const slots: CompositeTelemetrySourceSlots = {};
+			if (config.logs) {
+				slots.logs = createTelemetrySource(
+					config.logs,
+					logger.child({ slot: "logs" }),
+					tracer,
+				);
+			}
+			if (config.traces) {
+				slots.traces = createTelemetrySource(
+					config.traces,
+					logger.child({ slot: "traces" }),
+					tracer,
+				);
+			}
+			if (config.metrics) {
+				slots.metrics = createTelemetrySource(
+					config.metrics,
+					logger.child({ slot: "metrics" }),
+					tracer,
+				);
+			}
+			return new CompositeTelemetrySource(config, slots, logger);
+		}
 	}
 }
