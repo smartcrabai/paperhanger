@@ -30,6 +30,45 @@ export class ApiError extends Error {
 	}
 }
 
+/** Longest response body kept verbatim in an `ApiError` message; anything past
+ *  this is sliced and marked with an ellipsis so a runaway body can't flood
+ *  the UI. */
+const MAX_ERROR_MESSAGE_LENGTH = 500;
+
+/**
+ * The dashboard's own route handlers (see src/ingest/*.ts, e.g.
+ * `repo-definitions.ts`'s `new Response("repo definition not found", { status:
+ * 404 })`) answer failures with a plain-text body meant to be read by the
+ * operator. Per the fetch spec, `new Response("message", { status })` ships
+ * with `Content-Type: text/plain;charset=utf-8` by default (verified over an
+ * actual request/response round trip under Bun), so the
+ * `startsWith("text/plain")` branch below is what keeps every 400/404/409
+ * operator message intact -- deleting it would send them all through the
+ * `statusText` fallback instead. `contentType === ""` only covers a truly
+ * bodyless response that never set the header at all (e.g. `new
+ * Response(null, { status: 404 })`). Anything else -- a different or JSON
+ * content type, most notably Bun's default HTML error page when a store call
+ * throws inside the handler -- is a transport/runtime failure page rather
+ * than a message for a human, so it falls back to `statusText` (or `HTTP
+ * <status>` when even that is blank) instead of being rendered verbatim.
+ */
+async function errorMessage(res: Response): Promise<string> {
+	const contentType = (res.headers.get("Content-Type") ?? "").toLowerCase();
+	const isOperatorMessage =
+		contentType === "" || contentType.startsWith("text/plain");
+	const statusFallback = res.statusText || `HTTP ${res.status}`;
+	if (!isOperatorMessage) {
+		return statusFallback;
+	}
+	const text = await res.text().catch(() => "");
+	if (!text.trim()) {
+		return statusFallback;
+	}
+	return text.length > MAX_ERROR_MESSAGE_LENGTH
+		? `${text.slice(0, MAX_ERROR_MESSAGE_LENGTH)}…`
+		: text;
+}
+
 async function request(
 	path: string,
 	token: string,
@@ -42,8 +81,7 @@ async function request(
 	}
 	const res = await fetch(path, { ...init, headers });
 	if (!res.ok) {
-		const text = (await res.text().catch(() => "")) || res.statusText;
-		throw new ApiError(res.status, text);
+		throw new ApiError(res.status, await errorMessage(res));
 	}
 	return res;
 }

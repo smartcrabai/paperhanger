@@ -41,16 +41,19 @@ export interface IncidentEvent {
  *
  * Terminal states: "pr_created", "report_only", "failed", "skipped".
  */
-export type IncidentStatus =
-	| "received"
-	| "collecting"
-	| "resolving_repo"
-	| "diagnosing"
-	| "fixing"
-	| "pr_created"
-	| "report_only"
-	| "failed"
-	| "skipped";
+export const INCIDENT_STATUSES = [
+	"received",
+	"collecting",
+	"resolving_repo",
+	"diagnosing",
+	"fixing",
+	"pr_created",
+	"report_only",
+	"failed",
+	"skipped",
+] as const;
+
+export type IncidentStatus = (typeof INCIDENT_STATUSES)[number];
 
 /** Incident statuses that mean "no further processing will happen". */
 export const TERMINAL_INCIDENT_STATUSES: readonly IncidentStatus[] = [

@@ -36,7 +36,12 @@ export function IncidentDetail({
 	// place instead of flashing back to the loading placeholder.
 	const shownIncidentId = useRef<string | undefined>(undefined);
 
+	const hasIncident = incident !== undefined;
+
 	useEffect(() => {
+		if (!hasIncident) {
+			return;
+		}
 		let cancelled = false;
 		if (shownIncidentId.current !== incidentId) {
 			setLoading(true);
@@ -69,7 +74,7 @@ export function IncidentDetail({
 		return () => {
 			cancelled = true;
 		};
-	}, [incidentId, token, onUnauthorized, refreshTick]);
+	}, [incidentId, token, onUnauthorized, refreshTick, hasIncident]);
 
 	if (!incident) {
 		return <p className="muted">Incident no longer in the current list.</p>;
