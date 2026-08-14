@@ -176,6 +176,20 @@ button {
 	padding: var(--brand-size-lg);
 }
 
+/*
+ * Re-authentication gate: shown over the still-mounted views when a request
+ * comes back 401, so an operator whose token expired mid-edit gets the prompt
+ * without losing the form they were filling in (see app.tsx).
+ */
+.token-gate-overlay {
+	position: fixed;
+	inset: 0;
+	min-height: 0;
+	background: color-mix(in srgb, var(--canvas) 82%, transparent);
+	backdrop-filter: blur(2px);
+	z-index: 10;
+}
+
 .token-form {
 	background: var(--surface);
 	border: var(--brand-line-width) solid var(--hairline);
@@ -576,6 +590,11 @@ legend {
 .form-error {
 	color: var(--danger);
 	font-size: var(--brand-font-size-sm);
+	/*
+	 * Server validation bodies list one issue per line (formatZodError joins
+	 * with "\n"); without this they collapse onto a single run-together line.
+	 */
+	white-space: pre-line;
 }
 
 /* Mappings editor */

@@ -13,25 +13,72 @@ export function SystemPromptView({
 	const [draft, setDraft] = useState("");
 	const [loading, setLoading] = useState(true);
 	const [loadError, setLoadError] = useState<string>();
+	// A refetch that fails once content is already on screen must not tear
+	// down the form (see `hasLoadedOnceRef`) -- it surfaces here instead of
+	// in `loadError`, alongside the form rather than in place of it.
+	const [refreshError, setRefreshError] = useState<string>();
 	const [error, setError] = useState<string>();
 	const [submitting, setSubmitting] = useState(false);
 	const submitControllerRef = useRef<AbortController | null>(null);
+	// Whether a load has ever SUCCEEDED -- only before that happens should a
+	// (re)load show the "Loading..." placeholder and should a failure replace
+	// the form with the full-screen error+Retry UI. A failed first load must
+	// leave this false, so clicking Retry shows the loading state again
+	// instead of silently doing nothing; once a load has ever succeeded,
+	// later refreshes (poll, prop-identity change, or Retry) report a
+	// failure inline without disturbing the form.
+	const hasLoadedOnceRef = useRef(false);
+	// Monotonic id for the in-flight `refresh` call. Two overlapping GETs are
+	// reachable here -- e.g. a manual Retry racing a refetch triggered by a
+	// fresh auth attempt's changed `onUnauthorized` identity -- so whichever
+	// call's generation is no longer the current one when it settles must be
+	// ignored, or a slow superseded response could clobber a newer one.
+	const refreshGenerationRef = useRef(0);
+
+	const dirty = draft !== (stored?.prompt ?? "");
+	// Mirrors `dirty` for `refresh` to read without depending on it (which
+	// would recreate `refresh`, re-running the fetch, on every keystroke).
+	// Kept in sync by the effect below, which runs after every render.
+	const dirtyRef = useRef(dirty);
+	useEffect(() => {
+		dirtyRef.current = dirty;
+	});
 
 	const refresh = useCallback(async () => {
-		setLoading(true);
+		const generation = ++refreshGenerationRef.current;
+		const isInitialLoad = !hasLoadedOnceRef.current;
+		if (isInitialLoad) {
+			setLoading(true);
+		}
 		try {
 			const prompt = await getCommonSystemPrompt(token);
+			if (refreshGenerationRef.current !== generation) return;
 			setStored(prompt);
-			setDraft(prompt?.prompt ?? "");
+			// A refetch must not clobber an edit the operator is mid-typing;
+			// only adopt the server's text into the draft when there is
+			// nothing unsaved to lose.
+			if (!dirtyRef.current) {
+				setDraft(prompt?.prompt ?? "");
+			}
 			setLoadError(undefined);
+			setRefreshError(undefined);
+			hasLoadedOnceRef.current = true;
 		} catch (err) {
+			if (refreshGenerationRef.current !== generation) return;
 			if (err instanceof ApiError && err.status === 401) {
 				onUnauthorized();
 				return;
 			}
-			setLoadError(err instanceof Error ? err.message : String(err));
+			const message = err instanceof Error ? err.message : String(err);
+			if (isInitialLoad) {
+				setLoadError(message);
+			} else {
+				setRefreshError(message);
+			}
 		} finally {
-			setLoading(false);
+			if (refreshGenerationRef.current === generation) {
+				setLoading(false);
+			}
 		}
 	}, [token, onUnauthorized]);
 
@@ -81,8 +128,6 @@ export function SystemPromptView({
 		setDraft(stored?.prompt ?? "");
 	}
 
-	const dirty = draft !== (stored?.prompt ?? "");
-
 	return (
 		<section>
 			<div className="view-header">
@@ -114,6 +159,7 @@ export function SystemPromptView({
 						void submit();
 					}}
 				>
+					{refreshError && <p className="form-error">{refreshError}</p>}
 					<label>
 						Operator instructions
 						<textarea

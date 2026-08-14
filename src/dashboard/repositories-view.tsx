@@ -60,8 +60,12 @@ export function RepositoriesView({
 	const [formError, setFormError] = useState<string | undefined>();
 	const [submitting, setSubmitting] = useState(false);
 
+	// Only the effect below flips `loading` back to `true` (on mount and
+	// when `token` changes, mirroring IncidentsView's poll). `refresh` itself
+	// never does: it also runs in the background after a write or a delete,
+	// when the table is already populated, and blanking it to "Loading..."
+	// on every save would be a regression, not a status update.
 	const refresh = useCallback(async () => {
-		setLoading(true);
 		try {
 			const result = await listRepoDefinitions(token);
 			setDefinitions(result);
@@ -78,6 +82,7 @@ export function RepositoriesView({
 	}, [token, onUnauthorized]);
 
 	useEffect(() => {
+		setLoading(true);
 		void refresh();
 	}, [refresh]);
 
@@ -196,8 +201,12 @@ export function RepositoriesView({
 				return;
 			}
 			if (submitGenerationRef.current !== generation) {
-				// Superseded (e.g. the request was aborted by Cancel) --
-				// don't surface a stale error on whatever form is open now.
+				// Superseded (e.g. the request was aborted by Cancel) -- don't
+				// surface a stale error on whatever form is open now, but the
+				// write may already have landed server-side, so refresh the
+				// list in the background instead of leaving stale data
+				// visible until a manual reload.
+				void refresh();
 				return;
 			}
 			submitControllerRef.current = null;

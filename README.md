@@ -233,7 +233,11 @@ separate service). It manages:
 
 All data routes require the same `server.apiToken`. The page prompts for it
 once, keeps it in `localStorage`, and sends it as `X-Api-Token` on every
-request. The dashboard has no merge/approve/deploy action of any kind.
+request. A 401 later in the session re-shows the prompt **as an overlay over
+the still-mounted view**, so a token that expires mid-edit does not throw away
+the form being filled in: re-entering a valid token refetches with it and the
+draft survives ("Sign out" on the overlay returns to the full-screen prompt).
+The dashboard has no merge/approve/deploy action of any kind.
 
 ### Operator instruction precedence
 
@@ -442,6 +446,25 @@ bun run test:integration   # tests/integration/**: testcontainers-backed (Grepti
 bun run typecheck
 bun run lint
 ```
+
+### Dashboard tests
+
+`src/dashboard/**` is browser code, so its tests run against happy-dom inside the
+same `bun run test` invocation. The harness lives next to the components:
+
+| File | Role |
+| --- | --- |
+| `src/dashboard/dom-globals.ts` | Registers happy-dom's globals. Side-effect only, and deliberately import-free -- it must be evaluated before Testing Library, which binds `screen` to `document.body` at load time. |
+| `src/dashboard/test-setup.ts` | The only module dashboard tests import Testing Library from; also registers jest-dom's matchers. Every test file calls `setupDashboardTest()` once at file scope for per-test teardown. |
+| `src/dashboard/test-fetch.ts` | `stubFetch(handler)` replaces `globalThis.fetch`, records each request (route, token, body, signal) and honors `AbortSignal`. |
+| `src/dashboard/test-fixtures.ts` | Minimal valid API payloads (`repoDefinition()`, `incident()`, ...) with per-test overrides. |
+
+Two rules keep this suite honest:
+
+- **Mock the network, nothing else.** Tests drive the real `./api` client over
+  `stubFetch`, so a wrong path, method, or missing `X-Api-Token` fails the test.
+- **Never `mock.module`.** Bun's module-mock registry is process-wide, so a
+  module mock leaks into every test file that runs afterwards.
 
 The agent-host (`agent-host/`) is a separate Node-only package with its own
 `bun install` / `bun run build` / `bun run smoke` -- see

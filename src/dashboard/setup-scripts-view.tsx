@@ -25,27 +25,42 @@ export function SetupScriptsView({
 }) {
 	const [setupScripts, setSetupScripts] = useState<CommonSetupScript[]>([]);
 	const [loading, setLoading] = useState(true);
-	const [error, setError] = useState<string>();
+	const [listError, setListError] = useState<string>();
 	const [editingId, setEditingId] = useState<EditingTarget>(null);
 	const [draft, setDraft] = useState<Draft>(EMPTY_DRAFT);
+	const [formError, setFormError] = useState<string>();
 	const [submitting, setSubmitting] = useState(false);
 	const submitControllerRef = useRef<AbortController | null>(null);
+	// Set by the unmount cleanup below so `submit`'s abort-triggered
+	// background refresh (see below) can tell "the operator gave up on this
+	// form session" (Cancel/openCreate/openEdit) apart from "this component
+	// tree is gone" -- the rejection alone looks identical either way, but
+	// the latter must never touch state.
+	const unmountedRef = useRef(false);
 
-	const refresh = useCallback(async () => {
-		setLoading(true);
-		try {
-			setSetupScripts(await listCommonSetupScripts(token));
-			setError(undefined);
-		} catch (err) {
-			if (err instanceof ApiError && err.status === 401) {
-				onUnauthorized();
-				return;
+	const refresh = useCallback(
+		async (options?: { background?: boolean }) => {
+			const background = options?.background ?? false;
+			if (!background) {
+				setLoading(true);
 			}
-			setError(err instanceof Error ? err.message : String(err));
-		} finally {
-			setLoading(false);
-		}
-	}, [token, onUnauthorized]);
+			try {
+				setSetupScripts(await listCommonSetupScripts(token));
+				setListError(undefined);
+			} catch (err) {
+				if (err instanceof ApiError && err.status === 401) {
+					onUnauthorized();
+					return;
+				}
+				setListError(err instanceof Error ? err.message : String(err));
+			} finally {
+				if (!background) {
+					setLoading(false);
+				}
+			}
+		},
+		[token, onUnauthorized],
+	);
 
 	useEffect(() => {
 		void refresh();
@@ -53,6 +68,7 @@ export function SetupScriptsView({
 
 	useEffect(
 		() => () => {
+			unmountedRef.current = true;
 			submitControllerRef.current?.abort();
 		},
 		[],
@@ -62,7 +78,7 @@ export function SetupScriptsView({
 		submitControllerRef.current?.abort();
 		submitControllerRef.current = null;
 		setSubmitting(false);
-		setError(undefined);
+		setFormError(undefined);
 		setEditingId(null);
 	}
 
@@ -71,7 +87,7 @@ export function SetupScriptsView({
 		submitControllerRef.current = null;
 		setSubmitting(false);
 		setDraft(EMPTY_DRAFT);
-		setError(undefined);
+		setFormError(undefined);
 		setEditingId("new");
 	}
 
@@ -83,7 +99,7 @@ export function SetupScriptsView({
 			triggerFile: setupScript.triggerFile,
 			script: setupScript.script,
 		});
-		setError(undefined);
+		setFormError(undefined);
 		setEditingId(setupScript.id);
 	}
 
@@ -92,7 +108,7 @@ export function SetupScriptsView({
 		submitControllerRef.current?.abort();
 		submitControllerRef.current = controller;
 		setSubmitting(true);
-		setError(undefined);
+		setFormError(undefined);
 		const signal = controller.signal;
 		try {
 			const input = {
@@ -104,16 +120,33 @@ export function SetupScriptsView({
 			} else if (editingId) {
 				await updateCommonSetupScript(token, editingId, input, signal);
 			}
-			if (signal.aborted) return;
+			if (signal.aborted) {
+				// The write may have landed server-side even though this form
+				// session gave up on it (Cancel/openCreate/openEdit aborted the
+				// controller) -- refresh in the background instead of leaving
+				// the list stale until a manual reload. The editor for this
+				// session is already closed by whichever caller aborted it.
+				// If the whole component is gone (unmount, not Cancel), there
+				// is no tree left to refresh into -- skip it.
+				if (!unmountedRef.current) {
+					void refresh({ background: true });
+				}
+				return;
+			}
 			setEditingId(null);
 			await refresh();
 		} catch (err) {
-			if (controller.signal.aborted) return;
+			if (controller.signal.aborted) {
+				if (!unmountedRef.current) {
+					void refresh({ background: true });
+				}
+				return;
+			}
 			if (err instanceof ApiError && err.status === 401) {
 				onUnauthorized();
 				return;
 			}
-			setError(err instanceof Error ? err.message : String(err));
+			setFormError(err instanceof Error ? err.message : String(err));
 		} finally {
 			if (submitControllerRef.current === controller) {
 				submitControllerRef.current = null;
@@ -133,7 +166,7 @@ export function SetupScriptsView({
 				onUnauthorized();
 				return;
 			}
-			setError(err instanceof Error ? err.message : String(err));
+			setListError(err instanceof Error ? err.message : String(err));
 		}
 	}
 
@@ -154,7 +187,7 @@ export function SetupScriptsView({
 					+ New setup script
 				</button>
 			</div>
-			{error && !editingId && <p className="form-error">{error}</p>}
+			{listError && <p className="form-error">{listError}</p>}
 			{loading ? (
 				<p className="muted">Loading...</p>
 			) : setupScripts.length === 0 ? (
@@ -238,7 +271,7 @@ export function SetupScriptsView({
 									}
 								/>
 							</label>
-							{error && <p className="form-error">{error}</p>}
+							{formError && <p className="form-error">{formError}</p>}
 							<div className="form-actions">
 								<button
 									type="button"

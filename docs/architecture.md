@@ -95,13 +95,14 @@ src/
     timeout.ts             # Bounded flush/shutdown helper shared by both signals
   dashboard/                # Personal-use configuration + observation UI (Bun HTML import + React)
     index.html              # Entry point; imported only from src/index.ts, the composition root
-    app.tsx                 # Token gate + Repositories/Setup scripts/System prompt/Incidents tab state
+    main.tsx                # Browser entry point (index.html's <script> tag): mounts <App/> into #root, kept separate from app.tsx so importing the component tree never touches the DOM
+    app.tsx                 # Side-effect-free root component (mounted by main.tsx): token gate + Repositories/Setup scripts/System prompt/Incidents tab state
     api.ts                  # Fetch wrapper for the dashboard's own HTTP API calls
     repositories-view.tsx   # Repo definition table + create/edit form (repo-definition-form.tsx, mappings-editor.tsx)
     setup-scripts-view.tsx  # Common setup script table + create/edit modal
     system-prompt-view.tsx  # Single always-visible editor for the common system prompt (GET/PUT /system-prompt)
     incidents-view.tsx      # Incident list (auto-refreshing) + detail panel (incident-detail.tsx, status-badge.tsx)
-    token-prompt.tsx        # Full-screen API-token gate, shown until a working token is supplied
+    token-prompt.tsx        # Full-screen API-token gate when no token is stored; reused as an overlay atop the still-mounted view during re-authentication after a 401
     dashboard.css           # Semantic layer over tokens.css -- restyle here, not in tokens.css
     tokens.css              # Generated design tokens, SmartCrab design system (Open Design project
                              # brand-eloqwnt-7dc978, imported from the user's Open Design install);
