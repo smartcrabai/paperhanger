@@ -14,30 +14,30 @@
 		"lint:fix": "oxlint --fix ."
 	},
 	"devDependencies": {
-		"@biomejs/biome": "2.5.4",
+		"@biomejs/biome": "2.5.9",
 		"@happy-dom/global-registrator": "20.11.2",
 		"@testing-library/dom": "10.4.1",
 		"@testing-library/jest-dom": "7.0.1",
 		"@testing-library/react": "16.3.2",
-		"@testing-library/user-event": "14.6.4",
+		"@testing-library/user-event": "14.6.5",
 		"@types/bun": "latest",
 		"@types/react": "19.2.18",
 		"@types/react-dom": "19.2.4",
-		"oxlint": "1.74.0",
+		"oxlint": "1.79.0",
 		"testcontainers": "12.1.0"
 	},
 	"peerDependencies": {
 		"typescript": "^5.0.0 || ^6.0.0 || ^7.0.0"
 	},
 	"dependencies": {
-		"@flue/sdk": "2.0.1",
+		"@flue/sdk": "2.0.3",
 		"@opentelemetry/api": "^1.9.1",
-		"@opentelemetry/api-logs": "^0.220.0",
+		"@opentelemetry/api-logs": "^0.221.0",
 		"@opentelemetry/context-async-hooks": "^2.9.0",
-		"@opentelemetry/exporter-logs-otlp-proto": "^0.220.0",
-		"@opentelemetry/exporter-trace-otlp-proto": "^0.220.0",
+		"@opentelemetry/exporter-logs-otlp-proto": "^0.221.0",
+		"@opentelemetry/exporter-trace-otlp-proto": "^0.221.0",
 		"@opentelemetry/resources": "^2.9.0",
-		"@opentelemetry/sdk-logs": "^0.220.0",
+		"@opentelemetry/sdk-logs": "^0.221.0",
 		"@opentelemetry/sdk-trace-base": "^2.9.0",
 		"@typescript/native-preview": "^7.0.0-dev.20260707.2",
 		"react": "^19.2.8",
