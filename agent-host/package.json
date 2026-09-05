@@ -14,12 +14,12 @@
 		"smoke": "node scripts/smoke.mjs"
 	},
 	"dependencies": {
-		"@flue/runtime": "2.0.1",
+		"@flue/runtime": "2.0.3",
 		"hono": "^4.12.30",
 		"valibot": "^1.4.2"
 	},
 	"devDependencies": {
-		"@flue/vite": "2.0.1",
-		"vite": "8.1.2"
+		"@flue/vite": "2.0.3",
+		"vite": "8.2.2"
 	}
 }
