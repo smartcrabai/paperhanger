@@ -49,7 +49,7 @@ services:
     # Uses the Dockerfile's own HEALTHCHECK (GET /healthz).
 
   greptimedb:
-    image: greptime/greptimedb:v1.1.2
+    image: greptime/greptimedb:v1.1.4@sha256:9726587eac95d0360755254cd59a528dbf48abfdf268478aea6a644f62afe44c
     command:
       - standalone
       - start
@@ -69,7 +69,7 @@ services:
       start_period: 10s
 
   grafana:
-    image: grafana/grafana-oss:latest
+    image: grafana/grafana-oss:latest@sha256:5dad0df181cb644a14e13617b913b261a54f7d4fd4510721dba420929f35bea2
     ports:
       - "3000:3000"
     environment:

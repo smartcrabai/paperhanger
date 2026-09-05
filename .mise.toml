@@ -45,8 +45,8 @@ idiomatic_version_file_enable_tools = [
 ]
 
 [tools]
-python = "3.14.6"
-go = "1.26.5"
+python = "3.14.7"
+go = "1.27.1"
 # `profile = "minimal"` (skips clippy/rustfmt/rust-docs, keeping just
 # rustc/cargo/rust-std): rustup's *default* profile fails outright in this
 # environment with "Invalid cross-device link" while rolling back a
@@ -60,11 +60,11 @@ go = "1.26.5"
 # on-demand-install attempt that would still fail afterwards. A target repo
 # with its own rust-toolchain.toml (see the idiomatic-version-file
 # precedence above) can pin a `default`/`complete` profile and get both.
-rust = { version = "1.97.1", profile = "minimal" }
+rust = { version = "1.98.0", profile = "minimal" }
 java = "26.0.1"
 maven = "3.9.16"
-gradle = "9.6.1"
+gradle = "9.7.1"
 ruby = "4.0.6"
-php = "8.5.8"
+php = "8.5.10"
 dotnet = "10.0.302"
-deno = "2.9.3"
+deno = "2.9.6"
