@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1
+# syntax=docker/dockerfile:1@sha256:ecfaec9ed6d810b56388c508f4121597bfbba70d41a6dfeee4d8cad5f295fc32
 #
 # Single-image build for paperhanger. Ships BOTH runtimes in one container
 # (see docs/architecture.md "Flue agent host (Node sidecar)"):
@@ -42,7 +42,7 @@
 # `cloneUrlWithToken`), which requires a real `git` binary in PATH.
 
 # ---- Stage 1: main app dependencies (Bun) ----------------------------------
-FROM oven/bun:1.3 AS app-deps
+FROM oven/bun:1.4@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895 AS app-deps
 WORKDIR /app
 COPY package.json bun.lock ./
 RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \
@@ -54,7 +54,7 @@ RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \
 #
 # The agent-host build itself stays in a Bun-based stage; only the final
 # runtime copy needs Node.
-FROM oven/bun:1.3 AS agent-host-build
+FROM oven/bun:1.4@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895 AS agent-host-build
 WORKDIR /agent-host
 COPY agent-host/package.json agent-host/bun.lock ./
 RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \
@@ -71,7 +71,7 @@ RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \
 	rm -rf node_modules && bun install --production --frozen-lockfile
 
 # ---- Stage 3: runtime -------------------------------------------------------
-FROM oven/bun:1.3 AS runtime
+FROM oven/bun:1.4@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895 AS runtime
 WORKDIR /app
 
 # Node.js 22.x (>=22.19, for `node:sqlite`) + git (for cloning target repos)

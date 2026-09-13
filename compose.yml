@@ -49,7 +49,7 @@ services:
     # Uses the Dockerfile's own HEALTHCHECK (GET /healthz).
 
   greptimedb:
-    image: greptime/greptimedb:v1.1.2
+    image: greptime/greptimedb:v1.2.0@sha256:d68f6e3f159e2eb1c0c1a38aabe4ac50dbee2cf2c86746657f4a411e9a3cf6c9
     command:
       - standalone
       - start
@@ -69,7 +69,7 @@ services:
       start_period: 10s
 
   grafana:
-    image: grafana/grafana-oss:latest
+    image: grafana/grafana-oss:latest@sha256:5dad0df181cb644a14e13617b913b261a54f7d4fd4510721dba420929f35bea2
     ports:
       - "3000:3000"
     environment:
@@ -92,7 +92,7 @@ services:
   # observable without a real chat webhook. A 10-line Bun script, not a
   # dedicated image -- run directly off the shared `oven/bun` base.
   webhook-sink:
-    image: oven/bun:1.3
+    image: oven/bun:1.4@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895
     working_dir: /sink
     volumes:
       - ./e2e/webhook-sink.ts:/sink/webhook-sink.ts:ro
