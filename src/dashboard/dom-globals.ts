@@ -13,6 +13,20 @@
 
 import { GlobalRegistrator } from "@happy-dom/global-registrator";
 
+// Happy DOM installs its own fetch/Request/Response globals. Keep Bun's HTTP
+// primitives in place because this module shares a process with server tests;
+// Bun.serve rejects a Response created by another implementation.
+const nativeHttpGlobals = {
+	fetch: globalThis.fetch,
+	Request: globalThis.Request,
+	Response: globalThis.Response,
+	Headers: globalThis.Headers,
+};
+
 if (!("document" in globalThis)) {
 	GlobalRegistrator.register({ url: "https://dashboard.test/" });
+	globalThis.fetch = nativeHttpGlobals.fetch;
+	globalThis.Request = nativeHttpGlobals.Request;
+	globalThis.Response = nativeHttpGlobals.Response;
+	globalThis.Headers = nativeHttpGlobals.Headers;
 }
