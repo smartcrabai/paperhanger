@@ -64,7 +64,7 @@ rust = { version = "1.98.1", profile = "minimal" }
 java = "26.0.1"
 maven = "3.9.16"
 gradle = "9.7.1"
-ruby = "4.0.6"
+ruby = "4.0.7"
 php = "8.5.10"
 dotnet = "10.0.302"
 deno = "2.9.6"
