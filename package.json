@@ -14,7 +14,7 @@
 		"lint:fix": "oxlint --fix ."
 	},
 	"devDependencies": {
-		"@biomejs/biome": "2.5.13",
+		"@biomejs/biome": "2.5.14",
 		"@happy-dom/global-registrator": "20.14.5",
 		"@testing-library/dom": "10.4.2",
 		"@testing-library/jest-dom": "7.0.1",

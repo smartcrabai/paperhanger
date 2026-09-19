@@ -49,7 +49,7 @@ services:
     # Uses the Dockerfile's own HEALTHCHECK (GET /healthz).
 
   greptimedb:
-    image: greptime/greptimedb:v1.2.0@sha256:d68f6e3f159e2eb1c0c1a38aabe4ac50dbee2cf2c86746657f4a411e9a3cf6c9
+    image: greptime/greptimedb:v1.2.1@sha256:9982e36cf3ddb6f2bc813f93ec164509dce59e8c0667c6c38b826f293ec09477
     command:
       - standalone
       - start
