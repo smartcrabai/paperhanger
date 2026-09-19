@@ -5,7 +5,7 @@
     "": {
       "name": "paperhanger",
       "dependencies": {
-        "@flue/sdk": "2.0.6",
+        "@flue/sdk": "2.0.7",
         "@opentelemetry/api": "^1.9.1",
         "@opentelemetry/api-logs": "^0.222.0",
         "@opentelemetry/context-async-hooks": "^2.9.0",
@@ -68,7 +68,7 @@
 
     "@durable-streams/client": ["@durable-streams/client@0.2.7", "", { "dependencies": { "@microsoft/fetch-event-source": "^2.0.1" }, "bin": { "intent": "bin/intent.js" } }, "sha512-oxWbPEo8NO1Ruv9UgUVu3OswdE2z5ERhjccaujlpwe4tWuVd+Y/kdx+HtrkOnwN+bnRHTlxKYUNY8JTyrnhKew=="],
 
-    "@flue/sdk": ["@flue/sdk@2.0.6", "", { "dependencies": { "@durable-streams/client": "^0.2.6" } }, "sha512-tJ09L9ZIZRssIQyn8uzB4c3J83VYvFBMw8/i1UAG7KN+2gfTIADVsWoL+IGjyoVP19Z8Dh1KpWsiHOBdqU/vHg=="],
+    "@flue/sdk": ["@flue/sdk@2.0.7", "", { "dependencies": { "@durable-streams/client": "^0.2.6" } }, "sha512-j9CxaUwcTxqLPDT1bm51krCuDvIGmE+dthtuAts+hsleEdK4S+GBM1Gmy8eScUo6+HXXeTk6Ph/IRP1jR/1KgQ=="],
 
     "@grpc/grpc-js": ["@grpc/grpc-js@1.14.4", "", { "dependencies": { "@grpc/proto-loader": "^0.8.0", "@js-sdsl/ordered-map": "^4.4.2" } }, "sha512-k9Dj3DV/itK9D06Y8f190Qgop7/Ui+D0njFV3LHMPwPT75DpXLQohE9Wmz0QElrJnzsjB7KPWiKJbOl7IPDArQ=="],
 
