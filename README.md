@@ -190,7 +190,7 @@ Bare-metal (development):
 ```bash
 bun install
 (cd agent-host && bun install && bun run build)  # builds dist/server.mjs
-node --version  # must be >=22.19 -- required to run agent-host/dist/server.mjs
+node --version  # must be >=24 -- required to run agent-host/dist/server.mjs
 bun run start
 ```
 

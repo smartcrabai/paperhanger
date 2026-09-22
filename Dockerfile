@@ -5,7 +5,7 @@
 #
 #   - Bun runs the main paperhanger process (webhook ingest, incident
 #     lifecycle, telemetry collection, repo resolution, notifications).
-#   - Node.js (>=22.19) runs the built Flue agent-host as a child process,
+#   - Node.js 24 runs the built Flue agent-host as a child process,
 #     spawned by src/agent/sidecar.ts. Flue's generated production server
 #     (`vite build` -> dist/server.mjs) unconditionally imports `node:sqlite`,
 #     which Bun does not implement, so it cannot run under Bun
@@ -32,11 +32,14 @@
 # support this and why Maven/Gradle/PHP can't.
 #
 # Base image choice: `oven/bun:1.3` (Debian 13 "trixie"). Debian trixie's own
-# `nodejs` apt package is only 20.19.x, older than the >=22.19 that
-# `node:sqlite` requires, so Node is installed from the NodeSource `setup_22.x`
-# repository instead (verified empirically against this exact base image --
-# NodeSource's repo is codename-independent ("nodistro"), so it works fine on
-# a Debian release newer than what NodeSource officially lists). `git` is
+# `nodejs` apt package is only 20.19.x -- both older than the >=22.19 floor
+# `node:sqlite` requires and older than the Node 24 this repo standardizes on
+# (matching CI's `node-version: 24.21.0`) -- so Node is installed from the
+# NodeSource `setup_24.x` repository instead (verified empirically against
+# this exact base image: it installs v24.21.0 and `require('node:sqlite')`
+# works -- NodeSource's repo is codename-independent ("nodistro"), so it
+# works fine on a Debian release newer than what NodeSource officially
+# lists). `git` is
 # installed via apt too: the fix agent clones the target repository over
 # HTTPS with an embedded GitHub App installation token (repo/github.ts
 # `cloneUrlWithToken`), which requires a real `git` binary in PATH.
@@ -74,10 +77,11 @@ RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \
 FROM oven/bun:1.4@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895 AS runtime
 WORKDIR /app
 
-# Node.js 22.x (>=22.19, for `node:sqlite`) + git (for cloning target repos)
-# + curl (container HEALTHCHECK) + a C/C++ toolchain and the headers/libs
-# mise needs on hand for whatever it ends up compiling from source on demand
-# (Ruby and PHP always compile from source; see the mise step further down).
+# Node.js 24.x (for `node:sqlite`, which needs >=22.19) + git (for cloning
+# target repos) + curl (container HEALTHCHECK) + a C/C++ toolchain and the
+# headers/libs mise needs on hand for whatever it ends up compiling from
+# source on demand (Ruby and PHP always compile from source; see the mise
+# step further down).
 # NodeSource's setup script only configures the apt repository; the actual
 # package install is the second command.
 #
@@ -96,7 +100,7 @@ RUN apt-get update \
 		libcurl4-openssl-dev libpng-dev libfreetype-dev libjpeg-dev \
 		libwebp-dev libsodium-dev libgd-dev \
 		redis-tools ripgrep tmux vim nano pipx \
-	&& curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+	&& curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
 	&& apt-get install -y --no-install-recommends nodejs \
 	&& node --version \
 	&& rm -rf /var/lib/apt/lists/*

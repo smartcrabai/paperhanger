@@ -129,9 +129,10 @@ docs/
 Findings from `docs/research/flue.md` (researched against `@flue/*` `1.0.0-beta.9`; the
 code has since migrated to `2.0.1` in PR #8):
 
-- Flue's Node-target server requires Node.js (>= 22.19; it statically imports
-  `node:sqlite`, which Bun does not implement). The core runtime APIs do run under Bun,
-  but a served Flue app cannot.
+- Flue's Node-target server requires Node.js (upstream floor >= 22.19; it statically
+  imports `node:sqlite`, which Bun does not implement). The core runtime APIs do run
+  under Bun, but a served Flue app cannot. This repository pins Node 24 (24.x): the
+  image installs NodeSource 24.x and CI runs `node-version: 24.21.0`.
 - Therefore the fix agent lives in `agent-host/`, a self-contained Flue app built with
   Vite (`@flue/vite`) and executed with Node. The main Bun process drives it through
   `@flue/sdk`'s conversation-scoped `createFlueClient()` — `client.send()` with the run
@@ -139,7 +140,7 @@ code has since migrated to `2.0.1` in PR #8):
   part, and `client.abort()` to request cancellation on timeout (see
   `src/agent/runner.ts`).
 - By default `src/agent/sidecar.ts` spawns the agent host as a child process so the whole
-  service still ships as a single container (the image includes both Bun and Node).
+  service still ships as a single container (the image includes both Bun and Node 24).
   `agent.hostUrl` in the config can point at an externally deployed agent host instead
   (e.g. a separate K8s sidecar/deployment), in which case nothing is spawned.
 - Sandbox mode: `local()` inside the agent-host container (container boundary is the
