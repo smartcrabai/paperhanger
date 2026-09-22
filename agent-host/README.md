@@ -14,8 +14,10 @@ imports `@flue/runtime/node`, which statically imports `node:sqlite` — a
 module Bun does not implement. The core runtime APIs run fine under Bun, but
 a *served* Flue app cannot. So:
 
-- This directory is built and run with **Node >= 22.19** (`node:sqlite` has
-  been available since Node 22.5).
+- This directory is built and run with **Node 24** (24.x), matching CI's
+  `node-version: 24.21.0` and the Dockerfile's NodeSource `setup_24.x`. A
+  Node sidecar is needed at all because `node:sqlite` has been available
+  since Node 22.5 and Bun does not implement it.
 - The main Bun process (`src/agent/sidecar.ts` in the parent repo) spawns this
   as a child process by default, and drives it over HTTP via `@flue/sdk`
   (`src/agent/runner.ts`), which has no Node-only dependencies and runs fine
@@ -396,9 +398,11 @@ node dist/server.mjs              # PORT env var, default 3000
 curl localhost:3000/healthz       # -> {"ok":true}
 ```
 
-Requires Node >= 22.19 to *run* the built server (`node:sqlite`); `vite
-build` itself works fine under Bun since building doesn't touch the
-Node-only runtime path. Verified against Node 22.22.3 and 26.5.0.
+Requires Node to *run* the built server (`node:sqlite`); `vite build` itself
+works fine under Bun since building doesn't touch the Node-only runtime path.
+This repo pins and ships Node 24 (24.x, matching CI's `node-version:
+24.21.0`). The hard technical floor is lower: the built server was verified
+running under Node 22.22.3 and 26.5.0.
 
 ## Smoke test
 

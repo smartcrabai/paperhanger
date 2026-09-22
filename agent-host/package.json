@@ -5,7 +5,7 @@
 	"description": "Flue agent host (Node sidecar) for paperhanger's fix agent. See docs/architecture.md \"Flue agent host (Node sidecar)\" and docs/research/flue.md in the parent repo.",
 	"type": "module",
 	"engines": {
-		"node": ">=22.19.0"
+		"node": ">=24.0.0"
 	},
 	"scripts": {
 		"build": "vite build",

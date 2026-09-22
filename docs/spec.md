@@ -361,6 +361,7 @@ notifiers:
 - Bun + TypeScript(リポジトリ方針に準拠)、`Bun.serve` / `bun:sqlite` / `Bun.sql`
 - Flue Framework(エージェント実行・Sandbox・Durable Execution)
   - **検証結果(2026-07-17)**: Flue の本番サーバーは `node:sqlite` 依存のため Bun では起動不可(Node >= 22.19 必須)。エージェントは `agent-host/` の **Node サイドカープロセス** として分離し、本体(Bun)から `@flue/sdk` の HTTP クライアントで駆動する。単一コンテナ配布は維持(イメージに Bun + Node を同梱し、本体が子プロセスとして起動。設定で外部 URL への接続にも切替可)。詳細は `docs/architecture.md` と `docs/research/flue.md`
+  - **Node バージョン**: 上記の下限(Node >= 22.19)は Flue 側の要求であり、本リポジトリは Node 24 に統一(イメージは NodeSource 24.x、CI は `node-version: 24.21.0`)
   - バージョンは `2.0.1` に固定(2026-08 に `1.0.0-beta.9` から移行済み・PR #8。pre-1.0 ではなくなったが、アップグレードは破壊的変更を伴いうるため semver 範囲には広げず、検証を伴う個別の変更として扱う)
 - lint/format: oxlint + biome(既存設定)
 
