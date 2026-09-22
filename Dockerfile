@@ -411,8 +411,20 @@ COPY package.json bun.lock ./
 COPY --from=app-deps /app/node_modules ./node_modules
 COPY src ./src
 
-# Agent-host (Node/Flue), built in stage 2.
+# Agent-host (Node/Flue), built in stage 2. dist/server.mjs is what actually
+# runs under Node (see AGENT_HOST_SERVER_PATH below), but agent-host/src has to
+# be present at runtime too: the main process starts as `bun run start` ->
+# `bun run src/index.ts`, i.e. unbundled TS resolved from disk, and
+# src/telemetry/followup.ts statically imports agent-host/src/lib/sql-guard as
+# the single canonical read-only SQL guard (see that file's header comment and
+# docs/architecture.md, "query_telemetry"). Without this COPY the container
+# dies before Bun.serve() with `Cannot find module
+# '../../agent-host/src/lib/sql-guard'`.
+# Copying the whole src dir instead of just lib/sql-guard.ts is deliberate: a
+# single-file COPY would silently re-break the moment the parent imports any
+# other agent-host/src/lib/* module.
 COPY agent-host/package.json ./agent-host/package.json
+COPY agent-host/src ./agent-host/src
 COPY --from=agent-host-build /agent-host/node_modules ./agent-host/node_modules
 COPY --from=agent-host-build /agent-host/dist ./agent-host/dist
 
