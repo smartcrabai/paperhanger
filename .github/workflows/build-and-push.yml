@@ -39,9 +39,16 @@ jobs:
         working-directory: agent-host
         run: bun run build && bun run smoke
 
+      # `bun run test` (= `bun test src agent-host/src`), NOT bare `bun test`:
+      # the latter also sweeps tests/integration, whose testcontainers suites
+      # need Docker and are documented as a manual `bun run test:integration`
+      # (README.md, docs/architecture.md). ci.yml was switched in #33 and this
+      # file was not, so the GreptimeDB container's /health wait timed out on
+      # every push to main and `build-and-release` never ran -- no image had
+      # been published since 2026-08-20.
       - name: Run tests
         shell: bash
-        run: bun test
+        run: bun run test
 
       - name: Check format
         shell: bash
