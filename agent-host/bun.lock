@@ -5,12 +5,12 @@
     "": {
       "name": "paperhanger-agent-host",
       "dependencies": {
-        "@flue/runtime": "2.2.0",
+        "@flue/runtime": "2.2.2",
         "hono": "^4.12.30",
         "valibot": "^1.4.2",
       },
       "devDependencies": {
-        "@flue/vite": "2.2.0",
+        "@flue/vite": "2.2.2",
         "vite": "8.3.1",
       },
     },
@@ -170,9 +170,9 @@
 
     "@esbuild/win32-x64": ["@esbuild/win32-x64@0.28.2", "", { "os": "win32", "cpu": "x64" }, "sha512-5ebpxr3nWMzrL/rnUI755Jkuee0bHL/Gq0WTF9lvcpv73wAp5eu8MfBUgWK9bhWvZjj7yX8etf/8tI8Ney695g=="],
 
-    "@flue/runtime": ["@flue/runtime@2.2.0", "", { "dependencies": { "@earendil-works/pi-agent-core": "^0.87.1", "@earendil-works/pi-ai": "^0.87.1", "@hono/node-server": "^2.0.3", "@modelcontextprotocol/client": "2.0.0", "@valibot/to-json-schema": "^1.3.0", "hono": "^4.12.32", "js-yaml": "^5.2.1", "ulidx": "^2.4.1", "valibot": "^1.1.0" } }, "sha512-aJGWoEt3SBEIlMAAii3PiFjokzti2nb7cWkNz4kOPvSWZs+dPuFRqkJdnG0ePbIWlsmTahv39v+V7d9kGssjpQ=="],
+    "@flue/runtime": ["@flue/runtime@2.2.2", "", { "dependencies": { "@earendil-works/pi-agent-core": "^0.87.1", "@earendil-works/pi-ai": "^0.87.1", "@hono/node-server": "^2.0.3", "@modelcontextprotocol/client": "2.0.0", "@valibot/to-json-schema": "^1.3.0", "hono": "^4.12.32", "js-yaml": "^5.2.1", "ulidx": "^2.4.1", "valibot": "^1.1.0" } }, "sha512-1E1LE7HZJ7ZYbBzSz1jvAPNnBIEfz7iMP44t2wBgg/TJg3Jy+fkdpxEKY4aMh43nXYzdJWTDV66oeDXP5KNQMw=="],
 
-    "@flue/vite": ["@flue/vite@2.2.0", "", { "dependencies": { "@flue/runtime": "2.2.0", "@hono/node-server": "^2.0.3", "agents": "^0.20.1", "magic-string": "^1.0.0", "tinyglobby": "^0.2.15", "ulidx": "^2.4.1" }, "peerDependencies": { "vite": "^8.0.0" } }, "sha512-DXa/bTpZkOO7IZWmAPHJLWcJKGZLRTee5r+Z8skzbjF/54HGgF9c4NRbvpF8LvD1jIZ6AQy9CizwuNuTdH5wjw=="],
+    "@flue/vite": ["@flue/vite@2.2.2", "", { "dependencies": { "@flue/runtime": "2.2.2", "@hono/node-server": "^2.0.3", "agents": "^0.20.1", "magic-string": "^1.0.0", "tinyglobby": "^0.2.15", "ulidx": "^2.4.1" }, "peerDependencies": { "vite": "^8.0.0" } }, "sha512-2z1xENrj+6GAodUmPTR1mKV9Gfb+p9woOQFYMTvTwnw96ZXXGpIltHZHsSmNqHvPjU9fePvpmPg1zyAv8/ds7w=="],
 
     "@google/genai": ["@google/genai@2.21.0", "", { "dependencies": { "google-auth-library": "^10.3.0", "p-retry": "^4.6.2", "protobufjs": "^7.5.4", "ws": "^8.18.0" }, "peerDependencies": { "@modelcontextprotocol/sdk": "^1.25.2" }, "optionalPeers": ["@modelcontextprotocol/sdk"] }, "sha512-+PDtco2/Z0ONdzCGekCoCT+O1VJS9xJQNN4XzQpXG/t3El/SWWMkCWlFRO1KmivOHPa4Q0VjUYu1HBKCZ/v33Q=="],
 
