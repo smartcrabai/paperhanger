@@ -45,7 +45,7 @@ idiomatic_version_file_enable_tools = [
 ]
 
 [tools]
-python = "3.14.7"
+python = "3.14.8"
 go = "1.27.1"
 # `profile = "minimal"` (skips clippy/rustfmt/rust-docs, keeping just
 # rustc/cargo/rust-std): rustup's *default* profile fails outright in this
