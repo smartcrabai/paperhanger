@@ -60,7 +60,7 @@ go = "1.27.1"
 # on-demand-install attempt that would still fail afterwards. A target repo
 # with its own rust-toolchain.toml (see the idiomatic-version-file
 # precedence above) can pin a `default`/`complete` profile and get both.
-rust = { version = "1.98.1", profile = "minimal" }
+rust = { version = "1.99.0", profile = "minimal" }
 java = "26.0.1"
 maven = "3.9.16"
 gradle = "9.8.0"
