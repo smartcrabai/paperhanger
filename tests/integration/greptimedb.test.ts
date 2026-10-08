@@ -2,7 +2,7 @@
  * Integration test for the GreptimeDB `TelemetrySource` implementation.
  * Starts a real `greptime/greptimedb:v1.1.2` standalone container
  * (testcontainers), seeds it with realistic OTLP data via the official OTel
- * SDKs (see helpers/otlp-seed.ts), and exercises GreptimeDbSource +
+ * SDKs (see otlp-seed.ts), and exercises GreptimeDbSource +
  * buildIncidentContext against it end-to-end.
  *
  * Requires Docker. Skips gracefully (with a clear console message) when
@@ -22,11 +22,7 @@ import {
 	renderContextMarkdown,
 } from "../../src/telemetry/context-builder";
 import { GreptimeDbSource } from "../../src/telemetry/greptimedb";
-import {
-	seedMetricTable,
-	seedTelemetry,
-	type SeedResult,
-} from "./helpers/otlp-seed";
+import { seedMetricTable, seedTelemetry, type SeedResult } from "./otlp-seed";
 
 async function isDockerAvailable(): Promise<boolean> {
 	try {

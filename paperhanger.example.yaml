@@ -46,10 +46,9 @@ sources:
 # are single-signal sources -- pick those if you run a Grafana OSS stack with
 # those three as separate backends, rather than GreptimeDB's single
 # do-everything endpoint; or pick "composite" (see further below) to route
-# all three at once instead of picking just one. Only "greptimedb" exposes a
-# follow-up query_telemetry tool to the fix agent during diagnosis -- every
-# source here still feeds the initial collection phase (composite included,
-# even when one of its slots is "greptimedb"). Zabbix and Mackerel are
+# all three at once instead of picking just one. Every source here still feeds
+# the initial collection phase (composite included, even when one of its slots
+# is "greptimedb"). Zabbix and Mackerel are
 # monitoring systems, not log/trace stores, so their collection is
 # necessarily best-effort (see README.md's config reference and
 # src/telemetry/{zabbix,mackerel}.ts's module doc comments). The

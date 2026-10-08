@@ -82,8 +82,6 @@ export const FixIncidentOutputSchema = v.object({
 });
 
 export type Alert = v.InferOutput<typeof AlertSchema>;
-export type RepoInput = v.InferOutput<typeof RepoInputSchema>;
-export type Limits = v.InferOutput<typeof LimitsSchema>;
 export type FixIncidentInput = v.InferOutput<typeof FixIncidentInputSchema>;
 export type Fix = v.InferOutput<typeof FixSchema>;
 export type FixIncidentOutput = v.InferOutput<typeof FixIncidentOutputSchema>;

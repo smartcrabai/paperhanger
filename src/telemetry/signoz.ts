@@ -25,8 +25,13 @@
 
 import type { Attributes, Span, Tracer } from "@opentelemetry/api";
 import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
+import type { SigNozTelemetryConfig } from "../config/schema";
 import type { Logger } from "../observability/logger";
 import {
+	asNumber,
+	asString,
+	firstDefined,
+	omit,
 	type LogRecord,
 	resolveServiceLabel,
 	SERVICE_LABEL_ALIASES,
@@ -34,6 +39,9 @@ import {
 	type TelemetryQuery,
 	type TelemetrySource,
 	type TraceRecord,
+	validateAttributeKey,
+	validateLimit,
+	validateTraceId,
 } from "./types";
 
 const TRACER_NAME = "telemetry-signoz";
@@ -49,19 +57,7 @@ const SLOW_SPAN_THRESHOLD_NANO = 50_000_000; // 50ms
 
 const SERVICE_ATTRIBUTE_KEY = "service.name";
 
-/** Filter-expression/attribute keys we interpolate as bare identifiers must match this. */
-const ATTRIBUTE_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_.]*$/;
-/** Trace IDs are lowercase hex strings; validated before embedding in an IN [...] list. */
-const TRACE_ID_PATTERN = /^[0-9a-fA-F]+$/;
-
-export interface SigNozSourceConfig {
-	/** SigNoz instance base URL, e.g. `https://<tenant>.signoz.cloud` or a self-hosted URL. */
-	url: string;
-	/** Sent as the `SIGNOZ-API-KEY` header (see "Ingestion Keys"/"Service Accounts" docs). */
-	apiKey: string;
-	/** Per-request timeout in milliseconds for all HTTP calls. Defaults to `DEFAULT_SIGNOZ_TIMEOUT_MS` (30s). */
-	timeoutMs?: number;
-}
+export type SigNozSourceConfig = Omit<SigNozTelemetryConfig, "source">;
 
 /** Thrown for any non-2xx `query_range` response, or a `status: "error"` success-status body. */
 export class SigNozError extends Error {
@@ -72,31 +68,6 @@ export class SigNozError extends Error {
 		this.name = "SigNozError";
 		this.httpStatus = httpStatus;
 	}
-}
-
-// See greptimedb.ts's identical note: validators never embed the raw
-// offending value (upstream-tainted) into their Error message, since that
-// message can end up recorded verbatim onto an exported span.
-
-function validateAttributeKey(key: string): string {
-	if (!ATTRIBUTE_KEY_PATTERN.test(key)) {
-		throw new Error(`Invalid attribute/label key (length=${key.length})`);
-	}
-	return key;
-}
-
-function validateTraceId(id: string): string {
-	if (!TRACE_ID_PATTERN.test(id)) {
-		throw new Error(`Invalid trace id (length=${id.length})`);
-	}
-	return id;
-}
-
-function validateLimit(limit: number): number {
-	if (!Number.isInteger(limit) || limit <= 0) {
-		throw new Error("Invalid limit: must be a positive integer");
-	}
-	return limit;
 }
 
 /**
@@ -120,26 +91,6 @@ function isoToEpochMs(iso: string): number {
 	return ms;
 }
 
-function asString(value: unknown, fallback = ""): string {
-	if (value === null || value === undefined) {
-		return fallback;
-	}
-	return String(value);
-}
-
-function asNumber(value: unknown, fallback = 0): number {
-	if (typeof value === "number") {
-		return value;
-	}
-	if (typeof value === "string" && value.trim() !== "") {
-		const parsed = Number(value);
-		if (!Number.isNaN(parsed)) {
-			return parsed;
-		}
-	}
-	return fallback;
-}
-
 function asBoolean(value: unknown): boolean | undefined {
 	if (typeof value === "boolean") {
 		return value;
@@ -147,18 +98,6 @@ function asBoolean(value: unknown): boolean | undefined {
 	if (typeof value === "string") {
 		if (value.toLowerCase() === "true") return true;
 		if (value.toLowerCase() === "false") return false;
-	}
-	return undefined;
-}
-
-function firstDefined(
-	row: Record<string, unknown>,
-	...keys: string[]
-): unknown {
-	for (const key of keys) {
-		if (row[key] !== undefined && row[key] !== null) {
-			return row[key];
-		}
 	}
 	return undefined;
 }
@@ -266,20 +205,6 @@ function rowToLogRecord(row: Record<string, unknown>): LogRecord {
 			? { [SERVICE_ATTRIBUTE_KEY]: serviceName }
 			: {},
 	};
-}
-
-function omit(
-	row: Record<string, unknown>,
-	keys: string[],
-): Record<string, unknown> {
-	const excluded = new Set(keys);
-	const result: Record<string, unknown> = {};
-	for (const [key, value] of Object.entries(row)) {
-		if (!excluded.has(key)) {
-			result[key] = value;
-		}
-	}
-	return result;
 }
 
 function rowToTraceRecord(row: Record<string, unknown>): TraceRecord {

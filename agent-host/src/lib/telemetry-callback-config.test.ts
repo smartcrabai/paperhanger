@@ -19,31 +19,25 @@ describe("telemetryCallbackConfigFromEnv", () => {
 		});
 	});
 
-	test("returns undefined when no env var is set", () => {
-		expect(telemetryCallbackConfigFromEnv({})).toBeUndefined();
-	});
-
 	// Partial configuration must not yield a half-usable callback: without a
 	// token the tool would call the parent unauthenticated, and without a URL
 	// there is nothing to call. Either way `../tools.ts` must register no tool.
-	test.each(TELEMETRY_CALLBACK_ENV_KEYS)(
-		"returns undefined when only %s is missing",
-		(missingKey) => {
+	test("returns undefined for incomplete callback environment configuration", () => {
+		expect(telemetryCallbackConfigFromEnv({})).toBeUndefined();
+
+		for (const missingKey of TELEMETRY_CALLBACK_ENV_KEYS) {
 			const env: Record<string, string | undefined> = { ...FULL_ENV };
 			delete env[missingKey];
 
 			expect(telemetryCallbackConfigFromEnv(env)).toBeUndefined();
-		},
-	);
+		}
 
-	test.each(TELEMETRY_CALLBACK_ENV_KEYS)(
-		"treats an empty %s as unset rather than as a usable value",
-		(emptyKey) => {
+		for (const emptyKey of TELEMETRY_CALLBACK_ENV_KEYS) {
 			expect(
 				telemetryCallbackConfigFromEnv({ ...FULL_ENV, [emptyKey]: "" }),
 			).toBeUndefined();
-		},
-	);
+		}
+	});
 
 	test("reads process.env when no env object is passed", () => {
 		const saved = TELEMETRY_CALLBACK_ENV_KEYS.map(

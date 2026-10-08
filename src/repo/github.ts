@@ -17,6 +17,7 @@
  *   and only falls back to unauthenticated search when no org is present.
  */
 
+import { createPrivateKey } from "node:crypto";
 import {
 	context,
 	SpanKind,
@@ -217,13 +218,6 @@ function base64UrlEncodeJson(value: unknown): string {
 	return base64UrlEncode(new TextEncoder().encode(JSON.stringify(value)));
 }
 
-type PemFormat = "pkcs1" | "pkcs8";
-
-interface ParsedPem {
-	der: Uint8Array<ArrayBuffer>;
-	format: PemFormat;
-}
-
 /**
  * Parses a PEM-encoded RSA private key, accepting either PKCS#1
  * ("-----BEGIN RSA PRIVATE KEY-----", GitHub's default download format) or
@@ -231,117 +225,25 @@ interface ParsedPem {
  * sequences, since private keys sourced from a single-line environment
  * variable commonly arrive that way.
  */
-function parsePemPrivateKey(pem: string): ParsedPem {
+async function importSigningKey(pem: string): Promise<CryptoKey> {
 	const normalized =
 		pem.includes("\\n") && !pem.includes("\n")
 			? pem.replace(/\\n/g, "\n").trim()
 			: pem.trim();
 
-	let format: PemFormat;
-	if (normalized.includes("BEGIN RSA PRIVATE KEY")) {
-		format = "pkcs1";
-	} else if (normalized.includes("BEGIN PRIVATE KEY")) {
-		format = "pkcs8";
-	} else {
+	if (
+		!normalized.includes("BEGIN RSA PRIVATE KEY") &&
+		!normalized.includes("BEGIN PRIVATE KEY")
+	) {
 		throw new Error(
 			'Unsupported GitHub App private key format: expected a PEM block starting with "-----BEGIN RSA PRIVATE KEY-----" (PKCS#1) or "-----BEGIN PRIVATE KEY-----" (PKCS#8)',
 		);
 	}
 
-	const base64 = normalized
-		.split("\n")
-		.map((line) => line.trim())
-		.filter((line) => line.length > 0 && !line.startsWith("-----"))
-		.join("");
-	const der = Uint8Array.fromBase64(base64);
-	return { der, format };
-}
-
-/** DER SEQUENCE for the RSA `AlgorithmIdentifier` (rsaEncryption OID, NULL params). */
-const RSA_ALGORITHM_IDENTIFIER_DER = Uint8Array.of(
-	0x30,
-	0x0d,
-	0x06,
-	0x09,
-	0x2a,
-	0x86,
-	0x48,
-	0x86,
-	0xf7,
-	0x0d,
-	0x01,
-	0x01,
-	0x01,
-	0x05,
-	0x00,
-);
-
-function encodeDerLength(length: number): number[] {
-	if (length < 0x80) {
-		return [length];
-	}
-	const bytes: number[] = [];
-	let remaining = length;
-	while (remaining > 0) {
-		bytes.unshift(remaining & 0xff);
-		remaining = Math.floor(remaining / 256);
-	}
-	return [0x80 | bytes.length, ...bytes];
-}
-
-/**
- * Concatenates byte arrays into a freshly allocated `Uint8Array<ArrayBuffer>`.
- * Using `new Uint8Array(length)` (rather than `Uint8Array.from`/spreads)
- * guarantees an `ArrayBuffer`-backed result, which is what WebCrypto's
- * `BufferSource` parameters require (a plain `Uint8Array` can otherwise be
- * backed by a `SharedArrayBuffer`, which `importKey` rejects at the type level).
- */
-function concatBytes(...parts: Uint8Array[]): Uint8Array<ArrayBuffer> {
-	const total = parts.reduce((sum, part) => sum + part.length, 0);
-	const out = new Uint8Array(total);
-	let offset = 0;
-	for (const part of parts) {
-		out.set(part, offset);
-		offset += part.length;
-	}
-	return out;
-}
-
-function derTlv(tag: number, contents: Uint8Array): Uint8Array<ArrayBuffer> {
-	return concatBytes(
-		Uint8Array.of(tag, ...encodeDerLength(contents.length)),
-		contents,
-	);
-}
-
-/**
- * Wraps a PKCS#1 `RSAPrivateKey` DER blob in a PKCS#8 `PrivateKeyInfo`
- * structure, since WebCrypto's `importKey("pkcs8", ...)` does not accept
- * PKCS#1 directly:
- *
- * ```
- * PrivateKeyInfo ::= SEQUENCE {
- *   version                   INTEGER (0),
- *   privateKeyAlgorithm       AlgorithmIdentifier,  -- rsaEncryption, NULL params
- *   privateKey                OCTET STRING          -- the PKCS#1 DER, verbatim
- * }
- * ```
- */
-function wrapPkcs1AsPkcs8(pkcs1Der: Uint8Array): Uint8Array<ArrayBuffer> {
-	const version = Uint8Array.of(0x02, 0x01, 0x00);
-	const privateKeyOctetString = derTlv(0x04, pkcs1Der);
-	const body = concatBytes(
-		version,
-		RSA_ALGORITHM_IDENTIFIER_DER,
-		privateKeyOctetString,
-	);
-	return derTlv(0x30, body);
-}
-
-async function importSigningKey(pem: string): Promise<CryptoKey> {
-	const { der, format } = parsePemPrivateKey(pem);
-	const pkcs8Der: Uint8Array<ArrayBuffer> =
-		format === "pkcs1" ? wrapPkcs1AsPkcs8(der) : der;
+	const pkcs8Der = createPrivateKey(normalized).export({
+		format: "der",
+		type: "pkcs8",
+	});
 	return crypto.subtle.importKey(
 		"pkcs8",
 		pkcs8Der,

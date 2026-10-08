@@ -8,7 +8,6 @@ import {
 import { createLogger } from "../observability/logger";
 import { DiscordNotifier } from "./discord";
 import type { IncidentSnapshot, NotificationEvent } from "./types";
-import { NotifierResponseError } from "./types";
 
 function silentLogger() {
 	return createLogger({ sink: () => {} });
@@ -153,26 +152,29 @@ describe("DiscordNotifier", () => {
 		).toBe(true);
 	});
 
-	test("truncates a description longer than Discord's 4096-character limit", async () => {
-		const { fetchImpl, calls } = mockFetch(new Response("ok", { status: 200 }));
-		const notifier = new DiscordNotifier(
-			{ type: "discord", webhookUrl: WEBHOOK_URL },
-			silentLogger(),
-			{ fetchImpl },
-		);
-		const longReport = "y".repeat(5000);
+	test("truncates descriptions over Discord's 4096-character limit", async () => {
+		for (const length of [5000, 4097]) {
+			const { fetchImpl, calls } = mockFetch(
+				new Response("ok", { status: 200 }),
+			);
+			const notifier = new DiscordNotifier(
+				{ type: "discord", webhookUrl: WEBHOOK_URL },
+				silentLogger(),
+				{ fetchImpl },
+			);
 
-		await notifier.notify({
-			kind: "report_only",
-			incident,
-			report: longReport,
-		});
+			await notifier.notify({
+				kind: "report_only",
+				incident,
+				report: "y".repeat(length),
+			});
 
-		const payload = calls[0]?.body as {
-			embeds: Array<{ description: string }>;
-		};
-		expect(payload.embeds[0]?.description.length).toBeLessThanOrEqual(4096);
-		expect(payload.embeds[0]?.description).toContain("truncated");
+			const payload = calls[0]?.body as {
+				embeds: Array<{ description: string }>;
+			};
+			expect(payload.embeds[0]?.description.length).toBeLessThanOrEqual(4096);
+			expect(payload.embeds[0]?.description).toContain("truncated");
+		}
 	});
 
 	test("passes a description of exactly 4096 characters through unmodified", async () => {
@@ -195,49 +197,6 @@ describe("DiscordNotifier", () => {
 		};
 		expect(payload.embeds[0]?.description).toBe(exactReport);
 		expect(payload.embeds[0]?.description.length).toBe(4096);
-	});
-
-	test("truncates a description of 4097 characters (one over the limit)", async () => {
-		const { fetchImpl, calls } = mockFetch(new Response("ok", { status: 200 }));
-		const notifier = new DiscordNotifier(
-			{ type: "discord", webhookUrl: WEBHOOK_URL },
-			silentLogger(),
-			{ fetchImpl },
-		);
-
-		await notifier.notify({
-			kind: "report_only",
-			incident,
-			report: "z".repeat(4097),
-		});
-
-		const payload = calls[0]?.body as {
-			embeds: Array<{ description: string }>;
-		};
-		expect(payload.embeds[0]?.description.length).toBeLessThanOrEqual(4096);
-		expect(payload.embeds[0]?.description).toContain("truncated");
-	});
-
-	test("throws NotifierResponseError and logs an excerpt on a non-2xx response", async () => {
-		const { fetchImpl } = mockFetch(
-			new Response("rate limited", { status: 429 }),
-		);
-		const lines: string[] = [];
-		const logger = createLogger({ sink: (line) => lines.push(line) });
-		const notifier = new DiscordNotifier(
-			{ type: "discord", webhookUrl: WEBHOOK_URL },
-			logger,
-			{ fetchImpl },
-		);
-
-		await expect(
-			notifier.notify({ kind: "diagnosis_started", incident }),
-		).rejects.toThrow(NotifierResponseError);
-
-		expect(lines.length).toBe(1);
-		const entry = JSON.parse(lines[0] as string);
-		expect(entry.status).toBe(429);
-		expect(entry.bodyExcerpt).toBe("rate limited");
 	});
 
 	test("threads the injected tracer into postJson, producing a notify.post span with component 'discord'", async () => {

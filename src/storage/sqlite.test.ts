@@ -82,11 +82,6 @@ runCommonSystemPromptStoreSuite(
 );
 
 describe("SqliteIncidentStore - lifecycle", () => {
-	test("close does not throw", async () => {
-		const store = await createStore();
-		await store.close();
-	});
-
 	test("ping returns false after close", async () => {
 		const store = await createStore();
 		await store.close();

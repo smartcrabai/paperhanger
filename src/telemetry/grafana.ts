@@ -38,6 +38,7 @@
  */
 
 import { trace, type Tracer } from "@opentelemetry/api";
+import type { GrafanaTelemetryConfig } from "../config/schema";
 import type { Logger } from "../observability/logger";
 import {
 	fetchWithTimeout,
@@ -68,20 +69,7 @@ function quoteMatcherValue(value: string): string {
 	return `"${escaped}"`;
 }
 
-export interface GrafanaSourceConfig {
-	/** Grafana base URL, e.g. `https://myorg.grafana.net` or `http://localhost:3000`. */
-	url: string;
-	/** Service account token, sent as `Authorization: Bearer <token>`. */
-	serviceAccountToken: string;
-	/** UID of the provisioned Loki datasource. Omit to skip log collection. */
-	lokiDatasourceUid?: string;
-	/** UID of the provisioned Tempo datasource. Omit to skip trace collection. */
-	tempoDatasourceUid?: string;
-	/** UID of the provisioned Prometheus datasource. Omit to skip metric collection. */
-	prometheusDatasourceUid?: string;
-	/** Per-request timeout in milliseconds. Defaults to 30s. */
-	timeoutMs?: number;
-}
+export type GrafanaSourceConfig = Omit<GrafanaTelemetryConfig, "source">;
 
 /** Thrown for any non-2xx `/api/ds/query` response, a per-query `error` field, or a client-side timeout. */
 export class GrafanaError extends Error {

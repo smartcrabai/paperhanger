@@ -98,6 +98,128 @@ export interface MetricSeries {
 	points: MetricPoint[];
 }
 
+/** Table/column identifiers interpolated into SQL must match this grammar. */
+export const IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+/** Resource/log attribute keys (JSON path segments), e.g. OTel dotted keys. */
+export const ATTRIBUTE_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_.]*$/;
+/** Trace IDs are hexadecimal strings validated before embedding in queries. */
+export const TRACE_ID_PATTERN = /^[0-9a-fA-F]+$/;
+
+// Validators never embed raw upstream-tainted values in error messages, which
+// can otherwise be recorded verbatim onto an exported span.
+export function validateIdentifier(name: string): string {
+	if (!IDENTIFIER_PATTERN.test(name)) {
+		throw new Error(`Invalid SQL identifier (length=${name.length})`);
+	}
+	return name;
+}
+
+export function validateAttributeKey(key: string): string {
+	if (!ATTRIBUTE_KEY_PATTERN.test(key)) {
+		throw new Error(`Invalid attribute/label key (length=${key.length})`);
+	}
+	return key;
+}
+
+export function validateTraceId(id: string): string {
+	if (!TRACE_ID_PATTERN.test(id)) {
+		throw new Error(`Invalid trace id (length=${id.length})`);
+	}
+	return id;
+}
+
+export function validateLimit(limit: number): number {
+	if (!Number.isInteger(limit) || limit <= 0) {
+		throw new Error("Invalid limit: must be a positive integer");
+	}
+	return limit;
+}
+
+export function asString(value: unknown, fallback = ""): string {
+	if (value === null || value === undefined) {
+		return fallback;
+	}
+	return String(value);
+}
+
+export function asNumber(value: unknown, fallback = 0): number {
+	if (typeof value === "number") {
+		return value;
+	}
+	if (typeof value === "string" && value.trim() !== "") {
+		const parsed = Number(value);
+		if (!Number.isNaN(parsed)) {
+			return parsed;
+		}
+	}
+	return fallback;
+}
+
+interface PromSample {
+	metric?: Record<string, string>;
+	value?: [number, string];
+	values?: [number, string][];
+}
+
+export interface PromQueryRangeResponse {
+	status: string;
+	data?: { resultType: string; result: PromSample[] };
+	error?: string;
+	errorType?: string;
+}
+
+const METRIC_MAX_POINTS = 200;
+
+export function computeStepSeconds(
+	fromSec: number,
+	toSec: number,
+	maxPoints = METRIC_MAX_POINTS,
+): number {
+	const span = Math.max(1, toSec - fromSec);
+	return Math.max(1, Math.ceil(span / maxPoints));
+}
+
+export function parsePrometheusResponse(
+	payload: PromQueryRangeResponse,
+): MetricSeries[] {
+	const result = payload.data?.result ?? [];
+	return result.map((sample) => {
+		const { __name__, ...labels } = sample.metric ?? {};
+		const raw = sample.values ?? (sample.value ? [sample.value] : []);
+		const points = raw.map(([ts, value]) => ({
+			timestamp: new Date(ts * 1000).toISOString(),
+			value: Number(value),
+		}));
+		return { name: __name__ ?? "", labels, points };
+	});
+}
+
+export function firstDefined(
+	row: Record<string, unknown>,
+	...keys: string[]
+): unknown {
+	for (const key of keys) {
+		if (row[key] !== undefined && row[key] !== null) {
+			return row[key];
+		}
+	}
+	return undefined;
+}
+
+export function omit(
+	row: Record<string, unknown>,
+	keys: string[],
+): Record<string, unknown> {
+	const excluded = new Set(keys);
+	const result: Record<string, unknown> = {};
+	for (const [key, value] of Object.entries(row)) {
+		if (!excluded.has(key)) {
+			result[key] = value;
+		}
+	}
+	return result;
+}
+
 /**
  * Abstraction over a telemetry backend (docs/spec.md section 3.4). Initial
  * (and, as of M2, only) implementation is GreptimeDB direct query

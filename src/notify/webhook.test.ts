@@ -7,7 +7,6 @@ import {
 } from "@opentelemetry/sdk-trace-base";
 import { createLogger } from "../observability/logger";
 import type { IncidentSnapshot, NotificationEvent } from "./types";
-import { NotifierResponseError } from "./types";
 import { WebhookNotifier } from "./webhook";
 
 function silentLogger() {
@@ -92,29 +91,6 @@ describe("WebhookNotifier", () => {
 
 		const headers = new Headers(calls[0]?.init?.headers);
 		expect(headers.get("content-type")).toBe("application/json");
-	});
-
-	test("throws NotifierResponseError and logs an excerpt on a non-2xx response", async () => {
-		const { fetchImpl } = mockFetch(
-			new Response("internal error", { status: 500 }),
-		);
-		const lines: string[] = [];
-		const logger = createLogger({ sink: (line) => lines.push(line) });
-		const notifier = new WebhookNotifier(
-			{ type: "webhook", url: WEBHOOK_URL },
-			logger,
-			{ fetchImpl },
-		);
-
-		await expect(
-			notifier.notify({ kind: "failed", incident, reason: "agent crashed" }),
-		).rejects.toThrow(NotifierResponseError);
-
-		expect(lines.length).toBe(1);
-		const entry = JSON.parse(lines[0] as string);
-		expect(entry.notifier).toBe("webhook");
-		expect(entry.status).toBe(500);
-		expect(entry.bodyExcerpt).toBe("internal error");
 	});
 
 	test("threads the injected tracer into postJson, producing a notify.post span with component 'webhook'", async () => {

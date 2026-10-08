@@ -25,7 +25,6 @@ import {
 import {
 	buildRetryPrompt,
 	commitAndPush,
-	decideTestAttempt,
 	detectAndRunTests,
 	DiagnosisResultSchema,
 	failedResult,
@@ -35,6 +34,7 @@ import {
 	type DiagnosisResult,
 	type FixRetryResult,
 } from "./fix-incident.ts";
+import { decideFixAttempt } from "./lib/fix-attempt-policy.ts";
 import { buildDiagnosisPrompt } from "./lib/diagnosis-prompt.ts";
 import { collectSecrets } from "./lib/output-sanitizer.ts";
 import { createTelemetryTools } from "./tools.ts";
@@ -257,7 +257,7 @@ async function processAttempt(args: {
 			input.repo.testCommand,
 			signal,
 		);
-		const decision = decideTestAttempt({
+		const decision = decideFixAttempt({
 			attempt,
 			maxFixAttempts: input.limits.maxFixAttempts,
 			testRun,

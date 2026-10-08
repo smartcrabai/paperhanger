@@ -30,26 +30,17 @@ describe("detectTestCommand", () => {
 		expect(detectTestCommand(NOTHING)).toBeUndefined();
 	});
 
-	test("prefers `bun run test` when bun.lock is present", () => {
-		expect(
-			detectTestCommand({
-				...NOTHING,
-				packageJsonExists: true,
-				packageJsonScripts: { test: "bun test" },
-				bunLockExists: true,
-			}),
-		).toBe("bun run test");
-	});
-
-	test("prefers `bun run test` when bun.lockb (binary lockfile) is present", () => {
-		expect(
-			detectTestCommand({
-				...NOTHING,
-				packageJsonExists: true,
-				packageJsonScripts: { test: "bun test" },
-				bunLockbExists: true,
-			}),
-		).toBe("bun run test");
+	test("prefers `bun run test` when either bun lockfile is present", () => {
+		for (const lockfile of ["bunLockExists", "bunLockbExists"] as const) {
+			expect(
+				detectTestCommand({
+					...NOTHING,
+					packageJsonExists: true,
+					packageJsonScripts: { test: "bun test" },
+					[lockfile]: true,
+				}),
+			).toBe("bun run test");
+		}
 	});
 
 	test("uses `pnpm test` when only a pnpm lockfile is present", () => {
@@ -129,22 +120,16 @@ describe("detectTestCommand", () => {
 		).toBe("go test ./...");
 	});
 
-	test("detects pytest from pytest.ini", () => {
-		expect(detectTestCommand({ ...NOTHING, pytestIniExists: true })).toBe(
-			"python -m pytest",
-		);
-	});
-
-	test("detects pytest from tox.ini", () => {
-		expect(detectTestCommand({ ...NOTHING, toxIniExists: true })).toBe(
-			"python -m pytest",
-		);
-	});
-
-	test("detects pytest from setup.cfg", () => {
-		expect(detectTestCommand({ ...NOTHING, setupCfgExists: true })).toBe(
-			"python -m pytest",
-		);
+	test("detects pytest from pytest.ini, tox.ini, or setup.cfg", () => {
+		for (const probe of [
+			{ pytestIniExists: true },
+			{ toxIniExists: true },
+			{ setupCfgExists: true },
+		]) {
+			expect(detectTestCommand({ ...NOTHING, ...probe })).toBe(
+				"python -m pytest",
+			);
+		}
 	});
 
 	test("detects pytest from a pyproject.toml with a [tool.pytest] section", () => {
@@ -400,15 +385,11 @@ describe("detectTestCommand", () => {
 		expect(detectTestCommand(NOTHING, "make test")).toBe("make test");
 	});
 
-	test("an empty-string override is ignored and falls through to auto-detection", () => {
-		expect(detectTestCommand({ ...NOTHING, goModExists: true }, "")).toBe(
-			"go test ./...",
-		);
-	});
-
-	test("a whitespace-only override is ignored and falls through to auto-detection", () => {
-		expect(
-			detectTestCommand({ ...NOTHING, goModExists: true }, "   \n\t "),
-		).toBe("go test ./...");
+	test("empty or whitespace-only overrides fall through to auto-detection", () => {
+		for (const override of ["", "   \n\t "]) {
+			expect(
+				detectTestCommand({ ...NOTHING, goModExists: true }, override),
+			).toBe("go test ./...");
+		}
 	});
 });

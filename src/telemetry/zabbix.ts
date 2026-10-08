@@ -34,6 +34,7 @@
  */
 
 import { trace, type Tracer } from "@opentelemetry/api";
+import type { ZabbixTelemetryConfig } from "../config/schema";
 import type { Logger } from "../observability/logger";
 import {
 	fetchWithTimeout,
@@ -72,14 +73,7 @@ const ZABBIX_SEVERITY_TO_OTEL = [9, 9, 13, 17, 17, 21];
 /** Zabbix `history.get`'s `history` param: numeric value types this client treats as "metric-shaped". */
 const NUMERIC_VALUE_TYPES = new Set([0, 3]); // 0 = float, 3 = unsigned int
 
-export interface ZabbixSourceConfig {
-	/** Zabbix frontend base URL, e.g. `https://zabbix.example.com/zabbix` (without `/api_jsonrpc.php`). */
-	url: string;
-	/** API token, sent as `Authorization: Bearer <token>` (see the module doc comment's version assumption). */
-	apiToken: string;
-	/** Per-request timeout in milliseconds. Defaults to 30s. */
-	timeoutMs?: number;
-}
+export type ZabbixSourceConfig = Omit<ZabbixTelemetryConfig, "source">;
 
 /** Thrown for any non-2xx response, a JSON-RPC `error` field, or a client-side timeout. */
 export class ZabbixError extends Error {

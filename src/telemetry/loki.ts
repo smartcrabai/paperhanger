@@ -28,6 +28,7 @@
  */
 
 import type { Logger } from "../observability/logger";
+import type { LokiTelemetryConfig } from "../config/schema";
 import {
 	type LogRecord,
 	type MetricSeries,
@@ -49,15 +50,7 @@ const SERVICE_LABEL_NAME = "service_name";
 /** LogQL label/structured-metadata identifier grammar: `[a-zA-Z_][a-zA-Z0-9_]*`. */
 const IDENTIFIER_PATTERN = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 
-export interface LokiSourceConfig {
-	url: string;
-	/** `username:password`, unencoded; base64-encoded internally (Basic auth). */
-	auth?: string;
-	/** `X-Scope-OrgID` tenant header, for multi-tenant Loki deployments. */
-	orgId?: string;
-	/** Per-request timeout in milliseconds. Defaults to `DEFAULT_TIMEOUT_MS` (30s). */
-	timeoutMs?: number;
-}
+export type LokiSourceConfig = Omit<LokiTelemetryConfig, "source">;
 
 /** Thrown for any non-2xx / non-"success" Loki HTTP response. */
 export class LokiError extends Error {

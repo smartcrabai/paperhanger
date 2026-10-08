@@ -100,7 +100,7 @@ export function createTracing(
 	// (raw async_hooks is not fully wired in Bun), while
 	// AsyncLocalStorageContextManager propagates correctly across awaited
 	// macrotasks. Registration is first-wins per process, so every registrant
-	// in this repo (including tests/integration/helpers/otlp-seed.ts) uses
+	// in this repo (including tests/integration/otlp-seed.ts) uses
 	// the same class. See the MANDATORY regression test below.
 	const registered = context.setGlobalContextManager(
 		new AsyncLocalStorageContextManager().enable(),

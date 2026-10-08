@@ -39,15 +39,27 @@
 
 import type { Attributes, Span, Tracer } from "@opentelemetry/api";
 import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
+import type { OpenObserveTelemetryConfig } from "../config/schema";
 import type { Logger } from "../observability/logger";
 import {
+	asNumber,
+	asString,
+	computeStepSeconds,
+	firstDefined,
+	omit,
+	parsePrometheusResponse,
 	type LogRecord,
 	resolveServiceLabel,
 	SERVICE_LABEL_ALIASES,
 	type MetricSeries,
+	type PromQueryRangeResponse,
 	type TelemetryQuery,
 	type TelemetrySource,
 	type TraceRecord,
+	validateAttributeKey,
+	validateIdentifier,
+	validateLimit,
+	validateTraceId,
 } from "./types";
 
 const TRACER_NAME = "telemetry-openobserve";
@@ -66,27 +78,10 @@ const SLOW_SPAN_THRESHOLD_NANO = 50_000_000; // 50ms
 const SERVICE_ATTRIBUTE_KEY = "service.name";
 const SERVICE_COLUMN = "service_name";
 
-/** Stream identifiers we interpolate must match this to be safe to embed in SQL. */
-const IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-/** Resource/log attribute keys (OTel dotted keys); converted to `_`-joined column names before validation. */
-const ATTRIBUTE_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_.]*$/;
-/** Trace IDs are lowercase hex strings; validated before embedding in an IN (...) list. */
-const TRACE_ID_PATTERN = /^[0-9a-fA-F]+$/;
-
-export interface OpenObserveSourceConfig {
-	/** OpenObserve base URL, e.g. `https://api.openobserve.ai` or a self-hosted URL. */
-	url: string;
-	/** Organization slug in the URL path (`/api/{organization}/...`). */
-	organization: string;
-	/** `username:password`, unencoded; the client base64-encodes it itself. */
-	auth?: string;
-	/** Overrides for the OTLP-ingested logs stream name. Defaults to `DEFAULT_LOGS_STREAM` ("default"). */
-	logsStream?: string;
-	/** Overrides for the OTLP-ingested traces stream name. Defaults to `DEFAULT_TRACES_STREAM` ("default"). */
-	tracesStream?: string;
-	/** Per-request timeout in milliseconds for all HTTP calls. Defaults to `DEFAULT_OPENOBSERVE_TIMEOUT_MS` (30s). */
-	timeoutMs?: number;
-}
+export type OpenObserveSourceConfig = Omit<
+	OpenObserveTelemetryConfig,
+	"source"
+>;
 
 /** Thrown for any non-2xx `_search`/`query_range` response. */
 export class OpenObserveError extends Error {
@@ -99,37 +94,10 @@ export class OpenObserveError extends Error {
 	}
 }
 
-// See greptimedb.ts's identical note: validators never embed the raw
-// offending value (upstream-tainted) into their Error message, since that
-// message can end up recorded verbatim onto an exported span.
-
-function validateIdentifier(name: string): string {
-	if (!IDENTIFIER_PATTERN.test(name)) {
-		throw new Error(`Invalid SQL identifier (length=${name.length})`);
-	}
-	return name;
-}
-
 /** Converts a dotted OTel attribute key to OpenObserve's flattened column-name convention. */
 function attributeKeyToColumn(key: string): string {
-	if (!ATTRIBUTE_KEY_PATTERN.test(key)) {
-		throw new Error(`Invalid attribute/label key (length=${key.length})`);
-	}
+	validateAttributeKey(key);
 	return validateIdentifier(key.replace(/\./g, "_"));
-}
-
-function validateTraceId(id: string): string {
-	if (!TRACE_ID_PATTERN.test(id)) {
-		throw new Error(`Invalid trace id (length=${id.length})`);
-	}
-	return id;
-}
-
-function validateLimit(limit: number): number {
-	if (!Number.isInteger(limit) || limit <= 0) {
-		throw new Error("Invalid limit: must be a positive integer");
-	}
-	return limit;
 }
 
 function escapeSqlString(value: string): string {
@@ -146,52 +114,6 @@ function isoToMicros(iso: string): number {
 		throw new Error(`Invalid ISO timestamp: ${iso}`);
 	}
 	return ms * 1000;
-}
-
-function asString(value: unknown, fallback = ""): string {
-	if (value === null || value === undefined) {
-		return fallback;
-	}
-	return String(value);
-}
-
-function asNumber(value: unknown, fallback = 0): number {
-	if (typeof value === "number") {
-		return value;
-	}
-	if (typeof value === "string" && value.trim() !== "") {
-		const parsed = Number(value);
-		if (!Number.isNaN(parsed)) {
-			return parsed;
-		}
-	}
-	return fallback;
-}
-
-function firstDefined(
-	row: Record<string, unknown>,
-	...keys: string[]
-): unknown {
-	for (const key of keys) {
-		if (row[key] !== undefined && row[key] !== null) {
-			return row[key];
-		}
-	}
-	return undefined;
-}
-
-function omit(
-	row: Record<string, unknown>,
-	keys: string[],
-): Record<string, unknown> {
-	const excluded = new Set(keys);
-	const result: Record<string, unknown> = {};
-	for (const [key, value] of Object.entries(row)) {
-		if (!excluded.has(key)) {
-			result[key] = value;
-		}
-	}
-	return result;
 }
 
 /** OpenObserve's own `_timestamp` column is microseconds since epoch. */
@@ -501,7 +423,7 @@ export class OpenObserveSource implements TelemetrySource {
 						`Invalid time range for metrics query: ${query.timeRange.from} .. ${query.timeRange.to}`,
 					);
 				}
-				const step = Math.max(1, Math.ceil(Math.max(1, toSec - fromSec) / 200));
+				const step = computeStepSeconds(fromSec, toSec);
 
 				const params = new URLSearchParams({
 					query: query.promql,
@@ -517,17 +439,10 @@ export class OpenObserveSource implements TelemetrySource {
 					{ method: "GET", headers: this.authHeaders() },
 				);
 				const text = await response.text();
-				const json = this.parseJson(text, response.status) as {
-					status?: string;
-					error?: string;
-					data?: {
-						result?: {
-							metric?: Record<string, string>;
-							values?: [number, string][];
-							value?: [number, string];
-						}[];
-					};
-				};
+				const json = this.parseJson(
+					text,
+					response.status,
+				) as PromQueryRangeResponse;
 				if (!response.ok || json.status !== "success") {
 					throw new OpenObserveError(
 						json.error ??
@@ -535,16 +450,7 @@ export class OpenObserveSource implements TelemetrySource {
 						response.status,
 					);
 				}
-				const result = json.data?.result ?? [];
-				return result.map((sample) => {
-					const { __name__, ...labels } = sample.metric ?? {};
-					const raw = sample.values ?? (sample.value ? [sample.value] : []);
-					const points = raw.map(([ts, value]) => ({
-						timestamp: new Date(ts * 1000).toISOString(),
-						value: Number(value),
-					}));
-					return { name: __name__ ?? "", labels, points };
-				});
+				return parsePrometheusResponse(json);
 			},
 		);
 	}

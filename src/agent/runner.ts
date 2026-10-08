@@ -8,11 +8,7 @@ import {
 } from "@opentelemetry/api";
 import type { Incident, IncidentEvent } from "../core/types";
 import type { Logger } from "../observability/logger";
-import type {
-	CompareCommitsResult,
-	CreatePullRequestInput,
-	CreatePullRequestResult,
-} from "../repo/github";
+import type { GitHubAppClient } from "../repo/github";
 import type { ResolvedRepo } from "../repo/resolver";
 import type {
 	CommonSetupScriptStore,
@@ -31,32 +27,17 @@ import {
 } from "./contract";
 import { findForbiddenPaths } from "./forbidden-paths";
 
-export interface FixAgentGitHubClient {
-	getRepoInstallation(owner: string, repo: string): Promise<{ id: number }>;
-	createInstallationToken(
-		installationId: number,
-	): Promise<{ token: string; expiresAt: string }>;
-	cloneUrlWithToken(owner: string, repo: string, token: string): string;
-	getDefaultBranch(owner: string, repo: string): Promise<string>;
-	compareCommits(
-		owner: string,
-		repo: string,
-		base: string,
-		head: string,
-	): Promise<CompareCommitsResult>;
-	deleteRef(owner: string, repo: string, ref: string): Promise<void>;
-	createPullRequest(
-		owner: string,
-		repo: string,
-		input: CreatePullRequestInput,
-	): Promise<CreatePullRequestResult>;
-	addLabels(
-		owner: string,
-		repo: string,
-		issueNumber: number,
-		labels: string[],
-	): Promise<void>;
-}
+export type FixAgentGitHubClient = Pick<
+	GitHubAppClient,
+	| "getRepoInstallation"
+	| "createInstallationToken"
+	| "cloneUrlWithToken"
+	| "getDefaultBranch"
+	| "compareCommits"
+	| "deleteRef"
+	| "createPullRequest"
+	| "addLabels"
+>;
 
 export interface FixAgentAdmission {
 	streamUrl: string;

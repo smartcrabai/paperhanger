@@ -6,7 +6,7 @@
  *
  * Reuses the GreptimeDB container-lifecycle pattern and the OTLP trace
  * endpoint path / required headers exactly as
- * `tests/integration/greptimedb.test.ts` and `tests/integration/helpers/otlp-seed.ts`
+ * `tests/integration/greptimedb.test.ts` and `tests/integration/otlp-seed.ts`
  * do (both read before writing this file). Unlike the seed helper (which
  * never awaits inside `context.with`), this test drives the actual production
  * path: `createTracing` registers `AsyncLocalStorageContextManager`, and the
@@ -69,7 +69,7 @@ interface GreptimeSqlSuccess {
 /**
  * Runs a raw SQL statement against GreptimeDB's HTTP SQL API and returns the
  * result rows as plain objects keyed by column name. Mirrors
- * `tests/integration/helpers/otlp-seed.ts`'s `execSql` plus
+ * `tests/integration/otlp-seed.ts`'s `execSql` plus
  * `src/telemetry/greptimedb.ts`'s `parseSqlRows` (both intentionally not
  * imported: this test only reads production code's `Tracing`, not its
  * GreptimeDB query client, to keep the assertion path independent of it).

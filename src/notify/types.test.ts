@@ -67,13 +67,19 @@ describe("CompositeNotifier", () => {
 		expect(b.calls).toEqual([event]);
 	});
 
-	test("isolates a failing notifier: others still run and the error is not rethrown", async () => {
+	test("continues after notifier failures and never rethrows, even if all fail", async () => {
 		const good = new RecordingNotifier("good");
 		const bad = new ThrowingNotifier("bad");
 		const composite = new CompositeNotifier([bad, good], silentLogger());
 
 		await expect(composite.notify(event)).resolves.toBeUndefined();
 		expect(good.calls).toEqual([event]);
+
+		const allFailing = new CompositeNotifier(
+			[new ThrowingNotifier("a"), new ThrowingNotifier("b")],
+			silentLogger(),
+		);
+		await expect(allFailing.notify(event)).resolves.toBeUndefined();
 	});
 
 	test("logs the failing notifier's name, event kind, and incident id", async () => {
@@ -90,15 +96,6 @@ describe("CompositeNotifier", () => {
 		expect(entry.kind).toBe("diagnosis_started");
 		expect(entry.incidentId).toBe("incident-1");
 		expect(entry.error).toBe("connection refused");
-	});
-
-	test("does not throw even when every notifier fails", async () => {
-		const composite = new CompositeNotifier(
-			[new ThrowingNotifier("a"), new ThrowingNotifier("b")],
-			silentLogger(),
-		);
-
-		await expect(composite.notify(event)).resolves.toBeUndefined();
 	});
 
 	test("handles non-Error throws (e.g. a thrown string)", async () => {

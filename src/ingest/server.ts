@@ -12,6 +12,7 @@
  */
 
 import type { Tracer } from "@opentelemetry/api";
+import { timingSafeEqual } from "node:crypto";
 import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
 import type { IncidentManager } from "../core/incident-manager";
 import type { IncidentEvent } from "../core/types";
@@ -242,14 +243,7 @@ export function parseListLimit(url: URL): number {
 function safeCompare(a: string, b: string): boolean {
 	const aBytes = new TextEncoder().encode(a);
 	const bBytes = new TextEncoder().encode(b);
-	if (aBytes.length !== bBytes.length) {
-		return false;
-	}
-	let diff = 0;
-	for (let i = 0; i < aBytes.length; i++) {
-		diff |= (aBytes[i] as number) ^ (bBytes[i] as number);
-	}
-	return diff === 0;
+	return aBytes.length === bBytes.length && timingSafeEqual(aBytes, bBytes);
 }
 
 const BEARER_PATTERN = /^Bearer\s+(.+)$/i;

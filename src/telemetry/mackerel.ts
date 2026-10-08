@@ -33,6 +33,7 @@
  */
 
 import { trace, type Tracer } from "@opentelemetry/api";
+import type { MackerelTelemetryConfig } from "../config/schema";
 import type { Logger } from "../observability/logger";
 import {
 	fetchWithTimeout,
@@ -70,14 +71,7 @@ const MACKEREL_STATUS_TO_OTEL: Record<string, number> = {
 	OK: 9,
 };
 
-export interface MackerelSourceConfig {
-	/** Sent as the `X-Api-Key` header. */
-	apiKey: string;
-	/** Override for testing / non-default regions. Defaults to `https://api.mackerelio.com`. */
-	baseUrl?: string;
-	/** Per-request timeout in milliseconds. Defaults to 30s. */
-	timeoutMs?: number;
-}
+export type MackerelSourceConfig = Omit<MackerelTelemetryConfig, "source">;
 
 /** Thrown for any non-2xx Mackerel HTTP response, or a client-side timeout. */
 export class MackerelError extends Error {

@@ -167,11 +167,5 @@ describe.skipIf(!dockerAvailable)(
 			await store.close();
 			expect(await store.ping()).toBe(false);
 		});
-
-		test("close does not throw", async () => {
-			const store = new PostgresIncidentStore(connectionString);
-			await store.init();
-			await expect(store.close()).resolves.toBeUndefined();
-		});
 	},
 );

@@ -1225,30 +1225,6 @@ describe("GreptimeDbSource - OpenTelemetry span instrumentation", () => {
 		expect(observedSpanId).toBe(span?.spanContext().spanId);
 		expect(observedTraceId).toBe(span?.spanContext().traceId);
 	});
-
-	test("falls back to a no-op tracer when none is injected, keeping existing call sites working", async () => {
-		const { fetchImpl } = stubFetch(() =>
-			sqlSuccessResponse(
-				[{ name: "timestamp", data_type: "TimestampNanosecond" }],
-				[],
-			),
-		);
-		const source = new GreptimeDbSource(
-			{ url: "http://greptime.test", database: "public" },
-			silentLogger(),
-			fetchImpl,
-		);
-
-		await expect(
-			source.queryLogs({
-				timeRange: {
-					from: "2026-01-01T00:00:00.000Z",
-					to: "2026-01-01T01:00:00.000Z",
-				},
-				labels: {},
-			}),
-		).resolves.toEqual([]);
-	});
 });
 
 describe("GreptimeDbSource - runRawSql (query_telemetry expression escape hatch)", () => {

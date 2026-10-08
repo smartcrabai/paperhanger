@@ -71,26 +71,15 @@ export function createTelemetrySource(
 			return new MackerelSource(config, logger, undefined, tracer);
 		case "composite": {
 			const slots: CompositeTelemetrySourceSlots = {};
-			if (config.logs) {
-				slots.logs = createTelemetrySource(
-					config.logs,
-					logger.child({ slot: "logs" }),
-					tracer,
-				);
-			}
-			if (config.traces) {
-				slots.traces = createTelemetrySource(
-					config.traces,
-					logger.child({ slot: "traces" }),
-					tracer,
-				);
-			}
-			if (config.metrics) {
-				slots.metrics = createTelemetrySource(
-					config.metrics,
-					logger.child({ slot: "metrics" }),
-					tracer,
-				);
+			for (const signal of ["logs", "traces", "metrics"] as const) {
+				const childConfig = config[signal];
+				if (childConfig) {
+					slots[signal] = createTelemetrySource(
+						childConfig,
+						logger.child({ slot: signal }),
+						tracer,
+					);
+				}
 			}
 			return new CompositeTelemetrySource(config, slots, logger);
 		}

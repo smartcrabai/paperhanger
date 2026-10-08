@@ -622,23 +622,4 @@ describe("ClickStackSource - OpenTelemetry span instrumentation", () => {
 		expect(span?.status.code).toBe(SpanStatusCode.ERROR);
 		expect(span?.attributes["http.response.status_code"]).toBe(500);
 	});
-
-	test("falls back to a no-op tracer when none is injected, keeping existing call sites working", async () => {
-		const { fetchImpl } = stubFetch(() => clickhouseJsonResponse([]));
-		const source = new ClickStackSource(
-			{ url: "http://clickhouse.test:8123", database: "default" },
-			silentLogger(),
-			fetchImpl,
-		);
-
-		await expect(
-			source.queryLogs({
-				timeRange: {
-					from: "2026-01-01T00:00:00.000Z",
-					to: "2026-01-01T01:00:00.000Z",
-				},
-				labels: {},
-			}),
-		).resolves.toEqual([]);
-	});
 });

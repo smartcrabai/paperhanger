@@ -30,18 +30,13 @@ function makeInput(
 }
 
 describe("buildDiagnosisPrompt", () => {
-	test("omits the operator instructions section and its separator when systemPrompt is unset", () => {
-		const prompt = buildDiagnosisPrompt(makeInput());
+	test("omits operator instructions when systemPrompt is unset or blank", () => {
+		for (const input of [makeInput(), makeInput({ systemPrompt: "   " })]) {
+			const prompt = buildDiagnosisPrompt(input);
 
-		expect(prompt.startsWith("## Incident context")).toBe(true);
-		expect(prompt).not.toContain("Operator instructions");
-	});
-
-	test("omits the operator instructions section when systemPrompt is blank", () => {
-		const prompt = buildDiagnosisPrompt(makeInput({ systemPrompt: "   " }));
-
-		expect(prompt.startsWith("## Incident context")).toBe(true);
-		expect(prompt).not.toContain("Operator instructions");
+			expect(prompt.startsWith("## Incident context")).toBe(true);
+			expect(prompt).not.toContain("Operator instructions");
+		}
 	});
 
 	test("places a trimmed operator instructions section, separated by a blank line, ahead of the incident context", () => {

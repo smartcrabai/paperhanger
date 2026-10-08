@@ -37,7 +37,7 @@ describe("TokenPrompt", () => {
 		expect(submitted).toEqual(["secret"]);
 	});
 
-	test("never submits a whitespace-only token", () => {
+	test("never submits an empty or whitespace-only token", () => {
 		const submitted: string[] = [];
 		render(<TokenPrompt onSubmit={(value) => submitted.push(value)} />);
 
@@ -46,14 +46,14 @@ describe("TokenPrompt", () => {
 		// button, and happy-dom drops clicks on disabled buttons before any
 		// submit is requested) -- it never reaches handleSubmit. Fire the
 		// submit event directly so this pins the handler's own trim check.
-		fireEvent.change(screen.getByPlaceholderText("API token"), {
-			target: { value: "   " },
-		});
-		fireEvent.submit(
-			screen
-				.getByRole("button", { name: "Continue" })
-				.closest("form") as HTMLFormElement,
-		);
+		const tokenInput = screen.getByPlaceholderText("API token");
+		const form = screen
+			.getByRole("button", { name: "Continue" })
+			.closest("form") as HTMLFormElement;
+		for (const value of ["", "   "]) {
+			fireEvent.change(tokenInput, { target: { value } });
+			fireEvent.submit(form);
+		}
 
 		expect(submitted).toEqual([]);
 	});
@@ -91,22 +91,6 @@ describe("TokenPrompt", () => {
 		await user.type(screen.getByPlaceholderText("API token"), "secret{Enter}");
 
 		expect(await submitDefaultPrevented).toBe(true);
-	});
-
-	test("refuses to submit when a raw submit event carries no token", () => {
-		const submitted: string[] = [];
-		render(<TokenPrompt onSubmit={(value) => submitted.push(value)} />);
-
-		// Enter-key and click submission are already blocked by the disabled
-		// button; fire the submit event directly (e.g. form.requestSubmit())
-		// to prove the handler's own length check also refuses an empty
-		// value, not just the disabled control.
-		const form = screen
-			.getByRole("button", { name: "Continue" })
-			.closest("form") as HTMLFormElement;
-		fireEvent.submit(form);
-
-		expect(submitted).toEqual([]);
 	});
 
 	test("stays full-screen (no overlay class) when overlay is omitted", () => {

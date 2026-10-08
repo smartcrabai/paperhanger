@@ -29,24 +29,10 @@ function baseInput(
 }
 
 describe("collectSecrets", () => {
-	test("includes the clone token extracted from repo.cloneUrl", () => {
+	test("collects the clone token only when repo.cloneUrl contains a credential", () => {
 		expect(collectSecrets(baseInput(), {})).toContain("ghs_abc123");
-	});
 
-	test("includes the telemetry callback token from the environment when set", () => {
-		const secrets = collectSecrets(baseInput(), {
-			PAPERHANGER_TELEMETRY_CALLBACK_TOKEN: "cb-secret-token",
-		});
-		expect(secrets).toContain("cb-secret-token");
-	});
-
-	test("omits the telemetry callback token entry (as undefined) when unset", () => {
-		const secrets = collectSecrets(baseInput(), {});
-		expect(secrets).toContain(undefined);
-	});
-
-	test("returns undefined for the clone token when the URL has no embedded credential", () => {
-		const secrets = collectSecrets(
+		const secretsWithoutCredential = collectSecrets(
 			baseInput({
 				repo: {
 					owner: "acme",
@@ -58,7 +44,14 @@ describe("collectSecrets", () => {
 			}),
 			{},
 		);
-		expect(secrets[0]).toBeUndefined();
+		expect(secretsWithoutCredential[0]).toBeUndefined();
+	});
+
+	test("includes the telemetry callback token from the environment when set", () => {
+		const secrets = collectSecrets(baseInput(), {
+			PAPERHANGER_TELEMETRY_CALLBACK_TOKEN: "cb-secret-token",
+		});
+		expect(secrets).toContain("cb-secret-token");
 	});
 });
 

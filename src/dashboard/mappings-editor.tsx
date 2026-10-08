@@ -23,10 +23,6 @@ export interface EditableGroup {
 	pairs: EditablePair[];
 }
 
-function makeId(): string {
-	return crypto.randomUUID();
-}
-
 /**
  * Trimmed, non-empty keys that appear more than once within a single group.
  * Pairs within a group are AND'd into one `Record<string, string>` (see
@@ -81,11 +77,11 @@ export function hasIncompleteMappingPairs(groups: EditableGroup[]): boolean {
 }
 
 export function emptyPair(): EditablePair {
-	return { id: makeId(), key: "", value: "" };
+	return { id: crypto.randomUUID(), key: "", value: "" };
 }
 
 export function emptyGroup(): EditableGroup {
-	return { id: makeId(), pairs: [emptyPair()] };
+	return { id: crypto.randomUUID(), pairs: [emptyPair()] };
 }
 
 function updateGroup(

@@ -6,16 +6,10 @@ import {
 } from "./system-prompt.ts";
 
 describe("renderCommonSystemPromptSection", () => {
-	test("returns no lines when systemPrompt is undefined", () => {
-		expect(renderCommonSystemPromptSection(undefined)).toEqual([]);
-	});
-
-	test("returns no lines when systemPrompt is an empty string", () => {
-		expect(renderCommonSystemPromptSection("")).toEqual([]);
-	});
-
-	test("returns no lines when systemPrompt is whitespace-only", () => {
-		expect(renderCommonSystemPromptSection("   \n\t  ")).toEqual([]);
+	test("returns no lines when systemPrompt is unset, empty, or whitespace-only", () => {
+		for (const systemPrompt of [undefined, "", "   \n\t  "]) {
+			expect(renderCommonSystemPromptSection(systemPrompt)).toEqual([]);
+		}
 	});
 
 	test("renders a heading followed by the trimmed prompt text", () => {
@@ -30,20 +24,23 @@ describe("renderCommonSystemPromptSection", () => {
 		]);
 	});
 
-	test("preserves internal multiline structure of the prompt", () => {
-		const lines = renderCommonSystemPromptSection(
+	test("preserves internal multiline, blank, and whitespace-only lines", () => {
+		const commonLines = renderCommonSystemPromptSection(
+			"Line one.\nLine two.\nLine three.",
+		);
+		expect(commonLines.join("\n")).toContain(
 			"Line one.\nLine two.\nLine three.",
 		);
 
-		expect(lines.join("\n")).toContain("Line one.\nLine two.\nLine three.");
-	});
-
-	test("preserves internal blank and whitespace-only lines", () => {
 		const lines = renderCommonSystemPromptSection(
 			"Line one.\n\n   \nLine two.",
 		);
-
 		expect(lines.join("\n")).toContain("Line one.\n\n   \nLine two.");
+
+		const repoLines = renderRepoSystemPromptSection(
+			"Line one.\n\n   \nLine two.",
+		);
+		expect(repoLines.join("\n")).toContain("Line one.\n\n   \nLine two.");
 	});
 });
 
@@ -62,19 +59,6 @@ describe("renderRepoSystemPromptSection", () => {
 			"",
 			"Prefer minimal diffs here.",
 		]);
-	});
-
-	test("uses a heading distinct from the common section's", () => {
-		const repoHeading = renderRepoSystemPromptSection("x")[0];
-		const commonHeading = renderCommonSystemPromptSection("x")[0];
-
-		expect(repoHeading).not.toBe(commonHeading);
-	});
-
-	test("preserves internal multiline structure of the prompt", () => {
-		const lines = renderRepoSystemPromptSection("Line one.\n\n   \nLine two.");
-
-		expect(lines.join("\n")).toContain("Line one.\n\n   \nLine two.");
 	});
 });
 
