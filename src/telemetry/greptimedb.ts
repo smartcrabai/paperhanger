@@ -10,15 +10,25 @@
 
 import type { Attributes, Span, Tracer } from "@opentelemetry/api";
 import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
+import type { GreptimeDbTelemetryConfig } from "../config/schema";
 import type { Logger } from "../observability/logger";
 import {
+	asNumber,
+	asString,
+	computeStepSeconds,
+	parsePrometheusResponse,
 	type LogRecord,
 	resolveServiceLabel,
 	SERVICE_LABEL_ALIASES,
 	type MetricSeries,
+	type PromQueryRangeResponse,
 	type TelemetryQuery,
 	type TelemetrySource,
 	type TraceRecord,
+	validateAttributeKey,
+	validateIdentifier,
+	validateLimit,
+	validateTraceId,
 } from "./types";
 
 /**
@@ -41,17 +51,7 @@ const DEFAULT_GREPTIMEDB_TIMEOUT_MS = 30_000;
 const ERROR_SEVERITY_NUMBER = 17;
 /** Spans slower than this are considered "slow" for the representative-span query. */
 const SLOW_SPAN_THRESHOLD_NANO = 50_000_000; // 50ms
-/** Cap on points returned by a single PromQL range query (see spec section 3.4). */
-const METRIC_MAX_POINTS = 200;
-
 const SERVICE_ATTRIBUTE_JSON_KEY = "service.name";
-
-/** Table/column identifiers we interpolate must match this to be safe to embed in SQL. */
-const IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-/** Resource/log attribute keys (JSON path segments), e.g. OTel dotted keys. */
-const ATTRIBUTE_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_.]*$/;
-/** Trace IDs are lowercase hex strings; validated before embedding in an IN (...) list. */
-const TRACE_ID_PATTERN = /^[0-9a-fA-F]+$/;
 
 const LOG_COLUMNS = [
 	"timestamp",
@@ -80,17 +80,7 @@ const TRACE_COLUMNS = [
 	"span_links",
 ];
 
-export interface GreptimeDbSourceConfig {
-	url: string;
-	database: string;
-	/** `username:password`, unencoded; the client base64-encodes it itself. */
-	auth?: string;
-	/** Overrides for OTLP-ingested table names (deployments can rename them). */
-	logsTable?: string;
-	tracesTable?: string;
-	/** Per-request timeout in milliseconds for all HTTP calls. Defaults to `DEFAULT_GREPTIMEDB_TIMEOUT_MS` (30s). */
-	timeoutMs?: number;
-}
+export type GreptimeDbSourceConfig = Omit<GreptimeDbTelemetryConfig, "source">;
 
 /** Thrown for any non-2xx GreptimeDB HTTP response, carrying its `code`/`error`. */
 export class GreptimeDbError extends Error {
@@ -103,42 +93,6 @@ export class GreptimeDbError extends Error {
 		this.code = code;
 		this.httpStatus = httpStatus;
 	}
-}
-
-// NOTE ON ERROR MESSAGES: none of these validators embed the raw offending
-// value. Trace IDs and attribute keys here are upstream-tainted (extracted
-// from stored log rows / alert labels), and these Errors can end up recorded
-// verbatim onto an exported span (see `withQuerySpan`'s catch branch for
-// non-`GreptimeDbError` exceptions). Describing the problem with only a
-// length or a fixed reason keeps the thrown Error type unchanged while
-// avoiding an exfiltration path for the raw value via span export.
-
-function validateIdentifier(name: string): string {
-	if (!IDENTIFIER_PATTERN.test(name)) {
-		throw new Error(`Invalid SQL identifier (length=${name.length})`);
-	}
-	return name;
-}
-
-function validateAttributeKey(key: string): string {
-	if (!ATTRIBUTE_KEY_PATTERN.test(key)) {
-		throw new Error(`Invalid attribute/label key (length=${key.length})`);
-	}
-	return key;
-}
-
-function validateTraceId(id: string): string {
-	if (!TRACE_ID_PATTERN.test(id)) {
-		throw new Error(`Invalid trace id (length=${id.length})`);
-	}
-	return id;
-}
-
-function validateLimit(limit: number): number {
-	if (!Number.isInteger(limit) || limit <= 0) {
-		throw new Error("Invalid limit: must be a positive integer");
-	}
-	return limit;
 }
 
 function escapeSqlString(value: string): string {
@@ -189,26 +143,6 @@ function nanosecondsToIso(raw: unknown): string {
 		}
 	}
 	throw new Error(`Unexpected timestamp value from GreptimeDB: ${String(raw)}`);
-}
-
-function asString(value: unknown, fallback = ""): string {
-	if (value === null || value === undefined) {
-		return fallback;
-	}
-	return String(value);
-}
-
-function asNumber(value: unknown, fallback = 0): number {
-	if (typeof value === "number") {
-		return value;
-	}
-	if (typeof value === "string" && value.trim() !== "") {
-		const parsed = Number(value);
-		if (!Number.isNaN(parsed)) {
-			return parsed;
-		}
-	}
-	return fallback;
 }
 
 /** Parses a GreptimeDB `Json` column value, which may arrive as a native object or a JSON string. */
@@ -315,43 +249,6 @@ function rowToTraceRecord(row: Record<string, unknown>): TraceRecord {
 			links: parseJsonValue(row.span_links) ?? [],
 		},
 	};
-}
-
-interface PromSample {
-	metric?: Record<string, string>;
-	value?: [number, string];
-	values?: [number, string][];
-}
-
-interface PromQueryRangeResponse {
-	status: string;
-	data?: { resultType: string; result: PromSample[] };
-	error?: string;
-	errorType?: string;
-}
-
-function computeStepSeconds(
-	fromSec: number,
-	toSec: number,
-	maxPoints = METRIC_MAX_POINTS,
-): number {
-	const span = Math.max(1, toSec - fromSec);
-	return Math.max(1, Math.ceil(span / maxPoints));
-}
-
-function parsePrometheusResponse(
-	payload: PromQueryRangeResponse,
-): MetricSeries[] {
-	const result = payload.data?.result ?? [];
-	return result.map((sample) => {
-		const { __name__, ...labels } = sample.metric ?? {};
-		const raw = sample.values ?? (sample.value ? [sample.value] : []);
-		const points = raw.map(([ts, value]) => ({
-			timestamp: new Date(ts * 1000).toISOString(),
-			value: Number(value),
-		}));
-		return { name: __name__ ?? "", labels, points };
-	});
 }
 
 function parseJsonResponseBody(text: string, httpStatus: number): unknown {

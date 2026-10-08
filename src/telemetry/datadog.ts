@@ -28,6 +28,7 @@
  */
 
 import { trace, type Tracer } from "@opentelemetry/api";
+import type { DatadogTelemetryConfig } from "../config/schema";
 import type { Logger } from "../observability/logger";
 import {
 	fetchWithTimeout,
@@ -77,16 +78,7 @@ function quoteFacetValue(value: string): string {
 	return `"${escaped}"`;
 }
 
-export interface DatadogSourceConfig {
-	/** `DD-API-KEY`. */
-	apiKey: string;
-	/** `DD-APPLICATION-KEY`; required by the search/query endpoints this client uses. */
-	appKey: string;
-	/** Datadog site, e.g. `datadoghq.com` (default), `datadoghq.eu`, `us3.datadoghq.com`. */
-	site?: string;
-	/** Per-request timeout in milliseconds. Defaults to 30s. */
-	timeoutMs?: number;
-}
+export type DatadogSourceConfig = Omit<DatadogTelemetryConfig, "source">;
 
 /** Thrown for any non-2xx Datadog HTTP response, or a client-side timeout. */
 export class DatadogError extends Error {

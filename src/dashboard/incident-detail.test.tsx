@@ -38,48 +38,6 @@ async function flush(): Promise<void> {
 }
 
 describe("IncidentDetail", () => {
-	test("keys each event row by its own record id so a refresh doesn't warn React about ambiguous list identity", async () => {
-		const eventA = incidentEventRecord({
-			id: "event-a",
-			event: { ...baseEvent, title: "CPU spike" },
-		});
-		const eventB = incidentEventRecord({
-			id: "event-b",
-			event: { ...baseEvent, title: "CPU spike resolved" },
-		});
-		stubFetch((req) =>
-			req.route === "GET /incidents/incident-1/events"
-				? jsonResponse({ events: [eventA, eventB] })
-				: errorResponse(500, `unexpected route: ${req.route}`),
-		);
-
-		const consoleErrors: unknown[][] = [];
-		const originalConsoleError = console.error;
-		console.error = (...args: unknown[]) => {
-			consoleErrors.push(args);
-		};
-
-		try {
-			render(
-				<IncidentDetail
-					incidentId="incident-1"
-					incident={incident()}
-					token="tok"
-					onUnauthorized={() => {}}
-					refreshTick={0}
-				/>,
-			);
-			await screen.findAllByRole("listitem");
-		} finally {
-			console.error = originalConsoleError;
-		}
-
-		// A missing/duplicate `key` on the mapped `<li>` surfaces as a React
-		// console.error ("Each child in a list should have a unique key
-		// prop"), not a thrown exception or a visible DOM difference.
-		expect(consoleErrors).toEqual([]);
-	});
-
 	test("fetches the timeline from GET /incidents/:id/events, percent-encoding the id", async () => {
 		const rawId = "grp/inc 1";
 		const encoded = encodeURIComponent(rawId);

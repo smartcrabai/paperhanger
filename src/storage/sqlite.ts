@@ -280,40 +280,21 @@ export class SqliteIncidentStore
 			this.db.run("INSERT INTO schema_version (version) VALUES (?);", [0]);
 		}
 
-		if (version < 1) {
-			this.migrateV1();
-			version = 1;
-			this.setSchemaVersion(version);
-		}
-		if (version < 2) {
-			this.migrateV2();
-			version = 2;
-			this.setSchemaVersion(version);
-		}
-		if (version < 3) {
-			this.migrateV3();
-			version = 3;
-			this.setSchemaVersion(version);
-		}
-		if (version < 4) {
-			this.migrateV4();
-			version = 4;
-			this.setSchemaVersion(version);
-		}
-		if (version < 5) {
-			this.migrateV5();
-			version = 5;
-			this.setSchemaVersion(version);
-		}
-		if (version < 6) {
-			this.migrateV6();
-			version = 6;
-			this.setSchemaVersion(version);
-		}
-		if (version < 7) {
-			this.migrateV7();
-			version = 7;
-			this.setSchemaVersion(version);
+		const migrations = [
+			this.migrateV1,
+			this.migrateV2,
+			this.migrateV3,
+			this.migrateV4,
+			this.migrateV5,
+			this.migrateV6,
+			this.migrateV7,
+		];
+		for (let index = 0; index < migrations.length; index++) {
+			if (version < index + 1) {
+				migrations[index]!.call(this);
+				version = index + 1;
+				this.setSchemaVersion(version);
+			}
 		}
 		if (version !== SCHEMA_VERSION) {
 			throw new Error(

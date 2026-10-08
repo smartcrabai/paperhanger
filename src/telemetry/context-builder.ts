@@ -320,12 +320,7 @@ function truncate(text: string, maxLen: number): string {
 function groupTracesByTraceId(
 	traces: TraceRecord[],
 ): [string, TraceRecord[]][] {
-	const map = new Map<string, TraceRecord[]>();
-	for (const span of traces) {
-		const list = map.get(span.traceId) ?? [];
-		list.push(span);
-		map.set(span.traceId, list);
-	}
+	const map = Map.groupBy(traces, (span) => span.traceId);
 	for (const list of map.values()) {
 		list.sort((a, b) =>
 			a.startTime < b.startTime ? -1 : a.startTime > b.startTime ? 1 : 0,

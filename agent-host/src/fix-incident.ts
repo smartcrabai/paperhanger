@@ -2,7 +2,6 @@ import type { SessionEnv, ShellResult } from "@flue/runtime";
 import * as v from "valibot";
 import { type FixIncidentInput, type FixIncidentOutput } from "./contract.ts";
 import { runConditionalSetupScripts } from "./lib/common-setup-scripts.ts";
-import { decideFixAttempt } from "./lib/fix-attempt-policy.ts";
 import { collectSecrets, sanitizeOutput } from "./lib/output-sanitizer.ts";
 import { redactSecrets, tokenlessCloneUrl } from "./lib/redaction.ts";
 import { checkForTamper } from "./lib/tamper-check.ts";
@@ -383,12 +382,4 @@ export function sanitizeIncidentOutput(
 	output: FixIncidentOutput,
 ): FixIncidentOutput {
 	return sanitizeOutput(output, collectSecrets(input));
-}
-
-export function decideTestAttempt(args: {
-	attempt: number;
-	maxFixAttempts: number;
-	testRun: TestRunResult;
-}) {
-	return decideFixAttempt(args);
 }

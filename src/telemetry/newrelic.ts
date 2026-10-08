@@ -21,6 +21,7 @@
  */
 
 import { trace, type Tracer } from "@opentelemetry/api";
+import type { NewRelicTelemetryConfig } from "../config/schema";
 import type { Logger } from "../observability/logger";
 import {
 	fetchWithTimeout,
@@ -50,8 +51,6 @@ const NERDGRAPH_ENDPOINTS = {
 	EU: "https://api.eu.newrelic.com/graphql",
 } as const;
 
-export type NewRelicRegion = keyof typeof NERDGRAPH_ENDPOINTS;
-
 /** OTel standard severity numbers (https://opentelemetry.io/docs/specs/otel/logs/data-model/#field-severitynumber). */
 const OTEL_SEVERITY: Record<string, number> = {
 	fatal: 21,
@@ -77,16 +76,7 @@ function nrqlStringLiteral(value: string): string {
 	return `'${escaped}'`;
 }
 
-export interface NewRelicSourceConfig {
-	/** User API key (`NRAK-...`), sent as the `Api-Key` header. */
-	apiKey: string;
-	/** New Relic account ID to query. */
-	accountId: number;
-	/** `US` (default) or `EU`, selecting the NerdGraph endpoint. */
-	region?: NewRelicRegion;
-	/** Per-request timeout in milliseconds. Defaults to 30s. */
-	timeoutMs?: number;
-}
+export type NewRelicSourceConfig = Omit<NewRelicTelemetryConfig, "source">;
 
 /** Thrown for any non-2xx NerdGraph HTTP response, a GraphQL-level `errors[]`, or a client-side timeout. */
 export class NewRelicError extends Error {

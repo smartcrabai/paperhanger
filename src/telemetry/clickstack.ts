@@ -32,8 +32,11 @@
 
 import type { Attributes, Span, Tracer } from "@opentelemetry/api";
 import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
+import type { ClickStackTelemetryConfig } from "../config/schema";
 import type { Logger } from "../observability/logger";
 import {
+	asNumber,
+	asString,
 	type LogRecord,
 	resolveServiceLabel,
 	SERVICE_LABEL_ALIASES,
@@ -41,6 +44,10 @@ import {
 	type TelemetryQuery,
 	type TelemetrySource,
 	type TraceRecord,
+	validateAttributeKey,
+	validateIdentifier,
+	validateLimit,
+	validateTraceId,
 } from "./types";
 
 const TRACER_NAME = "telemetry-clickstack";
@@ -57,13 +64,6 @@ const ERROR_SEVERITY_NUMBER = 17;
 const SLOW_SPAN_THRESHOLD_NANO = 50_000_000; // 50ms
 
 const SERVICE_ATTRIBUTE_KEY = "service.name";
-
-/** Table/database identifiers we interpolate must match this to be safe to embed in SQL. */
-const IDENTIFIER_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
-/** Resource/log attribute keys (OTel dotted keys), used as Map(...) access keys. */
-const ATTRIBUTE_KEY_PATTERN = /^[A-Za-z_][A-Za-z0-9_.]*$/;
-/** Trace IDs are lowercase hex strings; validated before embedding in an IN (...) list. */
-const TRACE_ID_PATTERN = /^[0-9a-fA-F]+$/;
 
 const LOG_COLUMNS = [
 	"Timestamp",
@@ -97,18 +97,7 @@ const TRACE_COLUMNS = [
 	"ServiceName",
 ];
 
-export interface ClickStackSourceConfig {
-	/** ClickHouse HTTP interface base URL, e.g. `http://localhost:8123`. */
-	url: string;
-	database: string;
-	/** `username:password`, unencoded; the client base64-encodes it itself. */
-	auth?: string;
-	/** Overrides for OTLP-ingested table names (deployments can rename them). */
-	logsTable?: string;
-	tracesTable?: string;
-	/** Per-request timeout in milliseconds for all HTTP calls. Defaults to `DEFAULT_CLICKSTACK_TIMEOUT_MS` (30s). */
-	timeoutMs?: number;
-}
+export type ClickStackSourceConfig = Omit<ClickStackTelemetryConfig, "source">;
 
 /** Thrown for any non-2xx ClickHouse HTTP response. ClickHouse's error bodies are plain text, not JSON. */
 export class ClickStackError extends Error {
@@ -119,38 +108,6 @@ export class ClickStackError extends Error {
 		this.name = "ClickStackError";
 		this.httpStatus = httpStatus;
 	}
-}
-
-// See greptimedb.ts's identical note: validators never embed the raw
-// offending value (upstream-tainted) into their Error message, since that
-// message can end up recorded verbatim onto an exported span.
-
-function validateIdentifier(name: string): string {
-	if (!IDENTIFIER_PATTERN.test(name)) {
-		throw new Error(`Invalid SQL identifier (length=${name.length})`);
-	}
-	return name;
-}
-
-function validateAttributeKey(key: string): string {
-	if (!ATTRIBUTE_KEY_PATTERN.test(key)) {
-		throw new Error(`Invalid attribute/label key (length=${key.length})`);
-	}
-	return key;
-}
-
-function validateTraceId(id: string): string {
-	if (!TRACE_ID_PATTERN.test(id)) {
-		throw new Error(`Invalid trace id (length=${id.length})`);
-	}
-	return id;
-}
-
-function validateLimit(limit: number): number {
-	if (!Number.isInteger(limit) || limit <= 0) {
-		throw new Error("Invalid limit: must be a positive integer");
-	}
-	return limit;
 }
 
 function escapeSqlString(value: string): string {
@@ -202,31 +159,6 @@ function clickhouseTimestampToIso(raw: unknown): string {
 		throw new Error("Unexpected timestamp value from ClickHouse");
 	}
 	return date.toISOString();
-}
-
-function asString(value: unknown, fallback = ""): string {
-	if (value === null || value === undefined) {
-		return fallback;
-	}
-	return String(value);
-}
-
-/**
- * ClickHouse's JSON output format quotes UInt64/Int64 values as strings to
- * avoid JS float precision loss, so numeric columns (e.g. `Duration`,
- * `SeverityNumber`) may arrive as either a JSON number or a numeric string.
- */
-function asNumber(value: unknown, fallback = 0): number {
-	if (typeof value === "number") {
-		return value;
-	}
-	if (typeof value === "string" && value.trim() !== "") {
-		const parsed = Number(value);
-		if (!Number.isNaN(parsed)) {
-			return parsed;
-		}
-	}
-	return fallback;
 }
 
 function asStringRecord(value: unknown): Record<string, unknown> {

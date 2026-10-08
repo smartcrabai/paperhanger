@@ -80,7 +80,6 @@ export interface IncidentManagerDeps {
 export class IncidentManager {
 	private readonly queue: string[] = [];
 	private readonly activeIncidentIds = new Set<string>();
-	private active = 0;
 	private draining = false;
 	private readonly now: () => Date;
 	/**
@@ -100,7 +99,7 @@ export class IncidentManager {
 
 	/** Number of incidents currently queued or being processed. Mainly for tests/observability. */
 	get pendingCount(): number {
-		return this.queue.length + this.active;
+		return this.queue.length + this.activeIncidentIds.size;
 	}
 
 	async handleEvent(event: IncidentEvent): Promise<IngestResult> {
@@ -325,17 +324,15 @@ export class IncidentManager {
 		this.draining = true;
 		try {
 			while (
-				this.active < this.deps.config.agent.concurrency &&
+				this.activeIncidentIds.size < this.deps.config.agent.concurrency &&
 				this.queue.length > 0
 			) {
 				const incidentId = this.queue.shift();
 				if (incidentId === undefined) {
 					break;
 				}
-				this.active++;
 				this.activeIncidentIds.add(incidentId);
 				void this.runOne(incidentId).finally(() => {
-					this.active--;
 					this.activeIncidentIds.delete(incidentId);
 					this.drain();
 				});

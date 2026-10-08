@@ -94,11 +94,7 @@ export const FixAgentOutputSchema = z
 		}
 	});
 
-export type FixAgentAlert = z.infer<typeof FixAgentAlertSchema>;
-export type FixAgentRepoInput = z.infer<typeof FixAgentRepoInputSchema>;
-export type FixAgentLimits = z.infer<typeof FixAgentLimitsSchema>;
 export type FixAgentInput = z.infer<typeof FixAgentInputSchema>;
-export type FixAgentFix = z.infer<typeof FixAgentFixSchema>;
 export type FixAgentOutput = z.infer<typeof FixAgentOutputSchema>;
 
 /** Route and data-part key shared with the Flue 2 agent host. */

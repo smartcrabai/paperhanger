@@ -321,40 +321,21 @@ export class PostgresIncidentStore
 			await this.sql`INSERT INTO schema_version (version) VALUES (0)`;
 		}
 
-		if (version < 1) {
-			await this.migrateV1();
-			version = 1;
-			await this.setSchemaVersion(version);
-		}
-		if (version < 2) {
-			await this.migrateV2();
-			version = 2;
-			await this.setSchemaVersion(version);
-		}
-		if (version < 3) {
-			await this.migrateV3();
-			version = 3;
-			await this.setSchemaVersion(version);
-		}
-		if (version < 4) {
-			await this.migrateV4();
-			version = 4;
-			await this.setSchemaVersion(version);
-		}
-		if (version < 5) {
-			await this.migrateV5();
-			version = 5;
-			await this.setSchemaVersion(version);
-		}
-		if (version < 6) {
-			await this.migrateV6();
-			version = 6;
-			await this.setSchemaVersion(version);
-		}
-		if (version < 7) {
-			await this.migrateV7();
-			version = 7;
-			await this.setSchemaVersion(version);
+		const migrations = [
+			this.migrateV1,
+			this.migrateV2,
+			this.migrateV3,
+			this.migrateV4,
+			this.migrateV5,
+			this.migrateV6,
+			this.migrateV7,
+		];
+		for (let index = 0; index < migrations.length; index++) {
+			if (version < index + 1) {
+				await migrations[index]!.call(this);
+				version = index + 1;
+				await this.setSchemaVersion(version);
+			}
 		}
 		if (version !== SCHEMA_VERSION) {
 			throw new Error(

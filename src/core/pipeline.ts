@@ -389,11 +389,11 @@ export class IncidentPipeline implements IncidentProcessor {
 	 */
 	private async resolveAlertEvent(incident: Incident): Promise<IncidentEvent> {
 		const events = await this.deps.store.listEvents(incident.id);
-		for (let i = events.length - 1; i >= 0; i--) {
-			const record = events[i];
-			if (record && record.event.status === "firing") {
-				return record.event;
-			}
+		const latest = events.findLast(
+			(record) => record?.event.status === "firing",
+		);
+		if (latest) {
+			return latest.event;
 		}
 		this.logger.warn("pipeline.no_firing_event_found", {
 			incidentId: incident.id,

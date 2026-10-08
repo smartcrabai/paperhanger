@@ -22,25 +22,20 @@
  */
 
 import type { Logger } from "../observability/logger";
-import type {
-	LogRecord,
-	MetricSeries,
-	TelemetryQuery,
-	TelemetrySource,
-	TraceRecord,
+import type { PrometheusTelemetryConfig } from "../config/schema";
+import {
+	computeStepSeconds,
+	parsePrometheusResponse,
+	type LogRecord,
+	type MetricSeries,
+	type PromQueryRangeResponse,
+	type TelemetryQuery,
+	type TelemetrySource,
+	type TraceRecord,
 } from "./types";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
-/** Cap on points returned by a single PromQL range query (matches greptimedb.ts). */
-const METRIC_MAX_POINTS = 200;
-
-export interface PrometheusSourceConfig {
-	url: string;
-	/** `username:password`, unencoded; base64-encoded internally (Basic auth). */
-	auth?: string;
-	/** Per-request timeout in milliseconds. Defaults to `DEFAULT_TIMEOUT_MS` (30s). */
-	timeoutMs?: number;
-}
+export type PrometheusSourceConfig = Omit<PrometheusTelemetryConfig, "source">;
 
 /** Thrown for any non-2xx / non-"success" Prometheus HTTP response. */
 export class PrometheusError extends Error {
@@ -51,43 +46,6 @@ export class PrometheusError extends Error {
 		this.name = "PrometheusError";
 		this.httpStatus = httpStatus;
 	}
-}
-
-function computeStepSeconds(
-	fromSec: number,
-	toSec: number,
-	maxPoints = METRIC_MAX_POINTS,
-): number {
-	const span = Math.max(1, toSec - fromSec);
-	return Math.max(1, Math.ceil(span / maxPoints));
-}
-
-interface PromSample {
-	metric?: Record<string, string>;
-	value?: [number, string];
-	values?: [number, string][];
-}
-
-interface PromQueryRangeResponse {
-	status: string;
-	data?: { resultType: string; result: PromSample[] };
-	error?: string;
-	errorType?: string;
-}
-
-function parsePrometheusResponse(
-	payload: PromQueryRangeResponse,
-): MetricSeries[] {
-	const result = payload.data?.result ?? [];
-	return result.map((sample) => {
-		const { __name__, ...labels } = sample.metric ?? {};
-		const raw = sample.values ?? (sample.value ? [sample.value] : []);
-		const points = raw.map(([ts, value]) => ({
-			timestamp: new Date(ts * 1000).toISOString(),
-			value: Number(value),
-		}));
-		return { name: __name__ ?? "", labels, points };
-	});
 }
 
 export class PrometheusSource implements TelemetrySource {

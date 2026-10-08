@@ -32,6 +32,7 @@
  */
 
 import type { Logger } from "../observability/logger";
+import type { TempoTelemetryConfig } from "../config/schema";
 import {
 	type LogRecord,
 	type MetricSeries,
@@ -39,6 +40,7 @@ import {
 	type TelemetryQuery,
 	type TelemetrySource,
 	type TraceRecord,
+	validateTraceId,
 } from "./types";
 
 const DEFAULT_TRACE_LIMIT = 100;
@@ -50,16 +52,7 @@ const DEFAULT_TIMEOUT_MS = 30_000;
  */
 const SLOW_SPAN_THRESHOLD_TRACEQL = "50ms";
 
-/** Trace IDs are lowercase hex strings; validated before embedding in a request path/list (matches greptimedb.ts). */
-const TRACE_ID_PATTERN = /^[0-9a-fA-F]+$/;
-
-export interface TempoSourceConfig {
-	url: string;
-	/** `username:password`, unencoded; base64-encoded internally (Basic auth). */
-	auth?: string;
-	/** Per-request timeout in milliseconds. Defaults to `DEFAULT_TIMEOUT_MS` (30s). */
-	timeoutMs?: number;
-}
+export type TempoSourceConfig = Omit<TempoTelemetryConfig, "source">;
 
 /** Thrown for any non-2xx Tempo HTTP response. */
 export class TempoError extends Error {
@@ -70,13 +63,6 @@ export class TempoError extends Error {
 		this.name = "TempoError";
 		this.httpStatus = httpStatus;
 	}
-}
-
-function validateTraceId(id: string): string {
-	if (!TRACE_ID_PATTERN.test(id)) {
-		throw new Error(`Invalid trace id (length=${id.length})`);
-	}
-	return id;
 }
 
 /** Escapes a value for a double-quoted TraceQL string literal. */

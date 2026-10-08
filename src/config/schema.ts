@@ -433,37 +433,15 @@ export const ConfigSchema = z.object({
 	 * is where paperhanger reads other services' telemetry from.
 	 */
 	observability: ObservabilitySchema.optional(),
-	collect: CollectSchema.default({
-		windowBeforeMinutes: 30,
-		windowAfterMinutes: 5,
-	}),
-	repos: ReposSchema.default({
-		attributeKeys: [],
-		mappings: [],
-		orgSearch: { enabled: false },
-		systemPrompts: {},
-	}),
-	agent: AgentSchema.default({
-		model: "anthropic/claude-sonnet-4-6",
-		concurrency: 2,
-		timeoutMinutes: 30,
-		cooldownHours: 24,
-		draftPr: false,
-		forbiddenPaths: [".github/workflows/**"],
-		hostPort: 8700,
-		maxDiffLines: 500,
-		maxFixAttempts: 3,
-	}),
+	collect: CollectSchema.prefault({}),
+	repos: ReposSchema.prefault({}),
+	agent: AgentSchema.prefault({}),
 	github: GitHubSchema,
 	notifiers: z.array(NotifierSchema).default([]),
 });
 
 export type Config = z.infer<typeof ConfigSchema>;
-export type StorageConfig = z.infer<typeof StorageSchema>;
-export type SourceConfig = z.infer<typeof SourceConfigSchema>;
-export type AgentConfig = z.infer<typeof AgentSchema>;
 export type NotifierConfig = z.infer<typeof NotifierSchema>;
-export type RepoMappingConfig = z.infer<typeof RepoMappingSchema>;
 export type TelemetryConfig = z.infer<typeof TelemetrySchema>;
 export type GreptimeDbTelemetryConfig = z.infer<
 	typeof GreptimeDbTelemetrySchema
@@ -489,4 +467,3 @@ export type MackerelTelemetryConfig = z.infer<typeof MackerelTelemetrySchema>;
 export type SignalSourceConfig = z.infer<typeof SignalSourceSchema>;
 export type CompositeTelemetryConfig = z.infer<typeof CompositeTelemetrySchema>;
 export type ObservabilityConfig = z.infer<typeof ObservabilitySchema>;
-export type ObservabilityLogsConfig = z.infer<typeof ObservabilityLogsSchema>;

@@ -6,9 +6,11 @@ import {
 	SimpleSpanProcessor,
 } from "@opentelemetry/sdk-trace-base";
 import { createLogger } from "../observability/logger";
+import { DiscordNotifier } from "./discord";
 import { SlackNotifier } from "./slack";
 import type { IncidentSnapshot, NotificationEvent } from "./types";
 import { NotifierResponseError } from "./types";
+import { WebhookNotifier } from "./webhook";
 
 function silentLogger() {
 	return createLogger({ sink: () => {} });
@@ -126,98 +128,56 @@ describe("SlackNotifier", () => {
 		);
 	});
 
-	test("truncates a report longer than Slack's 3000-character section limit", async () => {
-		const { fetchImpl, calls } = mockFetch(new Response("ok", { status: 200 }));
-		const notifier = new SlackNotifier(
-			{ type: "slack", webhookUrl: WEBHOOK_URL },
-			silentLogger(),
-			{ fetchImpl },
-		);
-		const longReport = "x".repeat(4000);
-		const event: NotificationEvent = {
-			kind: "report_only",
-			incident,
-			report: longReport,
-		};
+	test("truncates reports over Slack's 3000-character section limit", async () => {
+		for (const length of [3001, 4000]) {
+			const { fetchImpl, calls } = mockFetch(
+				new Response("ok", { status: 200 }),
+			);
+			const notifier = new SlackNotifier(
+				{ type: "slack", webhookUrl: WEBHOOK_URL },
+				silentLogger(),
+				{ fetchImpl },
+			);
+			const event: NotificationEvent = {
+				kind: "report_only",
+				incident,
+				report: "x".repeat(length),
+			};
 
-		await notifier.notify(event);
+			await notifier.notify(event);
 
-		const payload = calls[0]?.body as {
-			blocks: Array<Record<string, unknown>>;
-		};
-		const bodyBlock = payload.blocks[2] as { text: { text: string } };
-		expect(bodyBlock.text.text.length).toBeLessThanOrEqual(3000);
-		expect(bodyBlock.text.text).toContain("truncated");
+			const payload = calls[0]?.body as {
+				blocks: Array<Record<string, unknown>>;
+			};
+			const bodyBlock = payload.blocks[2] as { text: { text: string } };
+			expect(bodyBlock.text.text.length).toBeLessThanOrEqual(3000);
+			expect(bodyBlock.text.text).toContain("truncated");
+		}
 	});
 
-	test("passes a report of exactly 3000 characters through unmodified", async () => {
-		const { fetchImpl, calls } = mockFetch(new Response("ok", { status: 200 }));
-		const notifier = new SlackNotifier(
-			{ type: "slack", webhookUrl: WEBHOOK_URL },
-			silentLogger(),
-			{ fetchImpl },
-		);
+	test("passes reports at or under Slack's 3000-character limit unmodified", async () => {
 		const exactReport = "z".repeat(3000);
-		const event: NotificationEvent = {
-			kind: "report_only",
-			incident,
-			report: exactReport,
-		};
-
-		await notifier.notify(event);
-
-		const payload = calls[0]?.body as {
-			blocks: Array<Record<string, unknown>>;
-		};
-		const bodyBlock = payload.blocks[2] as { text: { text: string } };
-		expect(bodyBlock.text.text).toBe(exactReport);
-		expect(bodyBlock.text.text.length).toBe(3000);
-	});
-
-	test("truncates a report of 3001 characters (one over the limit)", async () => {
-		const { fetchImpl, calls } = mockFetch(new Response("ok", { status: 200 }));
-		const notifier = new SlackNotifier(
-			{ type: "slack", webhookUrl: WEBHOOK_URL },
-			silentLogger(),
-			{ fetchImpl },
-		);
-		const event: NotificationEvent = {
-			kind: "report_only",
-			incident,
-			report: "z".repeat(3001),
-		};
-
-		await notifier.notify(event);
-
-		const payload = calls[0]?.body as {
-			blocks: Array<Record<string, unknown>>;
-		};
-		const bodyBlock = payload.blocks[2] as { text: { text: string } };
-		expect(bodyBlock.text.text.length).toBeLessThanOrEqual(3000);
-		expect(bodyBlock.text.text).toContain("truncated");
-	});
-
-	test("does not truncate a report under the limit", async () => {
-		const { fetchImpl, calls } = mockFetch(new Response("ok", { status: 200 }));
-		const notifier = new SlackNotifier(
-			{ type: "slack", webhookUrl: WEBHOOK_URL },
-			silentLogger(),
-			{ fetchImpl },
-		);
 		const shortReport = "Root cause: config drift in the deployment manifest.";
-		const event: NotificationEvent = {
-			kind: "report_only",
-			incident,
-			report: shortReport,
-		};
+		for (const report of [exactReport, shortReport]) {
+			const { fetchImpl, calls } = mockFetch(
+				new Response("ok", { status: 200 }),
+			);
+			const notifier = new SlackNotifier(
+				{ type: "slack", webhookUrl: WEBHOOK_URL },
+				silentLogger(),
+				{ fetchImpl },
+			);
+			await notifier.notify({ kind: "report_only", incident, report });
 
-		await notifier.notify(event);
-
-		const payload = calls[0]?.body as {
-			blocks: Array<Record<string, unknown>>;
-		};
-		const bodyBlock = payload.blocks[2] as { text: { text: string } };
-		expect(bodyBlock.text.text).toBe(shortReport);
+			const payload = calls[0]?.body as {
+				blocks: Array<Record<string, unknown>>;
+			};
+			const bodyBlock = payload.blocks[2] as { text: { text: string } };
+			expect(bodyBlock.text.text).toBe(report);
+			if (report === exactReport) {
+				expect(bodyBlock.text.text.length).toBe(3000);
+			}
+		}
 	});
 
 	test("uses the reason as the body for failed and skipped events", async () => {
@@ -253,29 +213,6 @@ describe("SlackNotifier", () => {
 		).toBe("Cooldown window active for this fingerprint.");
 	});
 
-	test("throws NotifierResponseError and logs an excerpt on a non-2xx response", async () => {
-		const { fetchImpl } = mockFetch(
-			new Response("invalid_payload", { status: 400 }),
-		);
-		const lines: string[] = [];
-		const logger = createLogger({ sink: (line) => lines.push(line) });
-		const notifier = new SlackNotifier(
-			{ type: "slack", webhookUrl: WEBHOOK_URL },
-			logger,
-			{ fetchImpl },
-		);
-
-		await expect(
-			notifier.notify({ kind: "diagnosis_started", incident }),
-		).rejects.toThrow(NotifierResponseError);
-
-		expect(lines.length).toBe(1);
-		const entry = JSON.parse(lines[0] as string);
-		expect(entry.level).toBe("error");
-		expect(entry.status).toBe(400);
-		expect(entry.bodyExcerpt).toBe("invalid_payload");
-	});
-
 	test("threads the injected tracer into postJson, producing a notify.post span with component 'slack'", async () => {
 		const { fetchImpl } = mockFetch(new Response("ok", { status: 200 }));
 		const exporter = new InMemorySpanExporter();
@@ -295,5 +232,88 @@ describe("SlackNotifier", () => {
 		expect(spans[0]?.name).toBe("notify.post");
 		expect(spans[0]?.kind).toBe(SpanKind.CLIENT);
 		expect(spans[0]?.attributes["paperhanger.notify.component"]).toBe("slack");
+	});
+
+	test("throws NotifierResponseError and logs an excerpt on a non-2xx response", async () => {
+		type Logger = ReturnType<typeof createLogger>;
+		type Notifying = {
+			notify(event: NotificationEvent): Promise<void>;
+		};
+		const scenarios: Array<{
+			name: string;
+			status: number;
+			body: string;
+			event: NotificationEvent;
+			create: (logger: Logger, fetchImpl: typeof fetch) => Notifying;
+		}> = [
+			{
+				name: "slack",
+				status: 400,
+				body: "invalid_payload",
+				event: { kind: "diagnosis_started", incident },
+				create: (logger, fetchImpl) =>
+					new SlackNotifier(
+						{ type: "slack", webhookUrl: WEBHOOK_URL },
+						logger,
+						{ fetchImpl },
+					),
+			},
+			{
+				name: "discord",
+				status: 429,
+				body: "rate limited",
+				event: { kind: "diagnosis_started", incident },
+				create: (logger, fetchImpl) =>
+					new DiscordNotifier(
+						{
+							type: "discord",
+							webhookUrl: "https://discord.com/api/webhooks/123/abc",
+						},
+						logger,
+						{ fetchImpl },
+					),
+			},
+			{
+				name: "webhook",
+				status: 500,
+				body: "internal error",
+				event: { kind: "failed", incident, reason: "agent crashed" },
+				create: (logger, fetchImpl) =>
+					new WebhookNotifier(
+						{
+							type: "webhook",
+							url: "https://internal.example.com/hooks/paperhanger",
+						},
+						logger,
+						{ fetchImpl },
+					),
+			},
+		];
+
+		for (const scenario of scenarios) {
+			const { fetchImpl } = mockFetch(
+				new Response(scenario.body, { status: scenario.status }),
+			);
+			const lines: string[] = [];
+			const notifier = scenario.create(
+				createLogger({ sink: (line) => lines.push(line) }),
+				fetchImpl,
+			);
+
+			await expect(notifier.notify(scenario.event)).rejects.toThrow(
+				NotifierResponseError,
+			);
+
+			expect(lines).toHaveLength(1);
+			const entry = JSON.parse(lines[0] as string);
+			expect(entry.status).toBe(scenario.status);
+			expect(entry.bodyExcerpt).toBe(scenario.body);
+			if (scenario.name === "slack") {
+				expect(entry.level).toBe("error");
+			}
+			if (scenario.name === "webhook") {
+				expect(entry.notifier).toBe("webhook");
+			}
+		}
 	});
 });
