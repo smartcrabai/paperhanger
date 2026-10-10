@@ -92,7 +92,7 @@ services:
   # observable without a real chat webhook. A 10-line Bun script, not a
   # dedicated image -- run directly off the shared `oven/bun` base.
   webhook-sink:
-    image: oven/bun:1.4@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895
+    image: oven/bun:1.4@sha256:ec06c3b6cea04192ae6770c434f668ca41d343ad19fa6472216c7b48be39c598
     working_dir: /sink
     volumes:
       - ./e2e/webhook-sink.ts:/sink/webhook-sink.ts:ro

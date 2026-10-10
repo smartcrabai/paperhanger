@@ -45,7 +45,7 @@
 # `cloneUrlWithToken`), which requires a real `git` binary in PATH.
 
 # ---- Stage 1: main app dependencies (Bun) ----------------------------------
-FROM oven/bun:1.4@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895 AS app-deps
+FROM oven/bun:1.4@sha256:ec06c3b6cea04192ae6770c434f668ca41d343ad19fa6472216c7b48be39c598 AS app-deps
 WORKDIR /app
 COPY package.json bun.lock ./
 RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \
@@ -57,7 +57,7 @@ RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \
 #
 # The agent-host build itself stays in a Bun-based stage; only the final
 # runtime copy needs Node.
-FROM oven/bun:1.4@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895 AS agent-host-build
+FROM oven/bun:1.4@sha256:ec06c3b6cea04192ae6770c434f668ca41d343ad19fa6472216c7b48be39c598 AS agent-host-build
 WORKDIR /agent-host
 COPY agent-host/package.json agent-host/bun.lock ./
 RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \
@@ -74,7 +74,7 @@ RUN --mount=type=cache,target=/root/.bun/install/cache,sharing=locked \
 	rm -rf node_modules && bun install --production --frozen-lockfile
 
 # ---- Stage 3: runtime -------------------------------------------------------
-FROM oven/bun:1.4@sha256:9114c058aeae42162ee16dd5084b95fe9473970bb6bcb5b232ab1630f0546895 AS runtime
+FROM oven/bun:1.4@sha256:ec06c3b6cea04192ae6770c434f668ca41d343ad19fa6472216c7b48be39c598 AS runtime
 WORKDIR /app
 
 # Node.js 24.x (for `node:sqlite`, which needs >=22.19) + git (for cloning
