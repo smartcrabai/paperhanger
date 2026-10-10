@@ -721,3 +721,8 @@ The agent-host (`agent-host/`) is a separate Node-only package with its own
   crash in the narrow window before telemetry collection finishes (before
   its checkpoint is saved); once a checkpoint exists, resuming past it skips
   re-firing that notification entirely.
+
+## Support
+
+If you find paperhanger useful, consider [sponsoring smartcrabai](https://github.com/sponsors/smartcrabai)
+to support its development and maintenance.
