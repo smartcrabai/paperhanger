@@ -1,10 +1,10 @@
 import { context, SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
-	BasicTracerProvider,
+	TracerProvider,
 	InMemorySpanExporter,
 	SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+} from "@opentelemetry/sdk-trace";
 import { describe, expect, test } from "bun:test";
 import { createLogger } from "../observability/logger";
 import { SigNozError, SigNozSource } from "./signoz";
@@ -14,8 +14,8 @@ context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
 
 function setupTracing() {
 	const exporter = new InMemorySpanExporter();
-	const provider = new BasicTracerProvider({
-		spanProcessors: [new SimpleSpanProcessor(exporter)],
+	const provider = new TracerProvider({
+		spanProcessors: [new SimpleSpanProcessor({ exporter: exporter })],
 	});
 	return { tracer: provider.getTracer("test"), exporter };
 }

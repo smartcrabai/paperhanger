@@ -20,8 +20,14 @@
  * warning; the stdout line is unaffected.
  */
 
-import { context, type Context, trace, TraceFlags } from "@opentelemetry/api";
-import { type LogAttributes, SeverityNumber } from "@opentelemetry/api-logs";
+import {
+	type Attributes,
+	context,
+	type Context,
+	SeverityNumber,
+	trace,
+	TraceFlags,
+} from "@opentelemetry/api";
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-proto";
 import { resourceFromAttributes } from "@opentelemetry/resources";
 import {
@@ -160,7 +166,7 @@ export function createLogExport(
 				// are not valid OTel AnyValues (e.g. raw Error instances) are
 				// dropped by the SDK's attribute validation with a diag warning
 				// (fail-soft), leaving the stdout line unaffected.
-				attributes: rest as LogAttributes,
+				attributes: rest as Attributes,
 				context: logRecordContext(entry),
 			});
 		},

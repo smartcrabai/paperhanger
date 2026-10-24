@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { context, SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
-	BasicTracerProvider,
+	TracerProvider,
 	InMemorySpanExporter,
 	SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+} from "@opentelemetry/sdk-trace";
 import { createLogger } from "../observability/logger";
 import { postJson } from "./http";
 import { NotifierResponseError, NotifierTimeoutError } from "./types";
@@ -172,8 +172,8 @@ describe("postJson - timeout", () => {
 describe("postJson - notify.post span", () => {
 	function testTracerProvider() {
 		const exporter = new InMemorySpanExporter();
-		const provider = new BasicTracerProvider({
-			spanProcessors: [new SimpleSpanProcessor(exporter)],
+		const provider = new TracerProvider({
+			spanProcessors: [new SimpleSpanProcessor({ exporter: exporter })],
 		});
 		return { tracer: provider.getTracer("test"), exporter };
 	}
@@ -327,8 +327,8 @@ describe("postJson - notify.post span", () => {
 describe("postJson - log/span correlation", () => {
 	function testTracerProvider() {
 		const exporter = new InMemorySpanExporter();
-		const provider = new BasicTracerProvider({
-			spanProcessors: [new SimpleSpanProcessor(exporter)],
+		const provider = new TracerProvider({
+			spanProcessors: [new SimpleSpanProcessor({ exporter: exporter })],
 		});
 		return { tracer: provider.getTracer("test"), exporter };
 	}

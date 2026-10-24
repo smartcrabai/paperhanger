@@ -3,10 +3,10 @@ import type { Tracer } from "@opentelemetry/api";
 import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
-	BasicTracerProvider,
+	TracerProvider,
 	InMemorySpanExporter,
 	SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+} from "@opentelemetry/sdk-trace";
 import type { IncidentManager } from "../core/incident-manager";
 import type {
 	CommonSetupScript,
@@ -1836,12 +1836,12 @@ describe("ingest server", () => {
 
 	describe("tracing (design doc section 5/6, hermetic pattern from section 10)", () => {
 		let exporter: InMemorySpanExporter;
-		let provider: BasicTracerProvider;
+		let provider: TracerProvider;
 
 		beforeEach(() => {
 			exporter = new InMemorySpanExporter();
-			provider = new BasicTracerProvider({
-				spanProcessors: [new SimpleSpanProcessor(exporter)],
+			provider = new TracerProvider({
+				spanProcessors: [new SimpleSpanProcessor({ exporter: exporter })],
 			});
 		});
 

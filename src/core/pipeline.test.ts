@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { context, SpanStatusCode } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
-	BasicTracerProvider,
+	TracerProvider,
 	InMemorySpanExporter,
 	SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+} from "@opentelemetry/sdk-trace";
 import type { FixAgentRunResult } from "../agent/runner";
 import { createLogger } from "../observability/logger";
 import type { ResolvedRepo, ResolveRepoInput } from "../repo/resolver";
@@ -39,8 +39,8 @@ context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
 /** Fresh in-memory tracer + exporter pair for a single test's span assertions. */
 function newTracing() {
 	const exporter = new InMemorySpanExporter();
-	const provider = new BasicTracerProvider({
-		spanProcessors: [new SimpleSpanProcessor(exporter)],
+	const provider = new TracerProvider({
+		spanProcessors: [new SimpleSpanProcessor({ exporter: exporter })],
 	});
 	return { tracer: provider.getTracer("test"), exporter };
 }

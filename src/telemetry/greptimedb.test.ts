@@ -1,10 +1,10 @@
 import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
-	BasicTracerProvider,
+	TracerProvider,
 	InMemorySpanExporter,
 	SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+} from "@opentelemetry/sdk-trace";
 import { describe, expect, test } from "bun:test";
 import { createLogger } from "../observability/logger";
 import {
@@ -24,8 +24,8 @@ context.setGlobalContextManager(new AsyncLocalStorageContextManager().enable());
 /** Hermetic span-recording tracer for assertions (see design doc section 10). */
 function setupTracing() {
 	const exporter = new InMemorySpanExporter();
-	const provider = new BasicTracerProvider({
-		spanProcessors: [new SimpleSpanProcessor(exporter)],
+	const provider = new TracerProvider({
+		spanProcessors: [new SimpleSpanProcessor({ exporter: exporter })],
 	});
 	return { tracer: provider.getTracer("test"), exporter };
 }
