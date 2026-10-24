@@ -9,8 +9,13 @@
  * OTel SDK + `-otlp-proto` exporters are required.
  */
 
-import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
-import { SeverityNumber } from "@opentelemetry/api-logs";
+import {
+	context,
+	SeverityNumber,
+	SpanKind,
+	SpanStatusCode,
+	trace,
+} from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { OTLPLogExporter } from "@opentelemetry/exporter-logs-otlp-proto";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
@@ -19,10 +24,7 @@ import {
 	LoggerProvider,
 	SimpleLogRecordProcessor,
 } from "@opentelemetry/sdk-logs";
-import {
-	BasicTracerProvider,
-	SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+import { TracerProvider, SimpleSpanProcessor } from "@opentelemetry/sdk-trace";
 
 export interface SeedResult {
 	traceId: string;
@@ -67,13 +69,9 @@ export async function seedTelemetry(
 			"x-greptime-db-name": "public",
 		},
 	});
-	const tracerProvider = new BasicTracerProvider({
+	const tracerProvider = new TracerProvider({
 		resource,
-		// Note: @opentelemetry/sdk-trace-base@2.x's SimpleSpanProcessor is a
-		// compat shim over the new @opentelemetry/sdk-trace package and keeps
-		// the old positional-exporter constructor (unlike sdk-logs's
-		// SimpleLogRecordProcessor below, which takes an options object).
-		spanProcessors: [new SimpleSpanProcessor(traceExporter)],
+		spanProcessors: [new SimpleSpanProcessor({ exporter: traceExporter })],
 	});
 	const tracer = tracerProvider.getTracer("paperhanger-integration-seed");
 

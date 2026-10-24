@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { context, SpanKind, SpanStatusCode } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
-	BasicTracerProvider,
+	TracerProvider,
 	InMemorySpanExporter,
 	SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+} from "@opentelemetry/sdk-trace";
 import type { Incident, IncidentEvent } from "../core/types";
 import { createLogger } from "../observability/logger";
 import type {
@@ -505,8 +505,8 @@ describe("FixAgentRunner guardrails and timeout", () => {
 describe("FixAgentRunner instrumentation", () => {
 	test("marks the invoke_workflow span ERROR when client creation fails", async () => {
 		const exporter = new InMemorySpanExporter();
-		const provider = new BasicTracerProvider({
-			spanProcessors: [new SimpleSpanProcessor(exporter)],
+		const provider = new TracerProvider({
+			spanProcessors: [new SimpleSpanProcessor({ exporter: exporter })],
 		});
 		const { store, incident } = await createStoreWithIncident();
 		const runner = new FixAgentRunner({

@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { context, diag, isSpanContextValid, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
-	BasicTracerProvider,
+	TracerProvider,
 	InMemorySpanExporter,
 	SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+} from "@opentelemetry/sdk-trace";
 import type { ObservabilityConfig } from "../config/schema";
 import { createLogger } from "./logger";
 import { createTracing } from "./tracing";
@@ -217,8 +217,8 @@ describe("createTracing", () => {
 		// after an awaited macrotask must still land under the parent's trace.
 		test("a child span started after `await Bun.sleep(...)` inherits the parent's traceId", async () => {
 			const exporter = new InMemorySpanExporter();
-			const provider = new BasicTracerProvider({
-				spanProcessors: [new SimpleSpanProcessor(exporter)],
+			const provider = new TracerProvider({
+				spanProcessors: [new SimpleSpanProcessor({ exporter: exporter })],
 			});
 			const tracer = provider.getTracer("macrotask-propagation-test");
 

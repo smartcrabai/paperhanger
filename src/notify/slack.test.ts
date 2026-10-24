@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { SpanKind } from "@opentelemetry/api";
 import {
-	BasicTracerProvider,
+	TracerProvider,
 	InMemorySpanExporter,
 	SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+} from "@opentelemetry/sdk-trace";
 import { createLogger } from "../observability/logger";
 import { DiscordNotifier } from "./discord";
 import { SlackNotifier } from "./slack";
@@ -216,8 +216,8 @@ describe("SlackNotifier", () => {
 	test("threads the injected tracer into postJson, producing a notify.post span with component 'slack'", async () => {
 		const { fetchImpl } = mockFetch(new Response("ok", { status: 200 }));
 		const exporter = new InMemorySpanExporter();
-		const provider = new BasicTracerProvider({
-			spanProcessors: [new SimpleSpanProcessor(exporter)],
+		const provider = new TracerProvider({
+			spanProcessors: [new SimpleSpanProcessor({ exporter: exporter })],
 		});
 		const notifier = new SlackNotifier(
 			{ type: "slack", webhookUrl: WEBHOOK_URL },

@@ -3,10 +3,10 @@ import { createPrivateKey, generateKeyPairSync } from "node:crypto";
 import { context, SpanKind, SpanStatusCode, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
-	BasicTracerProvider,
+	TracerProvider,
 	InMemorySpanExporter,
 	SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+} from "@opentelemetry/sdk-trace";
 import { createLogger } from "../observability/logger";
 import { GitHubApiError, GitHubAppClient } from "./github";
 
@@ -971,8 +971,8 @@ describe("GitHubAppClient - cloneUrlWithToken", () => {
 describe("GitHubAppClient - github.request span", () => {
 	function testTracerProvider() {
 		const exporter = new InMemorySpanExporter();
-		const provider = new BasicTracerProvider({
-			spanProcessors: [new SimpleSpanProcessor(exporter)],
+		const provider = new TracerProvider({
+			spanProcessors: [new SimpleSpanProcessor({ exporter: exporter })],
 		});
 		return { tracer: provider.getTracer("test"), exporter };
 	}

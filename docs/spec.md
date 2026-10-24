@@ -327,7 +327,7 @@ notifiers:
 - 再起動時のインシデント再開(§3.2): チェックポイントに基づき最後に完了したステージから再開するため、テレメトリ収集・repo 解決が完了済みの区間でのクラッシュはその再実行コストを避けられる。一方でエージェント実行(`diagnosing`/`fixing`)自体は再開できないため、その区間でクラッシュを繰り返す(クラッシュループする)インシデントは、そのたびにエージェント実行全体(タイムアウト・修正試行回数の予算を含む)を新規に再実行する。これはチェックポイント導入前から変わらない挙動であり、今回の変更で悪化するものではないが、運用上の再実行コストの上限がクラッシュ頻度に依存する点は変わらない
 - エンドポイント: `/healthz`(liveness)、`/readyz`(DB 接続確認)、`GET /incidents` / `GET /incidents/:id` / `GET /incidents/:id/events`(状態確認用。いずれも `server.apiToken` による Bearer/X-Api-Token 認証必須、未設定時は 401)。`GET /incidents` は `?limit=` クエリパラメータで件数を指定可能(デフォルト 100、上限 500)。ダッシュボード(§3.11)の `/repo-definitions` 系ルートも同じ認証ゲートを通る
 - ログ: 構造化 JSON。`observability` 設定時はアクティブな span の `traceId`/`spanId` をログ行に付与し相関可能にする
-- トレース: `observability` 設定時、paperhanger 自身のスパンを OTLP/HTTP でエクスポート(`@opentelemetry/sdk-trace-base` + `exporter-trace-otlp-proto`。§3.9 参照)
+- トレース: `observability` 設定時、paperhanger 自身のスパンを OTLP/HTTP でエクスポート(`@opentelemetry/sdk-trace` + `exporter-trace-otlp-proto`。§3.9 参照)
 - OTel **ログ** export: `observability.logs` 設定時、paperhanger 自身のログ行を OTLP/HTTP でエクスポート(`@opentelemetry/sdk-logs` + `exporter-logs-otlp-proto`。§3.9 参照)。stdout の JSON Lines が引き続き主たる出力先で、OTel export は追加のシンクという位置づけ。ログ行が持つ `traceId`/`spanId` は OTel ログレコードの span context にマッピングされ、バックエンド側でトレースと相関する。エクスポータの失敗はログ出力自体をブロックせず、プロセスも落とさない(fail-soft)
 - ローカル開発: `compose.yml` で paperhanger + GreptimeDB + Grafana を起動し E2E 検証できるようにする
 

@@ -1,16 +1,15 @@
 import { describe, expect, test } from "bun:test";
-import { context, trace, TraceFlags } from "@opentelemetry/api";
-import { SeverityNumber } from "@opentelemetry/api-logs";
+import { context, SeverityNumber, trace, TraceFlags } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
 	type LogRecordExporter,
 	type ReadableLogRecord,
 } from "@opentelemetry/sdk-logs";
 import {
-	BasicTracerProvider,
+	TracerProvider,
 	InMemorySpanExporter,
 	SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+} from "@opentelemetry/sdk-trace";
 import { type ExportResult, ExportResultCode } from "@opentelemetry/core";
 import type { ObservabilityConfig } from "../config/schema";
 import { createLogExport } from "./log-export";
@@ -147,8 +146,8 @@ describe("createLogExport", () => {
 			const logger = createLogger({ sink, recordSink: logExport.recordSink });
 
 			const spanExporter = new InMemorySpanExporter();
-			const tracerProvider = new BasicTracerProvider({
-				spanProcessors: [new SimpleSpanProcessor(spanExporter)],
+			const tracerProvider = new TracerProvider({
+				spanProcessors: [new SimpleSpanProcessor({ exporter: spanExporter })],
 			});
 			const tracer = tracerProvider.getTracer("log-export-correlation-test");
 			const span = tracer.startSpan("test-span");

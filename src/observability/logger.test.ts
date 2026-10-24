@@ -2,10 +2,10 @@ import { describe, expect, test } from "bun:test";
 import { context, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import {
-	BasicTracerProvider,
+	TracerProvider,
 	InMemorySpanExporter,
 	SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+} from "@opentelemetry/sdk-trace";
 import { createLogger } from "./logger";
 
 // Registered once at module scope so `context.with(...)` below reflects in
@@ -98,8 +98,8 @@ describe("createLogger", () => {
 		const { lines, sink } = collectLines();
 		const logger = createLogger({ sink });
 		const exporter = new InMemorySpanExporter();
-		const provider = new BasicTracerProvider({
-			spanProcessors: [new SimpleSpanProcessor(exporter)],
+		const provider = new TracerProvider({
+			spanProcessors: [new SimpleSpanProcessor({ exporter: exporter })],
 		});
 		const tracer = provider.getTracer("logger-correlation-test");
 		const span = tracer.startSpan("test-span");
@@ -119,8 +119,8 @@ describe("createLogger", () => {
 		const { lines, sink } = collectLines();
 		const logger = createLogger({ sink });
 		const exporter = new InMemorySpanExporter();
-		const provider = new BasicTracerProvider({
-			spanProcessors: [new SimpleSpanProcessor(exporter)],
+		const provider = new TracerProvider({
+			spanProcessors: [new SimpleSpanProcessor({ exporter: exporter })],
 		});
 		const tracer = provider.getTracer("logger-correlation-override-test");
 		const span = tracer.startSpan("test-span");

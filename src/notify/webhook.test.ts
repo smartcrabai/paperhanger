@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { SpanKind } from "@opentelemetry/api";
 import {
-	BasicTracerProvider,
+	TracerProvider,
 	InMemorySpanExporter,
 	SimpleSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+} from "@opentelemetry/sdk-trace";
 import { createLogger } from "../observability/logger";
 import type { IncidentSnapshot, NotificationEvent } from "./types";
 import { WebhookNotifier } from "./webhook";
@@ -96,8 +96,8 @@ describe("WebhookNotifier", () => {
 	test("threads the injected tracer into postJson, producing a notify.post span with component 'webhook'", async () => {
 		const { fetchImpl } = mockFetch(new Response("ok", { status: 200 }));
 		const exporter = new InMemorySpanExporter();
-		const provider = new BasicTracerProvider({
-			spanProcessors: [new SimpleSpanProcessor(exporter)],
+		const provider = new TracerProvider({
+			spanProcessors: [new SimpleSpanProcessor({ exporter: exporter })],
 		});
 		const notifier = new WebhookNotifier(
 			{ type: "webhook", url: WEBHOOK_URL },

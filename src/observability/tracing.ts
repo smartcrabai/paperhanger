@@ -21,10 +21,7 @@ import {
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
 import { resourceFromAttributes } from "@opentelemetry/resources";
-import {
-	BasicTracerProvider,
-	BatchSpanProcessor,
-} from "@opentelemetry/sdk-trace-base";
+import { TracerProvider, BatchSpanProcessor } from "@opentelemetry/sdk-trace";
 import type { ObservabilityConfig } from "../config/schema";
 import type { Logger } from "./logger";
 import { withTimeout } from "./timeout";
@@ -119,9 +116,9 @@ export function createTracing(
 		// timeout inside the shutdown budget.
 		timeoutMillis: OTLP_EXPORTER_TIMEOUT_MS,
 	});
-	const provider = new BasicTracerProvider({
+	const provider = new TracerProvider({
 		resource: resourceFromAttributes({ "service.name": config.serviceName }),
-		spanProcessors: [new BatchSpanProcessor(exporter)],
+		spanProcessors: [new BatchSpanProcessor({ exporter })],
 	});
 
 	// The provider is deliberately never installed as the global tracer
