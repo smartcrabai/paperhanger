@@ -15,7 +15,7 @@
 	},
 	"devDependencies": {
 		"@biomejs/biome": "2.5.15",
-		"@happy-dom/global-registrator": "20.14.6",
+		"@happy-dom/global-registrator": "21.0.4",
 		"@opentelemetry/core": "3.0.0",
 		"@testing-library/dom": "10.4.2",
 		"@testing-library/jest-dom": "7.0.1",
