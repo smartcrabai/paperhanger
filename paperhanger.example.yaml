@@ -37,7 +37,6 @@ sources:
   # sources" for the full setup.
   # sentry:
   #   secret: ${SENTRY_WEBHOOK_SECRET}
-
 # Discriminated union on `source` (like `storage`/`notifiers` above); exactly
 # one of "greptimedb", "loki", "tempo", "prometheus", "clickstack", "signoz",
 # "openobserve", "datadog", "newrelic", "grafana", "zabbix", "mackerel",
