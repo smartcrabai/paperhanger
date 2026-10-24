@@ -2,7 +2,7 @@ name: PR Auto-merge
 
 on:
   pull_request:
-    branches: [ main ]
+    branches: [main]
 
 jobs:
   test:
@@ -47,7 +47,6 @@ jobs:
         shell: bash
         run: bun run lint
 
-
   # `bun test` runs against the repo checkout, where `agent-host/src` exists, so it
   # can never observe a file that is missing from the built image. This job is the
   # only thing that actually starts the container: a real
@@ -63,7 +62,6 @@ jobs:
       - name: Run container e2e smoke test
         shell: bash
         run: bash scripts/e2e-smoke.sh
-
 
   automerge:
     runs-on: ubuntu-latest
