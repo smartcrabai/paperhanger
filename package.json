@@ -24,7 +24,7 @@
 		"@types/bun": "latest",
 		"@types/react": "19.3.0",
 		"@types/react-dom": "19.3.0",
-		"oxlint": "1.89.0",
+		"oxlint": "1.90.0",
 		"testcontainers": "12.2.1"
 	},
 	"peerDependencies": {
