@@ -14,7 +14,7 @@
 		"lint:fix": "oxlint --fix ."
 	},
 	"devDependencies": {
-		"@biomejs/biome": "2.6.5",
+		"@biomejs/biome": "2.6.6",
 		"@happy-dom/global-registrator": "20.14.6",
 		"@opentelemetry/core": "3.1.0",
 		"@testing-library/dom": "10.4.2",
@@ -24,7 +24,7 @@
 		"@types/bun": "latest",
 		"@types/react": "19.3.0",
 		"@types/react-dom": "19.3.0",
-		"oxlint": "1.91.0",
+		"oxlint": "1.92.0",
 		"testcontainers": "12.2.1"
 	},
 	"peerDependencies": {
