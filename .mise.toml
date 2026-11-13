@@ -46,7 +46,7 @@ idiomatic_version_file_enable_tools = [
 
 [tools]
 python = "3.15.2"
-go = "1.27.3"
+go = "1.27.4"
 # `profile = "minimal"` (skips clippy/rustfmt/rust-docs, keeping just
 # rustc/cargo/rust-std): rustup's *default* profile fails outright in this
 # environment with "Invalid cross-device link" while rolling back a
@@ -63,7 +63,7 @@ go = "1.27.3"
 rust = { version = "1.99.1", profile = "minimal" }
 java = "26.0.1"
 maven = "3.9.16"
-gradle = "9.9.0"
+gradle = "9.9.1"
 ruby = "4.0.9"
 php = "8.5.12"
 dotnet = "10.0.302"
