@@ -25,7 +25,7 @@
 		"@types/react": "19.3.0",
 		"@types/react-dom": "19.3.0",
 		"oxlint": "1.94.0",
-		"testcontainers": "12.2.1"
+		"testcontainers": "12.2.2"
 	},
 	"peerDependencies": {
 		"typescript": "^5.0.0 || ^6.0.0 || ^7.0.0"
