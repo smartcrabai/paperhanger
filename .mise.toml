@@ -63,7 +63,7 @@ go = "1.27.4"
 rust = { version = "1.100.0", profile = "minimal" }
 java = "26.0.1"
 maven = "3.9.16"
-gradle = "9.9.1"
+gradle = "9.9.2"
 ruby = "4.0.10"
 php = "8.6.0"
 dotnet = "10.0.302"
